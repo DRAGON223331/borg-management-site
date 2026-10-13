@@ -1,3 +1,4 @@
+
 {
   "name": "edaret-el-borg-vercel",
   "version": "2.0.0",
@@ -7,13 +8,16 @@
     "build": "node build.js"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": "22.x"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.2",
     "@vercel/blob": "^2.3.0"
   },
   "devDependencies": {
-    "esbuild": "^0.25.0"
+    "esbuild": "0.25.12"
   }
 }
