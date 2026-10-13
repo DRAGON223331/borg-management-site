@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const DISCORD_API = 'https://discord.com/api/v10';
 const LEAVE_REQUEST_CHANNEL_ID = '1556945732957765722';
+const LEAVE_NOTICE_CHANNEL_ID = process.env.LEAVE_NOTICE_CHANNEL_ID || '1558102515885678734'; // accepted/rejected notices go here
 const MANAGER_IDS = new Set((process.env.MANAGER_IDS || '1286035404323164172,1525203473262706821,848304089057460254,1475483362536980552').split(',').map((x) => x.trim()).filter(Boolean));
 const MANAGEMENT_MAIN_ROLE_ID = process.env.MANAGEMENT_MAIN_ROLE_ID || '1538623033806168135';
 const MANAGEMENT_STAFF_ROLE_ID = process.env.MANAGEMENT_STAFF_ROLE_ID || '1559628523809804288';
@@ -102,6 +103,16 @@ function buildLeaveEmbed(item, status, reviewerId, note) {
   if (item.avatar_url) embed.thumbnail = { url: item.avatar_url };
   return embed;
 }
+function buildNoticeEmbed(item, status, reviewerId, note) {
+  const approved = status === 'approved';
+  const fields = [
+    { name: '👤 العضو', value: `<@${item.user_id}>`, inline: true },
+    { name: '🛡️ المراجع', value: reviewerId ? `<@${reviewerId}>` : 'الإدارة', inline: true },
+    { name: '📅 الفترة', value: `${String(item.start_date).slice(0, 10)} ← ${String(item.end_date).slice(0, 10)}`, inline: false },
+  ];
+  if (note) fields.push({ name: '📝 السبب', value: String(note).slice(0, 1024), inline: false });
+  return { title: approved ? `✅ تم قبول طلب الإجازة #${Number(item.id)}` : `❌ تم رفض طلب الإجازة #${Number(item.id)}`, color: approved ? 0x22c55e : 0xef4444, fields, timestamp: new Date().toISOString(), footer: { text: 'إدارة البرج • طلبات الإجازة' } };
+}
 function isAdministrator(permissionBits) {
   try { return (BigInt(permissionBits || '0') & 8n) === 8n; } catch { return false; }
 }
@@ -153,10 +164,11 @@ async function handler(req, res) {
   console.log('[interactions] received type', interaction.type, interaction.data?.custom_id || interaction.data?.name || '');
   if (interaction.type === 1) return send(res, { type: 1 }); // Discord PING verification
   if (interaction.type === 2) return handleCommand(interaction, res);
-  if (interaction.type !== 3) return send(res, { type: 4, data: { content: 'نوع التفاعل غير مدعوم.', flags: 64 } });
+  if (interaction.type !== 3 && interaction.type !== 5) return send(res, { type: 4, data: { content: 'نوع التفاعل غير مدعوم.', flags: 64 } });
 
   const customId = String(interaction.data?.custom_id || '');
-  const match = customId.match(/^leave:(approve|reject):(\d+)$/);
+  const isModal = interaction.type === 5;
+  const match = isModal ? customId.match(/^leave:(rejectmodal):(\d+)$/) : customId.match(/^leave:(approve|reject):(\d+)$/);
   if (!match) return send(res, { type: 4, data: { content: 'الزر ده مش مدعوم.', flags: 64 } });
   if (String(interaction.channel_id || '') !== LEAVE_REQUEST_CHANNEL_ID) return send(res, { type: 4, data: { content: 'الأزرار دي شغالة في روم طلبات الإجازات فقط.', flags: 64 } });
   const reviewerId = String(interaction.member?.user?.id || interaction.user?.id || '');
@@ -170,7 +182,14 @@ async function handler(req, res) {
   }
   if (!authorized) return send(res, { type: 4, data: { content: 'مراجعة طلبات الإجازة للمسؤولين فقط.', flags: 64 } });
   const requestId = Number(match[2]);
+
+  // Reject button: open a small form so the reviewer can (optionally) write the reason.
+  if (!isModal && match[1] === 'reject') {
+    return send(res, { type: 9, data: { custom_id: `leave:rejectmodal:${requestId}`, title: `رفض طلب الإجازة #${requestId}`, components: [{ type: 1, components: [{ type: 4, custom_id: 'reason', label: 'سبب الرفض (اختياري)', style: 2, required: false, max_length: 400, placeholder: 'اكتب السبب هنا أو اتركه فارغًا' }] }] } });
+  }
+
   const requestedStatus = match[1] === 'approve' ? 'approved' : 'rejected';
+  const note = isModal ? cleanText((interaction.data?.components || []).flatMap((row) => row.components || []).find((c) => c.custom_id === 'reason')?.value, 400) : '';
   const messageId = String(interaction.message?.id || '');
   if (!messageId) return send(res, { type: 4, data: { content: 'تعذر تحديد رسالة الطلب.', flags: 64 } });
 
@@ -199,21 +218,26 @@ async function handler(req, res) {
       reply({ type: 4, data: { content: 'رسالة الطلب لا تطابق الطلب المسجل.', flags: 64 } });
       return;
     }
+    let changed = false;
     if (item.status === 'pending') {
-      const updated = await sql`UPDATE leave_requests SET status = ${requestedStatus}, review_note = '', reviewed_by = ${reviewerId}, reviewed_at = NOW() WHERE id = ${requestId} AND status = 'pending' RETURNING *`;
-      if (updated.length) item = updated[0];
+      const updated = await sql`UPDATE leave_requests SET status = ${requestedStatus}, review_note = ${note}, reviewed_by = ${reviewerId}, reviewed_at = NOW() WHERE id = ${requestId} AND status = 'pending' RETURNING *`;
+      if (updated.length) { item = updated[0]; changed = true; }
       else {
         const current = await sql`SELECT * FROM leave_requests WHERE id = ${requestId} LIMIT 1`;
         if (current.length) item = current[0];
       }
     }
     const finalStatus = item.status === 'pending' ? requestedStatus : item.status;
-    if (finalStatus === 'approved') {
-      // Give the roles now, but never let it eat the 3s window; the daily job / site retries unfinished ones.
-      try { await Promise.race([require('./_lib/leave-roles.js').syncLeaveRoles({ sql, token: BOT_TOKEN }), new Promise((resolve) => setTimeout(resolve, 1200))]); } catch (error) { console.error('[leave roles sync]', cleanText(error?.message || error, 200)); }
-    }
     const finalReviewer = item.reviewed_by || reviewerId;
-    const data = { embeds: [buildLeaveEmbed(item, finalStatus, finalReviewer, item.review_note || '')], components: [], allowed_mentions: { parse: [] } };
+    const finalNote = item.review_note || '';
+    // Side jobs (never allowed to eat the 3s window): notice in the review room + roles for approved leaves.
+    const side = [];
+    if (changed) side.push(discordApi(`/channels/${LEAVE_NOTICE_CHANNEL_ID}/messages`, { method: 'POST', body: JSON.stringify({ embeds: [buildNoticeEmbed(item, finalStatus, finalReviewer, finalNote)], allowed_mentions: { parse: [] } }) }));
+    if (finalStatus === 'approved') side.push(require('./_lib/leave-roles.js').syncLeaveRoles({ sql, token: BOT_TOKEN }));
+    if (side.length) {
+      await Promise.race([Promise.allSettled(side).then((results) => results.forEach((r) => { if (r.status === 'rejected') console.error('[leave side job]', cleanText(r.reason?.message || r.reason, 200)); })), new Promise((resolve) => setTimeout(resolve, 1300))]);
+    }
+    const data = { embeds: [buildLeaveEmbed(item, finalStatus, finalReviewer, finalNote)], components: [], allowed_mentions: { parse: [] } };
     if (!responded) { reply({ type: 7, data }); return; }
     // Already acked with type 6 (slow path): edit the message through the bot instead.
     await discordApi(`/channels/${LEAVE_REQUEST_CHANNEL_ID}/messages/${messageId}`, { method: 'PATCH', body: JSON.stringify(data) });

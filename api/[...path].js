@@ -959,7 +959,19 @@ async function handleApi(parts, req, res) {
       } catch (error) { console.error('[leave original message update]', cleanText(error.message, 180)); }
     }
     try {
-      await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, { title: status === 'approved' ? `✅ تمت الموافقة على طلب الإجازة #${id}` : `❌ تم رفض طلب الإجازة #${id}`, description: `العضو: <@${item.user_id}>\nالفترة: ${String(item.start_date).slice(0,10)} — ${String(item.end_date).slice(0,10)}\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}`, color: status === 'approved' ? 0x22c55e : 0xef4444, timestamp: new Date().toISOString() });
+      const approvedNow = status === 'approved';
+      await postDiscordEmbed(process.env.LEAVE_NOTICE_CHANNEL_ID || '1558102515885678734', {
+        title: approvedNow ? `✅ تم قبول طلب الإجازة #${id}` : `❌ تم رفض طلب الإجازة #${id}`,
+        color: approvedNow ? 0x22c55e : 0xef4444,
+        fields: [
+          { name: '👤 العضو', value: `<@${item.user_id}>`, inline: true },
+          { name: '🛡️ المراجع', value: `<@${user.id}>`, inline: true },
+          { name: '📅 الفترة', value: `${String(item.start_date).slice(0, 10)} ← ${String(item.end_date).slice(0, 10)}`, inline: false },
+          ...(note ? [{ name: '📝 السبب', value: String(note).slice(0, 1024), inline: false }] : []),
+        ],
+        timestamp: new Date().toISOString(),
+        footer: { text: 'إدارة البرج • طلبات الإجازة' },
+      });
       reviewLogPosted = true;
     } catch (error) { console.error('[leave review log]', cleanText(error.message, 180)); }
     const discordPosted = hasOriginalMessage ? originalMessageUpdated : reviewLogPosted;

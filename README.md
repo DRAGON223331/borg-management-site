@@ -129,3 +129,5 @@ To improve compatibility with Vercel route resolution, the project includes dedi
 
 ## Vercel setup
 `vercel.json` uses explicit `builds` so only `api/handler.js` and `api/discord-interactions.js` become Functions (2 total, far under the Hobby limit of 12) no matter what other files exist in the repo.
+
+- إشعار القبول/الرفض يُرسل إلى الروم `1558102515885678734` (أو `LEAVE_NOTICE_CHANNEL_ID`) مع السبب إن وُجد. زر الرفض في ديسكورد يفتح نافذة لكتابة السبب.
