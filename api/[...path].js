@@ -13,7 +13,7 @@ const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
 const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
-const SUBMISSION_REVIEW_CHANNEL_ID = process.env.SUBMISSION_REVIEW_CHANNEL_ID || '1556945732957765722';
+const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '1559176035432402976';
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const COOKIE_SECRET = process.env.SESSION_SECRET || '';
@@ -689,22 +689,29 @@ async function handleApi(parts, req, res) {
     const submissionId = Number(inserted[0].id);
     for (const taskId of taskIds) await sql`INSERT INTO submission_tasks(submission_id, task_id) VALUES (${submissionId}, ${taskId}) ON CONFLICT DO NOTHING`;
     const base = siteUrl(req);
-    const taskText = foundTasks.map((task) => `• ${task.required ? '🔴 إجباري' : '⚪ اختياري'} — **${task.title}**`).join('\n');
-    const fileText = files.map((file) => `• [${file.originalName}](${base}/api/evidence?token=${encodeURIComponent(file.token)})`).join('\n') || 'لا توجد ملفات مرفوعة.';
-    const linkText = links.map((link) => `• ${link}`).join('\n') || 'لا توجد روابط خارجية.';
+    const taskText = foundTasks.map((task) => `• ${task.required ? '🔴 إجباري' : '⚪ اختياري'} — **${cleanText(task.title, 140)}** — ${formatPoints(task.points)} نقطة`).join('\n').slice(0, 1024) || 'لم يتم تحديد مهمة.';
+    const fileText = files.map((file) => `• [${cleanText(file.originalName, 120)}](${base}/api/evidence?token=${encodeURIComponent(file.token)})`).join('\n').slice(0, 1024) || 'لا توجد ملفات مرفوعة.';
+    const linkText = links.map((link) => `• ${link}`).join('\n').slice(0, 1024) || 'لا توجد روابط خارجية.';
     let discordPosted = false;
     let warning = '';
     try {
-      const content = [
-        `📨 **تسليم مهمة جديد #${submissionId}**`,
-        `**العضو:** <@${user.id}> (${user.username})`,
-        `**المهمات المنجزة (${foundTasks.length}):**`, taskText,
-        note ? `**ملاحظة:** ${note}` : '',
-        '**روابط الأدلة:**', linkText,
-        '**الملفات الخاصة:**', fileText,
-        `**التاريخ:** <t:${Math.floor(Date.now() / 1000)}:F>`,
-      ].filter(Boolean).join('\n');
-      await postDiscordMessage(SUBMISSION_REVIEW_CHANNEL_ID, `${content}\n\n⏳ الحالة: بانتظار مراجعة المسؤولين\n🌐 راجع التسليم من لوحة الموقع للموافقة أو الرفض.`);
+      const embed = {
+        title: `📨 دليل مهمة جديد #${submissionId}`,
+        description: 'وصل دليل جديد من عضو الاستاف، والتسليم بانتظار مراجعة المسؤولين.\n\n**بعد المراجعة، تتم الموافقة أو الرفض من لوحة الموقع.**',
+        color: 0x5865F2,
+        fields: [
+          { name: '👤 العضو', value: `<@${user.id}>\n\`${user.id}\``, inline: true },
+          { name: '🧾 رقم التسليم', value: `#${submissionId}`, inline: true },
+          { name: `🎯 المهمة المحددة (${foundTasks.length})`, value: taskText, inline: false },
+          { name: '📎 ملفات الدليل', value: fileText, inline: false },
+          { name: '🔗 روابط إضافية', value: linkText, inline: false },
+          ...(note ? [{ name: '📝 ملاحظة العضو', value: note.slice(0, 1024), inline: false }] : []),
+        ],
+        timestamp: new Date().toISOString(),
+        footer: { text: 'إدارة البرج • مراجعة أدلة المهمات' },
+        ...(user.avatarUrl ? { thumbnail: { url: user.avatarUrl } } : {}),
+      };
+      await postDiscordEmbed(SUBMISSION_REVIEW_CHANNEL_ID, embed);
       discordPosted = true;
     } catch (error) { warning = cleanText(error.message, 220); console.error('[submission post]', warning); }
     try { await postDiscordMessage(TASK_SUBMISSIONS_CHANNEL_ID, `📨 تسليم جديد #${submissionId} من <@${user.id}> — بانتظار الموافقة. لا تُضاف النقاط إلا بعد اعتماد المسؤولين.`); } catch {}

@@ -16,6 +16,7 @@ const {
   GatewayIntentBits,
   Events,
   AttachmentBuilder,
+  EmbedBuilder,
   PermissionsBitField,
 } = require('discord.js');
 
@@ -29,6 +30,7 @@ const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID || '883871561474539630';
 const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
 const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
+const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
 const MANAGER_IDS = new Set((process.env.MANAGER_IDS || '1286035404323164172,1525203473262706821,848304089057460254,1475483362536980552')
   .split(',').map((x) => x.trim()).filter(Boolean));
 const ATTACHMENT_LIMIT_MB = Math.max(1, Number(process.env.DISCORD_ATTACHMENT_LIMIT_MB || 8));
@@ -652,28 +654,26 @@ app.post('/api/submissions', requireAuth, (req, res) => {
       let discordPosted = false;
       let warning = '';
       try {
-        const channel = await fetchTextChannel(TASK_SUBMISSIONS_CHANNEL_ID);
-        const taskText = foundTasks.map((task) => `• ${task.required ? '🔴 إجباري' : '⚪ اختياري'} — **${task.title}**`).join('\n');
-        const uploadedText = storedFiles.map((file) => `• [${file.originalName}](${file.url})`).join('\n') || 'لا توجد ملفات مرفوعة.';
-        const linksTextForDiscord = links.map((link) => `• ${link}`).join('\n') || 'لا توجد روابط خارجية.';
-        const content = [
-          `📨 **تسليم مهمة جديد #${submissionId}**`,
-          `**العضو:** <@${req.session.user.id}> (${req.session.user.username})`,
-          `**المهمات المنجزة (${foundTasks.length}):**`, taskText,
-          note ? `**ملاحظة:** ${note}` : '',
-          '**روابط الأدلة:**', linksTextForDiscord,
-          '**الملفات:**', uploadedText,
-          `**التاريخ:** <t:${Math.floor(Date.now() / 1000)}:F>`,
-        ].filter(Boolean).join('\n');
+        const channel = await fetchTextChannel(SUBMISSION_REVIEW_CHANNEL_ID);
+        const taskText = foundTasks.map((task) => `• ${task.required ? '🔴 إجباري' : '⚪ اختياري'} — **${cleanText(task.title, 140)}**`).join('\n').slice(0, 1024) || 'لم يتم تحديد مهمة.';
+        const uploadedText = storedFiles.map((file) => `• [${cleanText(file.originalName, 120)}](${file.url})`).join('\n').slice(0, 1024) || 'لا توجد ملفات مرفوعة.';
+        const linksTextForDiscord = links.map((link) => `• ${link}`).join('\n').slice(0, 1024) || 'لا توجد روابط خارجية.';
+        const embed = new EmbedBuilder()
+          .setColor(0x5865F2)
+          .setTitle(`📨 دليل مهمة جديد #${submissionId}`)
+          .setDescription('وصل دليل جديد من عضو الاستاف، والتسليم بانتظار مراجعة المسؤولين.\n\n**تتم الموافقة أو الرفض من لوحة الموقع.**')
+          .addFields(
+            { name: '👤 العضو', value: `<@${req.session.user.id}>\n\`${req.session.user.id}\``, inline: true },
+            { name: '🧾 رقم التسليم', value: `#${submissionId}`, inline: true },
+            { name: `🎯 المهمة المحددة (${foundTasks.length})`, value: taskText, inline: false },
+            { name: '📎 ملفات الدليل', value: uploadedText, inline: false },
+            { name: '🔗 روابط إضافية', value: linksTextForDiscord, inline: false },
+            ...(note ? [{ name: '📝 ملاحظة العضو', value: note.slice(0, 1024), inline: false }] : []),
+          )
+          .setTimestamp(new Date())
+          .setFooter({ text: 'إدارة البرج • مراجعة أدلة المهمات' });
         const attachable = files.filter((file) => file.size <= ATTACHMENT_LIMIT_MB * 1024 * 1024).map((file) => new AttachmentBuilder(file.path, { name: path.basename(file.originalname) }));
-        const messageChunks = splitDiscordContent(content, 1800);
-        for (let index = 0; index < messageChunks.length; index += 1) {
-          await channel.send({
-            content: index === 0 ? messageChunks[index] : `استكمال تسليم #${submissionId}\n${messageChunks[index]}`.slice(0, 1950),
-            files: index === 0 ? attachable : [],
-            allowedMentions: index === 0 ? { parse: [], users: [req.session.user.id] } : { parse: [] },
-          });
-        }
+        await channel.send({ embeds: [embed], files: attachable, allowedMentions: { parse: [] } });
         discordPosted = true;
       } catch (error) {
         warning = error.message;
