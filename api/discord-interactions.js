@@ -98,7 +98,7 @@ async function handler(req, res) {
   try { rawBody = await readRawBody(req); } catch { return send(res, { error: 'Invalid body' }, 400); }
   const timestamp = req.headers['x-signature-timestamp'];
   const signature = req.headers['x-signature-ed25519'];
-  if (!verifySignature(rawBody, timestamp, signature)) return send(res, { error: 'Invalid Discord signature' }, 401);
+  if (!verifySignature(rawBody, timestamp, signature)) { console.error('[interactions] signature check failed; public key set:', Boolean(PUBLIC_KEY), 'body bytes:', rawBody.length); return send(res, { error: 'Invalid Discord signature' }, 401); }
   let interaction;
   try { interaction = JSON.parse(rawBody.toString('utf8')); } catch { return send(res, { error: 'Invalid JSON' }, 400); }
   if (interaction.type === 1) return send(res, { type: 1 }); // Discord PING verification
@@ -123,22 +123,29 @@ async function handler(req, res) {
   const messageId = String(interaction.message?.id || '');
   if (!messageId) return send(res, { type: 4, data: { content: 'تعذر تحديد رسالة الطلب.', flags: 64 } });
 
-  // Acknowledge the button quickly; keep this invocation alive while the shared DB and message are updated.
-  res.statusCode = 200;
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-store');
-  res.end(JSON.stringify({ type: 6 }));
+  // Do the work BEFORE answering (serverless may freeze after res.end) and answer with the updated
+  // message (type 7). If it is too slow for Discord's 3s window, fall back to a plain ack (type 6).
+  let responded = false;
+  const reply = (payload) => {
+    if (responded) return;
+    responded = true;
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    res.end(JSON.stringify(payload));
+  };
+  const timer = setTimeout(() => reply({ type: 6 }), 2300);
   try {
     const sql = await getSql();
-    await ensureLeaveSchema(sql);
     const found = await sql`SELECT * FROM leave_requests WHERE id = ${requestId} LIMIT 1`;
     if (!found.length) {
-      await discordApi(`/channels/${LEAVE_REQUEST_CHANNEL_ID}/messages/${messageId}`, { method: 'PATCH', body: JSON.stringify({ components: [], content: 'تعذر العثور على طلب الإجازة في قاعدة البيانات.' }) });
+      reply({ type: 7, data: { content: 'تعذر العثور على طلب الإجازة في قاعدة البيانات.', components: [] } });
       return;
     }
     let item = found[0];
-    if (String(item.discord_message_id || '') !== messageId || String(item.discord_channel_id || LEAVE_REQUEST_CHANNEL_ID) !== LEAVE_REQUEST_CHANNEL_ID) {
+    if (String(item.discord_message_id || '') !== messageId) {
       console.warn('[leave interaction] Message does not match stored request', requestId, messageId);
+      reply({ type: 4, data: { content: 'رسالة الطلب لا تطابق الطلب المسجل.', flags: 64 } });
       return;
     }
     if (item.status === 'pending') {
@@ -151,16 +158,14 @@ async function handler(req, res) {
     }
     const finalStatus = item.status === 'pending' ? requestedStatus : item.status;
     const finalReviewer = item.reviewed_by || reviewerId;
-    await discordApi(`/channels/${LEAVE_REQUEST_CHANNEL_ID}/messages/${messageId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ embeds: [buildLeaveEmbed(item, finalStatus, finalReviewer, item.review_note || '')], components: [], allowed_mentions: { parse: [] } }),
-    });
+    const data = { embeds: [buildLeaveEmbed(item, finalStatus, finalReviewer, item.review_note || '')], components: [], allowed_mentions: { parse: [] } };
+    if (!responded) { reply({ type: 7, data }); return; }
+    // Already acked with type 6 (slow path): edit the message through the bot instead.
+    await discordApi(`/channels/${LEAVE_REQUEST_CHANNEL_ID}/messages/${messageId}`, { method: 'PATCH', body: JSON.stringify(data) });
   } catch (error) {
     console.error('[Discord leave button]', cleanText(error?.message || error, 220));
-    try {
-      await discordApi(`/channels/${LEAVE_REQUEST_CHANNEL_ID}/messages/${messageId}`, { method: 'PATCH', body: JSON.stringify({ components: [] }) });
-    } catch (patchError) { console.error('[Discord leave button cleanup]', cleanText(patchError?.message || patchError, 180)); }
-  }
+    reply({ type: 4, data: { content: 'حصل خطأ أثناء مراجعة الطلب: ' + cleanText(error?.message || error, 120), flags: 64 } });
+  } finally { clearTimeout(timer); }
 }
 
 module.exports = handler;
