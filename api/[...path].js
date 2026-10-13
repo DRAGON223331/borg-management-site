@@ -447,8 +447,8 @@ async function handleAuth(parts, req, res) {
       const memberLookups = await Promise.allSettled([discordApi(`/guilds/${MAIN_GUILD_ID}/members/${discordUser.id}`), discordApi(`/guilds/${STAFF_GUILD_ID}/members/${discordUser.id}`)]);
       const mainMemberData = memberLookups[0].status === 'fulfilled' ? memberLookups[0].value : null;
       const staffMemberData = memberLookups[1].status === 'fulfilled' ? memberLookups[1].value : null;
-      const hasManagementRole = (mainMemberData?.roles || []).includes(MANAGEMENT_MAIN_ROLE_ID) || (staffMemberData?.roles || []).includes(MANAGEMENT_STAFF_ROLE_ID);
-      const isAdmin = hasAdmin(staffGuild) || hasAdmin(mainGuild) || hasManagementRole;
+      // Admin status is granted only to the configured manager IDs or Discord Administrator permission.
+      const isAdmin = hasAdmin(staffGuild) || hasAdmin(mainGuild);
       if (!staffGuild && !isAdmin && !isManager) {
         res.setHeader('Set-Cookie', clearCookie(OAUTH_COOKIE));
         return sendText(res, 403, `الحساب ده مش عضو في سيرفر الاستاف، ومش معاه صلاحية Administrator في السيرفر الأساسي. ادخل سيرفر الاستاف (${STAFF_GUILD_ID}) ثم جرّب تاني.`);
@@ -602,7 +602,8 @@ async function getRoster() {
       rolePosition: highest?.position ?? (mainMember ? -1 : -2),
       roleColor: highest ? toHex(highest.color) : '#64748b',
       roles: assigned.map((role) => ({ id: role.id, name: role.name, position: role.position, color: toHex(role.color) })),
-      isAdmin: MANAGER_IDS.has(member.user.id) || (member.roles || []).some((roleId) => roleId === MANAGEMENT_STAFF_ROLE_ID || (() => { const role = staffRoleById.get(roleId); try { return (BigInt(role?.permissions || 0) & 8n) === 8n; } catch { return false; } })()) || assigned.some((role) => role.id === MANAGEMENT_MAIN_ROLE_ID || (() => { try { return (BigInt(role.permissions || 0) & 8n) === 8n; } catch { return false; } })()),
+      // Keep the roster and admin analytics aligned: explicit manager IDs or actual Administrator permission only.
+      isAdmin: MANAGER_IDS.has(member.user.id) || (member.roles || []).some((roleId) => { const role = staffRoleById.get(roleId); try { return (BigInt(role?.permissions || 0) & 8n) === 8n; } catch { return false; } }) || assigned.some((role) => { try { return (BigInt(role.permissions || 0) & 8n) === 8n; } catch { return false; } }),
     };
     if (!mainMember) {
       missingMainGuild.push(row);
