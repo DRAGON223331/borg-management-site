@@ -13,3 +13,5 @@
 أضف متغيرات البيئة المطلوبة كما هو موضح في `../README.md`، خصوصًا متغيرات PostgreSQL وDiscord و`SESSION_SECRET` و`SITE_URL` و`DISCORD_REDIRECT_URI`. يجب أن يكون `SITE_URL` هو رابط الموقع المنشور نفسه، ويجب إضافة رابط `/auth/callback` إلى Discord Developer Portal.
 
 بعد الحفظ، أعد النشر من Vercel. لن تعمل عمليات المهمات أو الشات ما لم تنشر مجلدًا يحتوي على `api/` بجانب `package.json` و`vercel.json`.
+
+The project includes explicit API wrappers for nested task, chat, and submission-review routes. Ensure this folder is deployed with its `api/` directory intact; deploying only `site-src/` or the generated `dist/` folder will cause API requests to return Vercel `NOT_FOUND` errors.

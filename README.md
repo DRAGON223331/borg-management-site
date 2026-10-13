@@ -96,3 +96,7 @@
 - تُرسل سجلات تغييرات النقاط والإجمالي الجديد إلى الروم `1559598706871767172`. وتُنشر تفاصيل التسليمات للمراجعة في الروم `1556945732957765722`.
 - يمكن تغيير الرومين عبر متغيري البيئة `POINTS_LOG_CHANNEL_ID` و`SUBMISSION_REVIEW_CHANNEL_ID`.
 - قاعدة بيانات PostgreSQL تُحدّث تلقائيًا عند تشغيل API؛ تُضاف أعمدة النقاط ومراجعة التسليمات والجداول اللازمة دون حذف البيانات القديمة.
+
+### Explicit nested API routes
+
+To improve compatibility with Vercel route resolution, the project includes dedicated wrappers for `/api/tasks/:id`, `/api/chat/:room`, and `/api/submissions/:id/:action`. They forward requests to the shared API handler and do not require a separate backend service.
