@@ -9,28 +9,10 @@
     "api/[...path].js": {
       "maxDuration": 60
     },
-    "api/tasks/[id].js": {
-      "maxDuration": 60
-    },
-    "api/chat/[room].js": {
-      "maxDuration": 60
-    },
-    "api/submissions/[id]/[action].js": {
-      "maxDuration": 60
-    },
-    "api/staff-stats/[userId].js": {
-      "maxDuration": 60
-    },
-    "api/staff-requests/[id]/[action].js": {
+    "api/r.js": {
       "maxDuration": 60
     },
     "api/discord-interactions.js": {
-      "maxDuration": 60
-    },
-    "api/leave-requests/[id]/[action].js": {
-      "maxDuration": 60
-    },
-    "api/cron/leave-sync.js": {
       "maxDuration": 60
     }
   },
@@ -61,6 +43,34 @@
     {
       "source": "/auth/:path*",
       "destination": "/api/auth/:path*"
+    },
+    {
+      "source": "/api/tasks/:id",
+      "destination": "/api/r?p=tasks/:id"
+    },
+    {
+      "source": "/api/chat/:room",
+      "destination": "/api/r?p=chat/:room"
+    },
+    {
+      "source": "/api/staff-stats/:userId",
+      "destination": "/api/r?p=staff-stats/:userId"
+    },
+    {
+      "source": "/api/submissions/:id/:action",
+      "destination": "/api/r?p=submissions/:id/:action"
+    },
+    {
+      "source": "/api/staff-requests/:id/:action",
+      "destination": "/api/r?p=staff-requests/:id/:action"
+    },
+    {
+      "source": "/api/leave-requests/:id/:action",
+      "destination": "/api/r?p=leave-requests/:id/:action"
+    },
+    {
+      "source": "/api/cron/leave-sync",
+      "destination": "/api/r?p=cron/leave-sync"
     }
   ],
   "crons": [
