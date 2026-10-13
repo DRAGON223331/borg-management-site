@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1020">
+  <title>إدارة البرج | لوحة الاستاف</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
+
+  <section id="login-screen" class="login-screen hidden">
+    <div class="login-card">
+      <div class="brand-mark large-mark">ب</div>
+      <div class="eyebrow">STAFF CONTROL CENTER</div>
+      <h1>إدارة البرج</h1>
+      <p>مكان واحد لمتابعة المهمات، وتسليم الأدلة، والتواصل بين الاستاف والإدارة.</p>
+      <a class="discord-login" href="/auth/discord"><span class="discord-glyph">◉</span> تسجيل الدخول باستخدام Discord</a>
+      <div class="login-note"><span class="status-dot"></span> الدخول متاح لأعضاء سيرفر الاستاف ومسؤولي السيرفر الأساسي.</div>
+      <div class="security-note">لا تشارك بيانات تسجيل الدخول أو توكن البوت مع أي شخص.</div>
+    </div>
+    <div class="login-decoration decoration-one"></div>
+    <div class="login-decoration decoration-two"></div>
+  </section>
+
+  <section id="app-shell" class="app-shell hidden">
+    <header class="topbar">
+      <div class="brand-lockup">
+        <div class="brand-mark">ب</div>
+        <div>
+          <div class="brand-title">إدارة البرج</div>
+          <div class="brand-subtitle">مركز متابعة الاستاف</div>
+        </div>
+      </div>
+      <nav class="top-nav" aria-label="التنقل الرئيسي">
+        <button class="nav-tab active" data-page="overview"><span>⌂</span> الرئيسية</button>
+        <button class="nav-tab" data-page="tasks"><span>✓</span> المهمات</button>
+        <button class="nav-tab" data-page="staff-chat"><span>☷</span> شات الاستاف</button>
+        <button class="nav-tab manager-only hidden" data-page="management-chat"><span>♧</span> شات المسؤولين</button>
+      </nav>
+      <div class="user-tools">
+        <div class="connection-pill" id="bot-status"><span class="status-dot"></span><span>جاري فحص البوت</span></div>
+        <div class="profile-chip">
+          <img id="top-avatar" alt="صورة الحساب" src="">
+          <div class="profile-text"><b id="top-username">...</b><small id="top-role">عضو الاستاف</small></div>
+        </div>
+        <button id="logout-btn" class="icon-button" title="تسجيل الخروج" aria-label="تسجيل الخروج">↪</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="staff-panel">
+        <div class="panel-heading">
+          <div><span class="tiny-label">TEAM DIRECTORY</span><h2>أعضاء الاستاف</h2></div>
+          <span class="count-pill" id="staff-count">—</span>
+        </div>
+        <p class="muted small-copy">مرتّبين حسب أعلى رتبة في سيرفر الاستاف.</p>
+        <div class="roster-search-wrap"><span>⌕</span><input id="roster-search" type="search" placeholder="ابحث عن عضو..." aria-label="ابحث عن عضو"></div>
+        <div id="roster-content" class="roster-content"><div class="loading-state">جاري تحميل أعضاء الاستاف...</div></div>
+        <div class="roster-footer"><span class="status-dot"></span> متزامن مع Discord</div>
+      </aside>
+
+      <main class="main-content">
+        <section id="page-overview" class="page active-page">
+          <div class="welcome-row">
+            <div>
+              <div class="eyebrow">BORG ADMINISTRATION</div>
+              <h1>أهلًا، <span id="welcome-name">يا بطل</span> 👋</h1>
+              <p>تابع المطلوب منك، وسلّم إنجازاتك بالأدلة في مكان واحد.</p>
+            </div>
+            <div class="today-card"><span class="calendar-icon">▦</span><div><small>النهارده</small><b id="today-date">—</b></div></div>
+          </div>
+
+          <div class="stats-grid">
+            <article class="stat-card"><div class="stat-icon purple">▤</div><div><span>إجمالي المهمات المفتوحة</span><strong id="stat-active">0</strong></div><div class="stat-foot">كل المهمات الحالية</div></article>
+            <article class="stat-card"><div class="stat-icon orange">!</div><div><span>المهمات الإجبارية</span><strong id="stat-required">0</strong></div><div class="stat-foot">الأولوية الأولى</div></article>
+            <article class="stat-card"><div class="stat-icon green">✓</div><div><span>الإجباري اللي خلصته</span><strong id="stat-done-required">0</strong></div><div class="stat-foot">حسب تسليماتك المسجلة</div></article>
+            <article class="stat-card"><div class="stat-icon blue">↗</div><div><span>إنجازاتك المسجلة</span><strong id="stat-done">0</strong></div><div class="stat-foot">مهمات عليها تسليم منك</div></article>
+          </div>
+
+          <div class="section-title-row"><div><span class="tiny-label">YOUR WORKSPACE</span><h2>ابدأ من هنا</h2></div><button class="text-button" data-go="tasks">عرض كل المهمات ←</button></div>
+          <div id="overview-task-list" class="overview-task-list"><div class="loading-state">جاري تجهيز لوحة المتابعة...</div></div>
+
+          <div class="bottom-grid">
+            <article class="info-card broadcast-card">
+              <div class="info-card-icon">✦</div><div><h3>مهمات واضحة، تسليم أسهل</h3><p>كل مهمة موضّح إذا كانت إجبارية أو اختيارية. اختار اللي خلصته وارفق رابط أو صورة أو فيديو كدليل.</p><button class="primary-button compact" data-go="tasks">فتح المهمات</button></div>
+            </article>
+            <article class="info-card chat-card">
+              <div class="chat-symbol">☷</div><div><h3>التواصل مع الفريق</h3><p>استخدم شات الاستاف للتنسيق، وشات المسؤولين متاح للمسؤولين المحددين فقط.</p><button class="secondary-button compact" data-go="staff-chat">فتح شات الاستاف</button></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="page-tasks" class="page">
+          <div class="page-heading">
+            <div><div class="eyebrow">TASK TRACKER</div><h1>المهمات</h1><p>حدد المهمة أو المهمات اللي خلصتها وارفق دليل واضح قبل إرسال التسليم.</p></div>
+            <div class="page-heading-badge"><span class="status-dot"></span> متزامنة مع روم المهمات</div>
+          </div>
+
+          <section id="task-manager" class="manager-task-box hidden">
+            <div class="section-title-row"><div><span class="tiny-label">MANAGEMENT TOOLS</span><h2>إنشاء مهمات جديدة</h2></div><span class="manager-badge">صلاحيات الإدارة</span></div>
+            <p class="muted">أضف أكثر من مهمة، وحدد لكل واحدة إذا كانت إجبارية أو اختيارية. عند النشر، البوت يجمعهم في رسالة واحدة أو أكثر حسب طول الرسالة.</p>
+            <div class="task-create-row">
+              <input id="new-task-title" type="text" maxlength="240" placeholder="اكتب اسم المهمة الجديدة...">
+              <select id="new-task-required" aria-label="نوع المهمة"><option value="1">إجبارية</option><option value="0">اختيارية</option></select>
+              <button id="queue-task-btn" class="secondary-button">+ إضافة للقائمة</button>
+            </div>
+            <div id="task-queue" class="task-queue"><div class="empty-inline">لسه مفيش مهمات في قائمة النشر.</div></div>
+            <div class="manager-actions"><span id="queue-count" class="muted small-copy">0 مهمات جاهزة للنشر</span><button id="publish-tasks-btn" class="primary-button" disabled>نشر المهمات في ديسكورد ↗</button></div>
+          </section>
+
+          <div class="task-toolbar">
+            <div class="filter-tabs"><button class="filter-tab active" data-filter="all">الكل <span id="filter-all-count">0</span></button><button class="filter-tab" data-filter="required">الإجبارية <span id="filter-required-count">0</span></button><button class="filter-tab" data-filter="optional">الاختيارية <span id="filter-optional-count">0</span></button><button class="filter-tab" data-filter="todo">لسه مخلصتهاش</button></div>
+            <button id="select-visible-btn" class="text-button">تحديد الظاهر</button>
+          </div>
+          <div id="task-list" class="task-list"><div class="loading-state">جاري تحميل المهمات...</div></div>
+
+          <section class="submit-box">
+            <div class="submit-box-heading"><div class="submit-icon">↥</div><div><h2>تسليم المهمات</h2><p>اختار المهمات اللي خلصتها من القائمة فوق.</p></div></div>
+            <div class="selected-tasks" id="selected-task-summary">مفيش مهمات متحددة لسه.</div>
+            <form id="submission-form">
+              <label for="evidence-links">روابط الأدلة <span class="muted">(اختياري لو هترفع ملفات)</span></label>
+              <textarea id="evidence-links" name="evidenceLinks" rows="3" placeholder="حط كل رابط في سطر منفصل: رابط منشور، ملف، أو دليل... "></textarea>
+              <label for="evidence-files">رفع صور أو فيديوهات <span class="muted">(ينفع ترفع أكتر من ملف)</span></label>
+              <input id="evidence-files" class="file-input" name="evidenceFiles" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif,video/mp4,video/webm,video/quicktime,video/x-matroska" multiple>
+              <div id="file-list" class="file-list muted small-copy">مفيش ملفات مضافة.</div>
+              <label for="submission-note">ملاحظة للإدارة <span class="muted">(اختياري)</span></label>
+              <input id="submission-note" type="text" maxlength="600" placeholder="أي توضيح مختصر بخصوص التسليم...">
+              <div class="submit-actions"><p class="muted small-copy">هتتسجل في الموقع وتتبعث لروم تسليم المهمات في ديسكورد.</p><button type="submit" id="submit-tasks-btn" class="primary-button">إرسال التسليم <span>↗</span></button></div>
+            </form>
+          </section>
+
+          <section class="recent-submissions-section">
+            <div class="section-title-row"><div><span class="tiny-label">SUBMISSION HISTORY</span><h2 id="submissions-heading">آخر تسليماتي</h2></div><button id="refresh-submissions-btn" class="text-button">تحديث ↻</button></div>
+            <div id="submissions-list" class="submissions-list"><div class="loading-state">جاري تحميل سجل التسليم...</div></div>
+          </section>
+        </section>
+
+        <section id="page-staff-chat" class="page chat-page">
+          <div class="page-heading"><div><div class="eyebrow">TEAM CHAT</div><h1>شات الاستاف</h1><p>تنسيق سريع بين أعضاء الفريق. حافظ على الرسائل واضحة ومحترمة.</p></div><div class="chat-page-icon">☷</div></div>
+          <div class="chat-shell"><div class="chat-header"><div class="chat-header-avatar">ب</div><div><b>غرفة الاستاف</b><small><span class="status-dot"></span> متاحة لأعضاء الموقع</small></div><span class="chat-encrypted-label">STAFF ROOM</span></div><div id="staff-chat-feed" class="chat-feed"><div class="loading-state">جاري تحميل الرسائل...</div></div><form class="chat-composer" id="staff-chat-form"><textarea id="staff-chat-input" maxlength="1500" rows="1" placeholder="اكتب رسالة للاستاف..." aria-label="رسالة للاستاف"></textarea><button type="submit" aria-label="إرسال الرسالة">➤</button></form></div>
+        </section>
+
+        <section id="page-management-chat" class="page chat-page">
+          <div class="page-heading"><div><div class="eyebrow">PRIVATE MANAGEMENT CHAT</div><h1>شات المسؤولين</h1><p>غرفة خاصة بحسابات المسؤولين المحددة في إعدادات الموقع.</p></div><div class="chat-page-icon manager-chat-icon">♧</div></div>
+          <div class="private-note"><span>🔒</span><div><b>غرفة خاصة</b><p>الرسائل دي مش ظاهرة لباقي الاستاف أو حتى لمسؤولي ديسكورد الآخرين إلا الحسابات المحددة.</p></div></div>
+          <div class="chat-shell"><div class="chat-header"><div class="chat-header-avatar manager-avatar">إ</div><div><b>غرفة الإدارة</b><small><span class="status-dot"></span> خاصة بالمسؤولين</small></div><span class="chat-encrypted-label">PRIVATE ROOM</span></div><div id="management-chat-feed" class="chat-feed"><div class="loading-state">جاري تحميل الرسائل...</div></div><form class="chat-composer" id="management-chat-form"><textarea id="management-chat-input" maxlength="1500" rows="1" placeholder="رسالة للمسؤولين فقط..." aria-label="رسالة للمسؤولين"></textarea><button type="submit" aria-label="إرسال الرسالة">➤</button></form></div>
+        </section>
+
+        <footer class="site-footer"><span>إدارة البرج © <span id="footer-year"></span></span><span>مصمم لتنظيم الشغل، مش لتعقيده.</span></footer>
+      </main>
+    </div>
+  </section>
+  <section id="fatal-screen" class="fatal-screen hidden"><div class="fatal-card"><h2>تعذر تحميل الموقع</h2><p id="fatal-message">حصل خطأ غير متوقع.</p><button id="retry-btn" class="primary-button">إعادة المحاولة</button></div></section>
+</body>
+</html>

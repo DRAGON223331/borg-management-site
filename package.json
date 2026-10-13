@@ -1,26 +1,19 @@
 {
-  "name": "edaret-el-borg",
-  "version": "1.0.0",
+  "name": "edaret-el-borg-vercel",
+  "version": "2.0.0",
   "private": true,
-  "description": "Arabic RTL Discord staff and task management website for إدارة البرج",
-  "main": "server.js",
+  "description": "إدارة البرج — Discord staff/task management hosted fully on Vercel",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "check": "node --check server.js && node --check public/app.js"
+    "build": "node build.js"
   },
   "engines": {
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "better-sqlite3": "^11.10.0",
-    "discord.js": "^14.22.1",
-    "dotenv": "^16.6.1",
-    "express": "^4.21.2",
-    "express-rate-limit": "^8.0.1",
-    "express-session": "^1.18.2",
-    "helmet": "^8.1.0",
-    "multer": "^2.0.2",
-    "socket.io": "^4.8.1"
+    "@neondatabase/serverless": "^1.0.2",
+    "@vercel/blob": "^2.3.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
   }
 }
