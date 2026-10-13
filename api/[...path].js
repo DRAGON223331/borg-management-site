@@ -100,7 +100,7 @@ function requireAuth(req, res) {
   return user;
 }
 function canManage(user) { return Boolean(user && (user.isManager || user.isAdmin)); }
-function canReadRoom(user, room) { return Boolean(user && (room === 'staff' || user.isManager)); }
+function canReadRoom(user, room) { return Boolean(user && (room === 'staff' || canManage(user))); }
 function originIsAllowed(req) {
   const origin = req.headers.origin;
   if (!origin) return true;
@@ -435,28 +435,43 @@ async function sendPrivateEvidence(req, res) {
   Readable.fromWeb(result.stream).pipe(res);
 }
 
-async function getRoster() {
-  const [guild, roles, firstPage] = await Promise.all([
-    discordApi(`/guilds/${STAFF_GUILD_ID}`),
-    discordApi(`/guilds/${STAFF_GUILD_ID}/roles`),
-    discordApi(`/guilds/${STAFF_GUILD_ID}/members?limit=1000`),
-  ]);
+async function fetchGuildMembers(guildId) {
+  const firstPage = await discordApi(`/guilds/${guildId}/members?limit=1000`);
   const members = Array.isArray(firstPage) ? [...firstPage] : [];
+  let lastPageCount = members.length;
   let after = members.length ? members[members.length - 1].user?.id : null;
-  for (let guard = 0; members.length % 1000 === 0 && members.length > 0 && guard < 20; guard += 1) {
-    const next = await discordApi(`/guilds/${STAFF_GUILD_ID}/members?limit=1000&after=${after}`);
+  for (let guard = 0; lastPageCount === 1000 && after && guard < 20; guard += 1) {
+    const next = await discordApi(`/guilds/${guildId}/members?limit=1000&after=${after}`);
     if (!Array.isArray(next) || !next.length) break;
     members.push(...next);
+    lastPageCount = next.length;
     after = next[next.length - 1].user?.id;
-    if (next.length < 1000) break;
   }
-  const sortedRoles = roles.filter((role) => role.id !== STAFF_GUILD_ID).sort((a, b) => b.position - a.position || a.name.localeCompare(b.name, 'ar'));
+  return members;
+}
+
+async function getRoster() {
+  // The directory still lists staff-server members, but their displayed roles
+  // come from the main server so the hierarchy reflects the real admin ranks.
+  const [mainGuild, mainRoles, staffMembers, mainMembers] = await Promise.all([
+    discordApi(`/guilds/${MAIN_GUILD_ID}`),
+    discordApi(`/guilds/${MAIN_GUILD_ID}/roles`),
+    fetchGuildMembers(STAFF_GUILD_ID),
+    fetchGuildMembers(MAIN_GUILD_ID),
+  ]);
+  const sortedRoles = (mainRoles || []).filter((role) => role.id !== MAIN_GUILD_ID)
+    .sort((a, b) => b.position - a.position || a.name.localeCompare(b.name, 'ar'));
   const roleById = new Map(sortedRoles.map((role) => [role.id, role]));
+  const mainMemberById = new Map((mainMembers || []).filter((member) => member?.user).map((member) => [member.user.id, member]));
   const groupMembers = new Map();
   const noRole = [];
+  const missingMainGuild = [];
   const toHex = (value) => `#${Math.max(0, Number(value) || 0).toString(16).padStart(6, '0').slice(-6)}`;
-  const rows = members.filter((member) => member.user && !member.user.bot).map((member) => {
-    const assigned = (member.roles || []).map((id) => roleById.get(id)).filter(Boolean).sort((a, b) => b.position - a.position);
+  const rows = (staffMembers || []).filter((member) => member.user && !member.user.bot).map((member) => {
+    const mainMember = mainMemberById.get(member.user.id) || null;
+    const assigned = mainMember
+      ? (mainMember.roles || []).map((id) => roleById.get(id)).filter(Boolean).sort((a, b) => b.position - a.position)
+      : [];
     const highest = assigned[0] || null;
     let avatar = member.user.avatar
       ? `https://cdn.discordapp.com/avatars/${member.user.id}/${member.user.avatar}.png?size=64`
@@ -468,26 +483,32 @@ async function getRoster() {
     }
     const row = {
       id: member.user.id,
-      username: member.user.global_name || member.nick || member.user.username,
+      username: mainMember?.nick || member.nick || member.user.global_name || member.user.username,
       handle: member.user.username,
       avatarUrl: avatar,
-      roleName: highest?.name || 'بدون رتبة',
-      roleId: highest?.id || 'none',
-      rolePosition: highest?.position ?? -1,
+      roleName: highest?.name || (mainMember ? 'بدون رتبة في السيرفر الأساسي' : 'مش موجود في السيرفر الأساسي'),
+      roleId: highest?.id || (mainMember ? 'none' : 'not-in-main'),
+      rolePosition: highest?.position ?? (mainMember ? -1 : -2),
       roleColor: highest ? toHex(highest.color) : '#64748b',
       roles: assigned.map((role) => ({ id: role.id, name: role.name, position: role.position, color: toHex(role.color) })),
     };
-    if (highest && roleById.has(highest.id)) {
+    if (!mainMember) {
+      missingMainGuild.push(row);
+    } else if (highest && roleById.has(highest.id)) {
       if (!groupMembers.has(highest.id)) groupMembers.set(highest.id, []);
       groupMembers.get(highest.id).push(row);
-    } else noRole.push(row);
+    } else {
+      noRole.push(row);
+    }
     return row;
   });
   for (const group of groupMembers.values()) group.sort((a, b) => a.username.localeCompare(b.username, 'ar'));
   noRole.sort((a, b) => a.username.localeCompare(b.username, 'ar'));
+  missingMainGuild.sort((a, b) => a.username.localeCompare(b.username, 'ar'));
   const groups = sortedRoles.map((role) => ({ id: role.id, name: role.name, position: role.position, color: toHex(role.color), members: groupMembers.get(role.id) || [] })).filter((group) => group.members.length);
-  if (noRole.length) groups.push({ id: 'none', name: 'بدون رتبة', position: -1, color: '#64748b', members: noRole });
-  return { guildName: guild.name, memberCount: rows.length, groups };
+  if (noRole.length) groups.push({ id: 'none', name: 'بدون رتبة في السيرفر الأساسي', position: -1, color: '#64748b', members: noRole });
+  if (missingMainGuild.length) groups.push({ id: 'not-in-main', name: 'مش موجودين في السيرفر الأساسي', position: -2, color: '#64748b', members: missingMainGuild });
+  return { guildName: mainGuild.name, memberCount: rows.length, groups };
 }
 
 async function handleApi(parts, req, res) {
@@ -562,7 +583,7 @@ async function handleApi(parts, req, res) {
   }
   
   if (route === 'tasks' && parts.length === 2 && req.method === 'DELETE') {
-    if (!user.isManager) {
+    if (!canManage(user)) {
       return sendError(res, 403, 'حذف المهمات متاح لمسؤولي الإدارة فقط.');
     }
 

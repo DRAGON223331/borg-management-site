@@ -200,7 +200,7 @@ function profileAvatar(sessionUser) {
   return sessionUser.avatarUrl || avatarUrl(sessionUser);
 }
 function canManage(user) { return Boolean(user && (user.isManager || user.isAdmin)); }
-function canReadRoom(user, room) { return Boolean(user && (room === 'staff' || user.isManager)); }
+function canReadRoom(user, room) { return Boolean(user && (room === 'staff' || canManage(user))); }
 function hasAdministratorPermission(guildObject) {
   if (!guildObject || !guildObject.permissions) return false;
   try { return (BigInt(guildObject.permissions) & PermissionsBitField.Flags.Administrator) === PermissionsBitField.Flags.Administrator; }
@@ -330,49 +330,59 @@ async function fetchTextChannel(channelId) {
 
 async function getStaffRoster() {
   if (!botReady) throw new Error('البوت غير متصل بديسكورد.');
-  const guild = await client.guilds.fetch(STAFF_GUILD_ID);
-  const [roles, members] = await Promise.all([
-    guild.roles.fetch(),
-    guild.members.fetch(),
+  const [staffGuild, mainGuild] = await Promise.all([
+    client.guilds.fetch(STAFF_GUILD_ID),
+    client.guilds.fetch(MAIN_GUILD_ID),
   ]);
-  const orderedRoles = [...roles.values()].filter((role) => role.id !== guild.id).sort((a, b) => b.position - a.position || a.name.localeCompare(b.name, 'ar'));
+  const [staffMembers, mainRoles, mainMembers] = await Promise.all([
+    staffGuild.members.fetch(),
+    mainGuild.roles.fetch(),
+    mainGuild.members.fetch(),
+  ]);
+  const orderedRoles = [...mainRoles.values()].filter((role) => role.id !== mainGuild.id).sort((a, b) => b.position - a.position || a.name.localeCompare(b.name, 'ar'));
   const roleById = new Map(orderedRoles.map((role) => [role.id, role]));
+  const mainMemberById = new Map(mainMembers.map((member) => [member.id, member]));
   const roleGroups = new Map();
   const plainMembers = [];
+  const missingMainGuild = [];
 
-  for (const member of members.values()) {
+  for (const member of staffMembers.values()) {
     if (member.user.bot) continue;
-    const assignedRoles = [...member.roles.cache.values()]
-      .filter((role) => role.id !== guild.id)
-      .sort((a, b) => b.position - a.position);
+    const mainMember = mainMemberById.get(member.id) || null;
+    const assignedRoles = mainMember
+      ? [...mainMember.roles.cache.values()].filter((role) => role.id !== mainGuild.id).sort((a, b) => b.position - a.position)
+      : [];
     const highest = assignedRoles[0] || null;
     const row = {
       id: member.id,
-      username: member.user.globalName || member.displayName || member.user.username,
+      username: mainMember?.displayName || member.user.globalName || member.displayName || member.user.username,
       handle: member.user.username,
       avatarUrl: member.displayAvatarURL({ extension: 'png', size: 64 }),
-      roleName: highest ? highest.name : 'بدون رتبة',
-      roleId: highest ? highest.id : 'none',
-      rolePosition: highest ? highest.position : -1,
+      roleName: highest ? highest.name : (mainMember ? 'بدون رتبة في السيرفر الأساسي' : 'مش موجود في السيرفر الأساسي'),
+      roleId: highest ? highest.id : (mainMember ? 'none' : 'not-in-main'),
+      rolePosition: highest ? highest.position : (mainMember ? -1 : -2),
       roleColor: highest ? highest.hexColor : '#64748b',
       roles: assignedRoles.map((role) => ({ id: role.id, name: role.name, position: role.position, color: role.hexColor })),
     };
-    if (highest && roleById.has(highest.id)) {
+    if (!mainMember) {
+      missingMainGuild.push(row);
+    } else if (highest && roleById.has(highest.id)) {
       if (!roleGroups.has(highest.id)) roleGroups.set(highest.id, []);
       roleGroups.get(highest.id).push(row);
-    } else plainMembers.push(row);
+    } else {
+      plainMembers.push(row);
+    }
   }
   for (const list of roleGroups.values()) list.sort((a, b) => a.username.localeCompare(b.username, 'ar'));
   plainMembers.sort((a, b) => a.username.localeCompare(b.username, 'ar'));
+  missingMainGuild.sort((a, b) => a.username.localeCompare(b.username, 'ar'));
   const groups = orderedRoles.map((role) => ({
-    id: role.id,
-    name: role.name,
-    position: role.position,
-    color: role.hexColor,
+    id: role.id, name: role.name, position: role.position, color: role.hexColor,
     members: roleGroups.get(role.id) || [],
   })).filter((group) => group.members.length > 0);
-  if (plainMembers.length) groups.push({ id: 'none', name: 'بدون رتبة', position: -1, color: '#64748b', members: plainMembers });
-  return { guildName: guild.name, memberCount: groups.reduce((sum, group) => sum + group.members.length, 0), groups };
+  if (plainMembers.length) groups.push({ id: 'none', name: 'بدون رتبة في السيرفر الأساسي', position: -1, color: '#64748b', members: plainMembers });
+  if (missingMainGuild.length) groups.push({ id: 'not-in-main', name: 'مش موجودين في السيرفر الأساسي', position: -2, color: '#64748b', members: missingMainGuild });
+  return { guildName: mainGuild.name, memberCount: groups.reduce((sum, group) => sum + group.members.length, 0), groups };
 }
 
 // OAuth2 login through Discord.
@@ -547,6 +557,15 @@ app.post('/api/tasks', requireAuth, requireManager, async (req, res) => {
     console.error('[tasks post]', error.message);
   }
   res.status(201).json({ created, discordPosted, warning: discordWarning, message: discordPosted ? 'تم إنشاء المهمات ونشرها في روم المهمات.' : 'تم حفظ المهمات في الموقع، لكن البوت لم يستطع نشرها في ديسكورد.' });
+});
+
+app.delete('/api/tasks/:id', requireAuth, requireManager, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: 'رقم المهمة غير صالح.' });
+  const task = db.prepare('SELECT id FROM tasks WHERE id = ? AND active = 1').get(id);
+  if (!task) return res.status(404).json({ error: 'المهمة مش موجودة أو تم حذفها بالفعل.' });
+  db.prepare('UPDATE tasks SET active = 0 WHERE id = ?').run(id);
+  return res.json({ ok: true, message: 'تم حذف المهمة من القائمة الحالية، وسجل التسليمات القديم محفوظ.' });
 });
 
 app.patch('/api/tasks/:id', requireAuth, requireManager, async (req, res) => {

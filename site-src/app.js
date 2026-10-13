@@ -160,7 +160,7 @@ function wireNavigation() {
   });
 }
 function openPage(page) {
-  if (page === 'management-chat' && !state.user?.isManager) return;
+  if (page === 'management-chat' && !state.user?.canManage) return;
   $$('.page').forEach((element) => element.classList.remove('active-page'));
   $(`#page-${page}`)?.classList.add('active-page');
   $$('.nav-tab').forEach((element) => element.classList.toggle('active', element.dataset.page === page));
@@ -235,7 +235,7 @@ function renderTaskList() {
       <div class="task-row-actions">
         ${task.completedByMe ? '<span class="task-complete-label">منجزة</span>' : ''}
       ${state.user.canManage ? `<label class="task-manager-toggle"><input type="checkbox" data-required-toggle="${task.id}" ${task.required ? 'checked' : ''}> إجبارية</label>` : ''}
-${state.user.isManager ? `<button type="button" class="task-delete-button" data-delete-task="${task.id}">🗑️ حذف</button>` : ''}
+${state.user.canManage ? `<button type="button" class="task-delete-button" data-delete-task="${task.id}" aria-label="حذف المهمة ${task.id}">🗑️ حذف</button>` : ''}
       </div>
     </article>
   `).join('');
@@ -256,6 +256,24 @@ ${state.user.isManager ? `<button type="button" class="task-delete-button" data-
       checkbox.checked = !checkbox.checked;
       showToast(error.message, 'error');
     } finally { checkbox.disabled = false; }
+  }));
+  $$('[data-delete-task]').forEach((button) => button.addEventListener('click', async () => {
+    const id = Number(button.dataset.deleteTask);
+    const task = state.tasks.find((item) => item.id === id);
+    if (!task) return;
+    if (!window.confirm(`متأكد إنك عايز تحذف المهمة دي؟\n\n${task.title}\n\nهتتشال من قائمة المهمات، وسجل التسليمات القديم هيفضل محفوظ.`)) return;
+    button.disabled = true;
+    button.textContent = 'جاري الحذف...';
+    try {
+      const result = await api(`/api/tasks/${id}`, { method: 'DELETE' });
+      state.selectedTaskIds.delete(id);
+      showToast(result.message || 'تم حذف المهمة من القائمة.', 'success');
+      await loadTasks();
+    } catch (error) {
+      showToast(error.message || 'تعذر حذف المهمة.', 'error');
+      button.disabled = false;
+      button.textContent = '🗑️ حذف';
+    }
   }));
 }
 
@@ -469,7 +487,7 @@ function startChatPolling() {
   setInterval(async () => {
     const activePage = $('.page.active-page')?.id;
     const room = activePage === 'page-staff-chat' ? 'staff'
-      : activePage === 'page-management-chat' && state.user?.isManager ? 'management'
+      : activePage === 'page-management-chat' && state.user?.canManage ? 'management'
       : null;
     if (!room) return;
     try {
@@ -495,7 +513,7 @@ function wireChats() {
   }
 }
 async function loadChat(room) {
-  if (room === 'management' && !state.user?.isManager) return;
+  if (room === 'management' && !state.user?.canManage) return;
   try {
     const result = await api(`/api/chat/${room}`);
     state.chatMessages[room] = [];
@@ -537,7 +555,7 @@ function renderChat(room) {
 }
 async function sendChat(event, room) {
   event.preventDefault();
-  if (room === 'management' && !state.user?.isManager) return showToast('الغرفة دي مخصصة للمسؤولين.', 'error');
+  if (room === 'management' && !state.user?.canManage) return showToast('الغرفة دي مخصصة للمسؤولين.', 'error');
   const input = room === 'staff' ? $('#staff-chat-input') : $('#management-chat-input');
   const content = input.value.trim();
   if (!content) return;

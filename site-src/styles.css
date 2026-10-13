@@ -155,6 +155,9 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .queued-task-title { flex: 1; min-width: 0; font-size: 11px; overflow-wrap: anywhere; }
 .queued-task select { background: #1a263b; color: #e9e5ff; border: 1px solid var(--border); border-radius: 8px; padding: 6px 7px; font-size: 10px; }
 .remove-queue-item { border: 0; color: #8a99b0; background: transparent; font-size: 17px; padding: 2px 5px; }
+.task-delete-button { border: 1px solid rgba(248,113,113,.24); border-radius: 8px; padding: 6px 9px; color: #fca5a5; background: rgba(127,29,29,.15); font-size: 10px; font-weight: 800; white-space: nowrap; cursor: pointer; }
+.task-delete-button:hover { background: rgba(127,29,29,.28); border-color: rgba(248,113,113,.45); }
+.task-delete-button:disabled { opacity: .55; cursor: wait; }
 .remove-queue-item:hover { color: var(--red); }
 .empty-inline { padding: 10px 2px; color: #697892; font-size: 10px; }
 .manager-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 14px; }
