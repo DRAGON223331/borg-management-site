@@ -207,6 +207,8 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_leave_requests_user ON leave_requests(user_id, created_at DESC)`;
+    await sql`ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS discord_message_id TEXT`;
+    await sql`ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS discord_channel_id TEXT`;
     await sql`CREATE TABLE IF NOT EXISTS staff_requests (
       id BIGSERIAL PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -371,6 +373,45 @@ async function postDiscordEmbed(channelId, embed) {
     body: JSON.stringify({ embeds: [embed], allowed_mentions: { parse: [] } }),
   });
 }
+function buildLeaveEmbed(item, status = 'pending', reviewerId = '', note = '') {
+  const id = Number(item.id);
+  const userId = String(item.user_id ?? item.userId ?? '');
+  const username = String(item.username || 'عضو الاستاف');
+  const startDate = String(item.start_date ?? item.startDate ?? '').slice(0, 10);
+  const endDate = String(item.end_date ?? item.endDate ?? '').slice(0, 10);
+  const reason = String(item.reason || 'بدون سبب').slice(0, 1024);
+  const isApproved = status === 'approved';
+  const isRejected = status === 'rejected';
+  const fields = [
+    { name: '👤 العضو', value: `<@${userId}>\n\`${userId}\``, inline: true },
+    { name: '📅 من', value: startDate || '—', inline: true },
+    { name: '📅 إلى', value: endDate || '—', inline: true },
+    { name: '📝 السبب', value: reason, inline: false },
+  ];
+  if (status === 'pending') fields.push({ name: '🔎 المراجعة', value: `رقم الطلب: #${id}\nاستخدم زري القبول أو الرفض هنا، أو راجع الطلب من الموقع.`, inline: false });
+  else {
+    fields.push({ name: '🛡️ المراجع', value: reviewerId ? `<@${reviewerId}>` : 'الإدارة', inline: true });
+    if (note) fields.push({ name: '🗒️ ملاحظة الإدارة', value: String(note).slice(0, 1024), inline: false });
+  }
+  const embed = {
+    title: status === 'pending' ? `🗓️ طلب إجازة جديد #${id}` : isApproved ? `✅ تمت الموافقة على طلب الإجازة #${id}` : `❌ تم رفض طلب الإجازة #${id}`,
+    description: status === 'pending' ? 'طلب إجازة جديد بانتظار مراجعة مسؤولي الإدارة.' : isApproved ? 'تمت الموافقة على طلب الإجازة.' : 'تم رفض طلب الإجازة.',
+    color: status === 'pending' ? 0x8b5cf6 : isApproved ? 0x22c55e : 0xef4444,
+    fields,
+    timestamp: new Date().toISOString(),
+    footer: { text: 'إدارة البرج • طلبات الإجازة' },
+  };
+  const avatarUrl = item.avatar_url ?? item.avatarUrl;
+  if (avatarUrl) embed.thumbnail = { url: avatarUrl };
+  return embed;
+}
+function leaveReviewComponents(id) {
+  return [{ type: 1, components: [
+    { type: 2, style: 3, label: 'قبول الإجازة', custom_id: `leave:approve:${id}` },
+    { type: 2, style: 4, label: 'رفض الإجازة', custom_id: `leave:reject:${id}` },
+  ] }];
+}
+
 function parseRequestUrl(req) {
   const host = req.headers?.host || 'localhost';
   const proto = req.headers?.['x-forwarded-proto'] || 'https';
@@ -844,22 +885,18 @@ async function handleApi(parts, req, res) {
     const id = Number(inserted[0].id);
     let discordPosted = false;
     try {
-      await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, {
-        title: `🗓️ طلب إجازة جديد #${id}`,
-        description: 'طلب إجازة جديد بانتظار مراجعة مسؤولي الإدارة من لوحة الموقع.',
-        color: 0x8b5cf6,
-        fields: [
-          { name: '👤 العضو', value: `<@${user.id}>\n\`${user.id}\``, inline: true },
-          { name: '📅 من', value: startDate, inline: true },
-          { name: '📅 إلى', value: endDate, inline: true },
-          { name: '📝 السبب', value: reason.slice(0, 1024), inline: false },
-          { name: '🔎 المراجعة', value: `رقم الطلب: #${id}\nالموافقة أو الرفض من لوحة إدارة البرج.`, inline: false },
-        ],
-        timestamp: new Date().toISOString(),
-        footer: { text: 'إدارة البرج • طلبات الإجازة' },
-        ...(user.avatarUrl ? { thumbnail: { url: user.avatarUrl } } : {}),
+      const posted = await discordApi(`/channels/${LEAVE_REQUEST_CHANNEL_ID}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({
+          embeds: [buildLeaveEmbed({ id, user_id: user.id, username: user.username, avatar_url: user.avatarUrl, start_date: startDate, end_date: endDate, reason }, 'pending')],
+          components: leaveReviewComponents(id),
+          allowed_mentions: { parse: [] },
+        }),
       });
-      discordPosted = true;
+      if (posted?.id) {
+        await sql`UPDATE leave_requests SET discord_message_id = ${String(posted.id)}, discord_channel_id = ${LEAVE_REQUEST_CHANNEL_ID} WHERE id = ${id}`;
+      }
+      discordPosted = Boolean(posted?.id);
     } catch (error) { console.error('[leave request post]', cleanText(error.message, 200)); }
     return sendJson(res, 201, { ok: true, id, discordPosted, message: discordPosted ? 'تم إرسال طلب الإجازة لروم الإدارة.' : 'تم حفظ الطلب، لكن تعذر إرساله إلى روم الإجازات 1556945732957765722. تأكد من توكن البوت وصلاحياته.' });
   }
@@ -875,13 +912,28 @@ async function handleApi(parts, req, res) {
     if (!Number.isSafeInteger(id) || id < 1) return sendError(res, 400, 'رقم طلب الإجازة غير صالح.');
     const note = cleanText(req.body?.note, 400);
     const status = parts[2] === 'approve' ? 'approved' : 'rejected';
-    const rows = await sql`UPDATE leave_requests SET status = ${status}, review_note = ${note}, reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id, user_id, username, start_date, end_date`;
-    if (!rows.length) return sendError(res, 404, 'الطلب غير موجود أو تمت مراجعته بالفعل.');
+    const rows = await sql`UPDATE leave_requests SET status = ${status}, review_note = ${note}, reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id, user_id, username, avatar_url, start_date, end_date, reason, discord_message_id, discord_channel_id`;
+    if (!rows.length) return sendError(res, 409, 'الطلب غير موجود أو تمت مراجعته بالفعل. حدّث القائمة للتأكد من حالته.');
     const item = rows[0];
-    let discordPosted = false;
-    try { await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, { title: status === 'approved' ? `✅ تمت الموافقة على طلب الإجازة #${id}` : `❌ تم رفض طلب الإجازة #${id}`, description: `العضو: <@${item.user_id}>\nالفترة: ${String(item.start_date).slice(0,10)} — ${String(item.end_date).slice(0,10)}\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}`, color: status === 'approved' ? 0x22c55e : 0xef4444, timestamp: new Date().toISOString() }); discordPosted = true; } catch (error) { console.error('[leave review log]', cleanText(error.message, 180)); }
+    const hasOriginalMessage = Boolean(item.discord_message_id);
+    let originalMessageUpdated = !hasOriginalMessage;
+    let reviewLogPosted = false;
+    if (item.discord_message_id) {
+      try {
+        await discordApi(`/channels/${item.discord_channel_id || LEAVE_REQUEST_CHANNEL_ID}/messages/${item.discord_message_id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ embeds: [buildLeaveEmbed(item, status, user.id, note)], components: [], allowed_mentions: { parse: [] } }),
+        });
+        originalMessageUpdated = true;
+      } catch (error) { console.error('[leave original message update]', cleanText(error.message, 180)); }
+    }
+    try {
+      await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, { title: status === 'approved' ? `✅ تمت الموافقة على طلب الإجازة #${id}` : `❌ تم رفض طلب الإجازة #${id}`, description: `العضو: <@${item.user_id}>\nالفترة: ${String(item.start_date).slice(0,10)} — ${String(item.end_date).slice(0,10)}\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}`, color: status === 'approved' ? 0x22c55e : 0xef4444, timestamp: new Date().toISOString() });
+      reviewLogPosted = true;
+    } catch (error) { console.error('[leave review log]', cleanText(error.message, 180)); }
+    const discordPosted = hasOriginalMessage ? originalMessageUpdated : reviewLogPosted;
     const baseMessage = status === 'approved' ? 'تمت الموافقة على طلب الإجازة.' : 'تم رفض طلب الإجازة.';
-    return sendJson(res, 200, { ok: true, discordPosted, message: discordPosted ? baseMessage : `${baseMessage} لكن فشل إرسال إشعار ديسكورد إلى روم الإجازات 1556945732957765722.` });
+    return sendJson(res, 200, { ok: true, discordPosted, message: discordPosted ? baseMessage : `${baseMessage} لكن تعذر تحديث رسالة الطلب في ديسكورد. راجع صلاحيات البوت.` });
   }
 
   if (route === 'submissions' && parts.length === 1 && req.method === 'POST') {

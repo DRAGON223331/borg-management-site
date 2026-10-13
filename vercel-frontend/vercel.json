@@ -23,6 +23,9 @@
     },
     "api/staff-requests/[id]/[action].js": {
       "maxDuration": 60
+    },
+    "api/discord-interactions.js": {
+      "maxDuration": 60
     }
   },
   "headers": [

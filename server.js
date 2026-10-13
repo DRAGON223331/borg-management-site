@@ -18,6 +18,9 @@ const {
   AttachmentBuilder,
   EmbedBuilder,
   PermissionsBitField,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } = require('discord.js');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -149,6 +152,14 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_staff_requests_user ON staff_requests(user_id, created_at DESC);
 `);
+
+// Add request-message linkage for installations upgrading an existing SQLite database.
+for (const statement of [
+  'ALTER TABLE leave_requests ADD COLUMN discord_message_id TEXT',
+  'ALTER TABLE leave_requests ADD COLUMN discord_channel_id TEXT',
+]) {
+  try { db.exec(statement); } catch (error) { if (!/duplicate column name/i.test(error.message)) throw error; }
+}
 
 class SqliteSessionStore extends session.Store {
   get(sid, callback) {
@@ -417,7 +428,89 @@ client.on(Events.MessageCreate, async (message) => {
   try { await importDiscordTaskMessage(message); }
   catch (error) { console.error('[discord] Task import failed:', error.message); }
 });
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isButton()) return;
+  const match = String(interaction.customId || '').match(/^leave:(approve|reject):(\d+)$/);
+  if (!match) return;
+  if (String(interaction.channelId) !== LEAVE_REQUEST_CHANNEL_ID) {
+    try { await interaction.reply({ content: 'الأزرار دي شغالة في روم طلبات الإجازات فقط.', ephemeral: true }); } catch {}
+    return;
+  }
+  const reviewerId = interaction.user.id;
+  let authorized = MANAGER_IDS.has(reviewerId) || Boolean(interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator));
+  const roleIds = interaction.member?.roles?.cache ? [...interaction.member.roles.cache.keys()] : (Array.isArray(interaction.member?.roles) ? interaction.member.roles : []);
+  if (roleIds.includes(MANAGEMENT_STAFF_ROLE_ID) || roleIds.includes(MANAGEMENT_MAIN_ROLE_ID)) authorized = true;
+  if (!authorized) {
+    const mainMember = await client.guilds.fetch(MAIN_GUILD_ID).then((guild) => guild.members.fetch(reviewerId)).catch(() => null);
+    if (mainMember?.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID)) authorized = true;
+  }
+  if (!authorized) {
+    try { await interaction.reply({ content: 'مراجعة طلبات الإجازة للمسؤولين فقط.', ephemeral: true }); } catch {}
+    return;
+  }
+  const id = Number(match[2]);
+  const targetStatus = match[1] === 'approve' ? 'approved' : 'rejected';
+  try {
+    await interaction.deferUpdate();
+    const row = db.prepare('SELECT * FROM leave_requests WHERE id = ?').get(id);
+    if (!row || row.discord_message_id !== interaction.message.id || (row.discord_channel_id && row.discord_channel_id !== interaction.channelId)) {
+      await interaction.message.edit({ components: [] });
+      return;
+    }
+    let status = row.status;
+    let reviewer = row.reviewed_by || reviewerId;
+    let note = row.review_note || '';
+    if (row.status === 'pending') {
+      const update = db.prepare("UPDATE leave_requests SET status = ?, review_note = '', reviewed_by = ?, reviewed_at = ? WHERE id = ? AND status = 'pending'").run(targetStatus, reviewerId, nowIso(), id);
+      const latest = db.prepare('SELECT * FROM leave_requests WHERE id = ?').get(id);
+      if (update.changes && latest) { status = latest.status; reviewer = latest.reviewed_by || reviewerId; note = latest.review_note || ''; }
+      else if (latest) { status = latest.status; reviewer = latest.reviewed_by || reviewerId; note = latest.review_note || ''; }
+    }
+    await interaction.message.edit({ embeds: [buildLeaveEmbed(row, status, reviewer, note)], components: [] });
+  } catch (error) {
+    console.error('[leave button interaction]', error.message);
+    try { await interaction.followUp({ content: 'حصل خطأ أثناء مراجعة الطلب. حدّث الموقع وتحقق من حالة الطلب.', ephemeral: true }); } catch {}
+  }
+});
+
 client.on('error', (error) => { botLastError = error.message; console.error('[discord] Client error:', error); });
+
+function buildLeaveEmbed(item, status = 'pending', reviewerId = '', note = '') {
+  const id = Number(item.id);
+  const userId = String(item.user_id ?? item.userId ?? '');
+  const startDate = String(item.start_date ?? item.startDate ?? '').slice(0, 10);
+  const endDate = String(item.end_date ?? item.endDate ?? '').slice(0, 10);
+  const reason = String(item.reason || 'بدون سبب').slice(0, 1024);
+  const approved = status === 'approved';
+  const rejected = status === 'rejected';
+  const fields = [
+    { name: '👤 العضو', value: `<@${userId}>\n\`${userId}\``, inline: true },
+    { name: '📅 من', value: startDate || '—', inline: true },
+    { name: '📅 إلى', value: endDate || '—', inline: true },
+    { name: '📝 السبب', value: reason, inline: false },
+  ];
+  if (status === 'pending') fields.push({ name: '🔎 المراجعة', value: `رقم الطلب: #${id}\nاستخدم زري القبول أو الرفض هنا، أو راجع الطلب من الموقع.`, inline: false });
+  else {
+    fields.push({ name: '🛡️ المراجع', value: reviewerId ? `<@${reviewerId}>` : 'الإدارة', inline: true });
+    if (note) fields.push({ name: '🗒️ ملاحظة الإدارة', value: String(note).slice(0, 1024), inline: false });
+  }
+  const embed = new EmbedBuilder()
+    .setColor(status === 'pending' ? 0x8b5cf6 : approved ? 0x22c55e : 0xef4444)
+    .setTitle(status === 'pending' ? `🗓️ طلب إجازة جديد #${id}` : approved ? `✅ تمت الموافقة على طلب الإجازة #${id}` : `❌ تم رفض طلب الإجازة #${id}`)
+    .setDescription(status === 'pending' ? 'طلب إجازة جديد بانتظار مراجعة مسؤولي الإدارة.' : approved ? 'تمت الموافقة على طلب الإجازة.' : 'تم رفض طلب الإجازة.')
+    .addFields(fields)
+    .setTimestamp(new Date())
+    .setFooter({ text: 'إدارة البرج • طلبات الإجازة' });
+  const avatar = item.avatar_url ?? item.avatarUrl;
+  if (avatar) embed.setThumbnail(avatar);
+  return embed;
+}
+function leaveReviewActionRow(id) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`leave:approve:${id}`).setLabel('قبول الإجازة').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`leave:reject:${id}`).setLabel('رفض الإجازة').setStyle(ButtonStyle.Danger),
+  );
+}
 
 async function fetchTextChannel(channelId) {
   if (!botReady) throw new Error('البوت غير متصل بديسكورد حاليًا.');
@@ -861,13 +954,9 @@ app.post('/api/leave-requests', requireAuth, async (req, res) => {
   let discordPosted = false;
   try {
     const channel = await fetchTextChannel(LEAVE_REQUEST_CHANNEL_ID);
-    const embed = new EmbedBuilder().setColor(0x8b5cf6).setTitle(`🗓️ طلب إجازة جديد #${id}`).setDescription('طلب إجازة جديد بانتظار مراجعة مسؤولي الإدارة من لوحة الموقع.').addFields(
-      { name: '👤 العضو', value: `<@${user.id}>\n\`${user.id}\``, inline: true },
-      { name: '📅 من', value: startDate, inline: true }, { name: '📅 إلى', value: endDate, inline: true },
-      { name: '📝 السبب', value: reason.slice(0, 1024), inline: false },
-      { name: '🔎 المراجعة', value: `رقم الطلب: #${id}\nالموافقة أو الرفض من لوحة إدارة البرج.`, inline: false },
-    ).setTimestamp(new Date()).setFooter({ text: 'إدارة البرج • طلبات الإجازة' });
-    await channel.send({ embeds: [embed], allowedMentions: { parse: [] } }); discordPosted = true;
+    const posted = await channel.send({ embeds: [buildLeaveEmbed({ id, user_id: user.id, username: user.username, avatar_url: profileAvatar(user), start_date: startDate, end_date: endDate, reason }, 'pending')], components: [leaveReviewActionRow(id)], allowedMentions: { parse: [] } });
+    db.prepare('UPDATE leave_requests SET discord_message_id = ?, discord_channel_id = ? WHERE id = ?').run(posted.id, channel.id, id);
+    discordPosted = true;
   } catch (error) { console.error('[leave request post]', error.message); }
   res.status(201).json({ ok: true, id, discordPosted, message: discordPosted ? 'تم إرسال طلب الإجازة لروم الإدارة.' : 'تم حفظ الطلب، لكن تعذر إرساله إلى روم الإجازات 1556945732957765722. تأكد من توكن البوت وصلاحياته.' });
 });
@@ -882,12 +971,25 @@ app.post('/api/leave-requests/:id/:action', requireAuth, async (req, res) => {
   const id = Number(req.params.id); const action = req.params.action;
   if (!Number.isSafeInteger(id) || id < 1 || !['approve', 'reject'].includes(action)) return res.status(400).json({ error: 'طلب المراجعة غير صالح.' });
   const status = action === 'approve' ? 'approved' : 'rejected'; const note = cleanText(req.body?.note, 400);
+  const item = db.prepare("SELECT * FROM leave_requests WHERE id = ? AND status = 'pending'").get(id);
+  if (!item) return res.status(409).json({ error: 'الطلب غير موجود أو تمت مراجعته بالفعل. حدّث القائمة للتأكد من حالته.' });
   const update = db.prepare("UPDATE leave_requests SET status = ?, review_note = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ? AND status = 'pending'").run(status, note, user.id, nowIso(), id);
-  if (!update.changes) return res.status(404).json({ error: 'الطلب غير موجود أو تمت مراجعته بالفعل.' });
-  let discordPosted = false;
-  try { const channel = await fetchTextChannel(LEAVE_REQUEST_CHANNEL_ID); await channel.send({ embeds: [new EmbedBuilder().setColor(status === 'approved' ? 0x22c55e : 0xef4444).setTitle(status === 'approved' ? `✅ تمت الموافقة على طلب الإجازة #${id}` : `❌ تم رفض طلب الإجازة #${id}`).setDescription(`العضو: <@${db.prepare('SELECT user_id FROM leave_requests WHERE id = ?').get(id)?.user_id || ''}>\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}`).setTimestamp(new Date())], allowedMentions: { parse: [] } }); discordPosted = true; } catch (error) { console.error('[leave review log]', error.message); }
+  if (!update.changes) return res.status(409).json({ error: 'تمت مراجعة الطلب من مسؤول آخر بالفعل.' });
+  const hasOriginalMessage = Boolean(item.discord_message_id);
+  let originalMessageUpdated = !hasOriginalMessage;
+  let reviewLogPosted = false;
+  if (item.discord_message_id) {
+    try {
+      const channel = await fetchTextChannel(item.discord_channel_id || LEAVE_REQUEST_CHANNEL_ID);
+      const message = await channel.messages.fetch(item.discord_message_id);
+      await message.edit({ embeds: [buildLeaveEmbed(item, status, user.id, note)], components: [] });
+      originalMessageUpdated = true;
+    } catch (error) { console.error('[leave original message update]', error.message); }
+  }
+  try { const channel = await fetchTextChannel(LEAVE_REQUEST_CHANNEL_ID); await channel.send({ embeds: [new EmbedBuilder().setColor(status === 'approved' ? 0x22c55e : 0xef4444).setTitle(status === 'approved' ? `✅ تمت الموافقة على طلب الإجازة #${id}` : `❌ تم رفض طلب الإجازة #${id}`).setDescription(`العضو: <@${item.user_id}>\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}`).setTimestamp(new Date())], allowedMentions: { parse: [] } }); reviewLogPosted = true; } catch (error) { console.error('[leave review log]', error.message); }
+  const discordPosted = hasOriginalMessage ? originalMessageUpdated : reviewLogPosted;
   const baseMessage = status === 'approved' ? 'تمت الموافقة على طلب الإجازة.' : 'تم رفض طلب الإجازة.';
-  res.json({ ok: true, discordPosted, message: discordPosted ? baseMessage : `${baseMessage} لكن فشل إرسال إشعار ديسكورد إلى روم الإجازات 1556945732957765722.` });
+  res.json({ ok: true, discordPosted, message: discordPosted ? baseMessage : `${baseMessage} لكن تعذر تحديث رسالة الطلب في ديسكورد. راجع صلاحيات البوت.` });
 });
 
 
