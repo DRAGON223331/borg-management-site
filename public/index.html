@@ -17,7 +17,7 @@
       <div class="eyebrow">STAFF CONTROL CENTER</div>
       <h1>إدارة البرج</h1>
       <p>مكان واحد لمتابعة المهمات، وتسليم الأدلة، والتواصل بين الاستاف والإدارة.</p>
-      <a class="discord-login" href="/auth/discord"><span class="discord-glyph">◉</span> تسجيل الدخول باستخدام Discord</a>
+      <a class="discord-login" href="/api/auth/discord"><span class="discord-glyph">◉</span> تسجيل الدخول باستخدام Discord</a>
       <div class="login-note"><span class="status-dot"></span> الدخول متاح لأعضاء سيرفر الاستاف ومسؤولي السيرفر الأساسي.</div>
       <div class="security-note">لا تشارك بيانات تسجيل الدخول أو توكن البوت مع أي شخص.</div>
     </div>
@@ -96,7 +96,7 @@
         <section id="page-tasks" class="page">
           <div class="page-heading">
             <div><div class="eyebrow">TASK TRACKER</div><h1>المهمات</h1><p>حدد المهمة أو المهمات اللي خلصتها وارفق دليل واضح قبل إرسال التسليم.</p></div>
-            <div class="page-heading-badge"><span class="status-dot"></span> متزامنة مع روم المهمات</div>
+            <div class="page-heading-badge"><span class="status-dot"></span> نقاطي: <b id="my-points-total">—</b> · متزامنة مع ديسكورد</div>
           </div>
 
           <section id="task-manager" class="manager-task-box hidden">
@@ -105,10 +105,12 @@
             <div class="task-create-row">
               <input id="new-task-title" type="text" maxlength="240" placeholder="اكتب اسم المهمة الجديدة...">
               <select id="new-task-required" aria-label="نوع المهمة"><option value="1">إجبارية</option><option value="0">اختيارية</option></select>
-              <button id="queue-task-btn" class="secondary-button">+ إضافة للقائمة</button>
+              <input id="new-task-points" type="number" min="0" max="100000" step="0.1" value="1" aria-label="نقاط المهمة" title="نقاط المهمة" style="max-width:110px"><button id="queue-task-btn" class="secondary-button">+ إضافة للقائمة</button>
             </div>
             <div id="task-queue" class="task-queue"><div class="empty-inline">لسه مفيش مهمات في قائمة النشر.</div></div>
             <div class="manager-actions"><span id="queue-count" class="muted small-copy">0 مهمات جاهزة للنشر</span><button id="publish-tasks-btn" class="primary-button" disabled>نشر المهمات في ديسكورد ↗</button></div>
+            <div class="task-create-row" style="margin-top:14px"><input id="manual-points-user" type="text" placeholder="Discord ID للعضو"><input id="manual-points-amount" type="number" step="0.1" placeholder="+/- النقاط"><input id="manual-points-reason" type="text" maxlength="300" placeholder="سبب التعديل"><button id="manual-points-btn" class="secondary-button" type="button">إضافة/خصم نقاط</button></div>
+            <p class="muted small-copy">يمكن استخدام كسور مثل 0.1. الموافقة على التسليم تضيف نقاط المهمات تلقائيًا.</p>
           </section>
 
           <div class="task-toolbar">
@@ -124,7 +126,7 @@
               <label for="evidence-links">روابط الأدلة <span class="muted">(اختياري لو هترفع ملفات)</span></label>
               <textarea id="evidence-links" name="evidenceLinks" rows="3" placeholder="حط كل رابط في سطر منفصل: رابط منشور، ملف، أو دليل... "></textarea>
               <label for="evidence-files">رفع صور أو فيديوهات <span class="muted">(ينفع ترفع أكتر من ملف)</span></label>
-              <input id="evidence-files" class="file-input" name="evidenceFiles" type="file" accept="image/*,video/*" multiple>
+              <input id="evidence-files" class="file-input" name="evidenceFiles" type="file" accept="image/jpeg,image/png,image/webp,image/gif,image/avif,video/mp4,video/webm,video/quicktime,video/x-matroska" multiple>
               <div id="file-list" class="file-list muted small-copy">مفيش ملفات مضافة.</div>
               <label for="submission-note">ملاحظة للإدارة <span class="muted">(اختياري)</span></label>
               <input id="submission-note" type="text" maxlength="600" placeholder="أي توضيح مختصر بخصوص التسليم...">

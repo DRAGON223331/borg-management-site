@@ -130,7 +130,7 @@ async function initialize() {
       $$('.manager-only').forEach((element) => element.classList.remove('hidden'));
       $('#submissions-heading').textContent = 'آخر تسليمات الاستاف';
     }
-    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions()]);
+    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints()]);
     startChatPolling();
     setInterval(checkBotStatus, 30000);
     setInterval(() => {
@@ -228,7 +228,7 @@ function renderTaskList() {
         <div class="task-row-desc">أُضيفت بواسطة ${escapeHtml(task.created_by_name || 'الإدارة')} · ${formatDate(task.created_at, { day: 'numeric', month: 'short' })}</div>
         <div class="task-row-meta">
           <span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? '● مهمة إجبارية' : '○ مهمة اختيارية'}</span>
-          <span class="task-id">#${task.id}</span>
+          <span class="task-id">#${task.id} · ⭐ ${Number(task.points || 0)} نقطة</span>
           ${task.completedByMe ? '<span class="task-tag completed">✓ تم تسليمها</span>' : ''}
         </div>
       </div>
@@ -316,6 +316,7 @@ function wireTasks() {
     if (event.key === 'Enter') { event.preventDefault(); queueCurrentTask(); }
   });
   $('#publish-tasks-btn').addEventListener('click', publishQueuedTasks);
+  $('#manual-points-btn')?.addEventListener('click', sendManualPoints);
   $('#evidence-files').addEventListener('change', renderFileList);
   $('#submission-form').addEventListener('submit', submitTasks);
   $('#refresh-submissions-btn').addEventListener('click', loadSubmissions);
@@ -326,7 +327,9 @@ function queueCurrentTask() {
   const title = input.value.trim();
   if (!title) return showToast('اكتب اسم المهمة الأول.', 'error');
   if (state.queue.length >= 40) return showToast('أقصى عدد للمهمات في الدفعة الواحدة 40 مهمة.', 'error');
-  state.queue.push({ key: state.queueNextId++, title, required: $('#new-task-required').value === '1' });
+  const points = Number($('#new-task-points').value);
+  if (!Number.isFinite(points) || points < 0 || points > 100000) return showToast('اكتب عدد نقاط صحيح من 0 إلى 100000.', 'error');
+  state.queue.push({ key: state.queueNextId++, title, required: $('#new-task-required').value === '1', points: Math.round(points * 100) / 100 });
   input.value = '';
   input.focus();
   renderTaskQueue();
@@ -342,7 +345,7 @@ function renderTaskQueue() {
   queue.innerHTML = state.queue.map((item) => `
     <div class="queued-task" data-queue-key="${item.key}">
       <span class="task-id">${String(state.queue.indexOf(item) + 1).padStart(2, '0')}</span>
-      <div class="queued-task-title">${escapeHtml(item.title)}</div>
+      <div class="queued-task-title">${escapeHtml(item.title)} · ⭐ ${item.points} نقطة</div>
       <select data-queue-required="${item.key}" aria-label="نوع المهمة"><option value="1" ${item.required ? 'selected' : ''}>إجبارية</option><option value="0" ${!item.required ? 'selected' : ''}>اختيارية</option></select>
       <button class="remove-queue-item" data-remove-queue="${item.key}" aria-label="حذف المهمة">×</button>
     </div>
@@ -363,7 +366,7 @@ async function publishQueuedTasks() {
   try {
     const result = await api('/api/tasks', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tasks: state.queue.map(({ title, required }) => ({ title, required })) }),
+      body: JSON.stringify({ tasks: state.queue.map(({ title, required, points }) => ({ title, required, points })) }),
     });
     state.queue = [];
     renderTaskQueue();
@@ -444,11 +447,27 @@ async function loadSubmissions() {
       const files = (submission.files || []).map((file) => `<a href="${escapeHtml(file.url)}" target="_blank" rel="noopener noreferrer">📎 ${escapeHtml(file.originalName || 'ملف مرفوع')}</a>`).join('');
       const links = (submission.evidenceLinks || []).map((link) => `<a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">↗ فتح رابط دليل</a>`).join('');
       const tasks = (submission.tasks || []).map((task) => `<span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? 'إجباري' : 'اختياري'} · ${escapeHtml(task.title)}</span>`).join('');
-      return `<article class="submission-card"><div class="submission-top"><div class="submission-user"><img src="${escapeHtml(submission.avatarUrl || avatarFallback(submission.userId))}" alt=""><span>${escapeHtml(submission.username)}</span><span class="task-id">#${submission.id}</span></div><time class="submission-date">${formatDate(submission.submittedAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</time></div><div class="submission-task-list">${tasks}</div>${submission.note ? `<div class="submission-note">${escapeHtml(submission.note)}</div>` : ''}${files || links ? `<div class="submission-evidence">${files}${links}</div>` : ''}</article>`;
+      return `<article class="submission-card"><div class="submission-top"><div class="submission-user"><img src="${escapeHtml(submission.avatarUrl || avatarFallback(submission.userId))}" alt=""><span>${escapeHtml(submission.username)}</span><span class="task-id">#${submission.id}</span><span class="task-tag ${submission.status === 'approved' ? 'completed' : submission.status === 'rejected' ? 'required' : 'optional'}">${submission.status === 'approved' ? 'تمت الموافقة' : submission.status === 'rejected' ? 'مرفوض' : 'بانتظار الموافقة'}</span></div><time class="submission-date">${formatDate(submission.submittedAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</time></div><div class="submission-task-list">${tasks}</div>${submission.note ? `<div class="submission-note">${escapeHtml(submission.note)}</div>` : ''}${files || links ? `<div class="submission-evidence">${files}${links}</div>` : ''}${state.user.canManage && submission.status === 'pending' ? `<div class="manager-actions"><button class="primary-button" data-review-submission="approve" data-id="${submission.id}">موافقة وإضافة النقاط</button><button class="secondary-button" data-review-submission="reject" data-id="${submission.id}">رفض التسليم</button></div>` : ''}</article>`;
     }).join('');
+    $$('[data-review-submission]').forEach(button => button.addEventListener('click', async () => { const action = button.dataset.reviewSubmission; const id = button.dataset.id; let reason = ''; if (action === 'reject') { reason = window.prompt('سبب رفض التسليم (اختياري):') || ''; } button.disabled = true; try { const result = await api(`/api/submissions/${id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }) }); showToast(action === 'approve' ? `تمت الموافقة وإضافة ${result.awarded} نقطة.` : 'تم رفض التسليم.', 'success'); await Promise.all([loadSubmissions(), loadMyPoints()]); } catch (error) { showToast(error.message, 'error'); button.disabled = false; } }));
   } catch (error) {
     $('#submissions-list').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
   }
+}
+
+async function loadMyPoints() {
+  try { const result = await api('/api/points'); const node = $('#my-points-total'); if (node) node.textContent = Number(result.points || 0).toLocaleString('en-US', { maximumFractionDigits: 2 }); }
+  catch { const node = $('#my-points-total'); if (node) node.textContent = '—'; }
+}
+async function sendManualPoints() {
+  const userId = $('#manual-points-user').value.trim();
+  const amount = Number($('#manual-points-amount').value);
+  const reason = $('#manual-points-reason').value.trim();
+  if (!/^\d{17,20}$/.test(userId) || !Number.isFinite(amount) || amount === 0) return showToast('اكتب Discord ID صحيح ومقدار نقاط غير صفري.', 'error');
+  const button = $('#manual-points-btn'); button.disabled = true;
+  try { await api('/api/points', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId, amount, reason, username: userId }) }); showToast('تم تعديل النقاط وتسجيل العملية.', 'success'); $('#manual-points-amount').value = ''; $('#manual-points-reason').value = ''; }
+  catch (error) { showToast(error.message, 'error'); }
+  finally { button.disabled = false; }
 }
 
 async function loadRoster() {

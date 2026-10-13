@@ -12,6 +12,8 @@ const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID || '883871561474539630';
 const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
 const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
+const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
+const SUBMISSION_REVIEW_CHANNEL_ID = process.env.SUBMISSION_REVIEW_CHANNEL_ID || '1556945732957765722';
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '1559176035432402976';
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const COOKIE_SECRET = process.env.SESSION_SECRET || '';
@@ -139,6 +141,7 @@ async function ensureSchema() {
     await sql`CREATE TABLE IF NOT EXISTS tasks (
       id BIGSERIAL PRIMARY KEY,
       title TEXT NOT NULL,
+      points NUMERIC(10,2) NOT NULL DEFAULT 1,
       required BOOLEAN NOT NULL DEFAULT FALSE,
       active BOOLEAN NOT NULL DEFAULT TRUE,
       created_by TEXT NOT NULL,
@@ -149,6 +152,7 @@ async function ensureSchema() {
       UNIQUE(source_message_id, source_line_index)
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_tasks_active ON tasks(active, required DESC, id DESC)`;
+    await sql`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS points NUMERIC(10,2) NOT NULL DEFAULT 1`;
     await sql`CREATE TABLE IF NOT EXISTS submissions (
       id BIGSERIAL PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -161,6 +165,10 @@ async function ensureSchema() {
       status TEXT NOT NULL DEFAULT 'submitted'
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_submissions_user ON submissions(user_id, submitted_at DESC)`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS reviewed_by TEXT`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ`;
+    await sql`CREATE TABLE IF NOT EXISTS staff_points (id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL, username TEXT NOT NULL, amount NUMERIC(10,2) NOT NULL, reason TEXT NOT NULL DEFAULT '', actor_id TEXT NOT NULL, actor_name TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'manual', submission_id BIGINT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_staff_points_user ON staff_points(user_id, created_at DESC)`;
     await sql`CREATE TABLE IF NOT EXISTS submission_tasks (
       submission_id BIGINT NOT NULL REFERENCES submissions(id) ON DELETE CASCADE,
       task_id BIGINT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -542,10 +550,10 @@ async function handleApi(parts, req, res) {
 
   if (route === 'tasks' && parts.length === 1 && req.method === 'GET') {
     await syncDiscordTasks(sql);
-    const rows = await sql`SELECT id, title, required, active, created_by_name, created_at FROM tasks WHERE active = TRUE ORDER BY required DESC, id DESC`;
-    const completedRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'submitted'`;
+    const rows = await sql`SELECT id, title, points, required, active, created_by_name, created_at FROM tasks WHERE active = TRUE ORDER BY required DESC, id DESC`;
+    const completedRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'approved'`;
     const completed = new Set(completedRows.map((row) => String(row.task_id)));
-    const tasks = rows.map((row) => ({ id: Number(row.id), title: row.title, required: Boolean(row.required), active: Boolean(row.active), created_by_name: row.created_by_name, created_at: row.created_at, completedByMe: completed.has(String(row.id)) }));
+    const tasks = rows.map((row) => ({ id: Number(row.id), title: row.title, points: Number(row.points || 0), required: Boolean(row.required), active: Boolean(row.active), created_by_name: row.created_by_name, created_at: row.created_at, completedByMe: completed.has(String(row.id)) }));
     const required = tasks.filter((task) => task.required);
     return sendJson(res, 200, { tasks, stats: { active: tasks.length, required: required.length, completedRequired: required.filter((task) => task.completedByMe).length, completedByMe: tasks.filter((task) => task.completedByMe).length } });
   }
@@ -553,17 +561,18 @@ async function handleApi(parts, req, res) {
     if (!canManage(user)) return sendError(res, 403, 'الصلاحية دي للمسؤولين فقط.');
     const raw = Array.isArray(req.body?.tasks) ? req.body.tasks : [];
     if (!raw.length || raw.length > 40) return sendError(res, 400, 'أضف من مهمة واحدة إلى 40 مهمة في المرة الواحدة.');
-    const tasks = raw.map((item) => ({ title: cleanText(typeof item === 'string' ? item : item?.title, 240), required: typeof item === 'string' ? false : Boolean(item?.required) })).filter((task) => task.title);
+    const tasks = raw.map((item) => { const points = Number(typeof item === 'string' ? 1 : (item?.points ?? 1)); return { title: cleanText(typeof item === 'string' ? item : item?.title, 240), required: typeof item === 'string' ? false : Boolean(item?.required), points: Number.isFinite(points) && points >= 0 && points <= 100000 ? Math.round(points * 100) / 100 : NaN }; }).filter((task) => task.title);
+    if (tasks.some((task) => !Number.isFinite(task.points))) return sendError(res, 400, 'عدد النقاط لازم يكون رقمًا من 0 إلى 100000، ويسمح بالكسور مثل 0.1.');
     if (!tasks.length) return sendError(res, 400, 'اكتب اسم مهمة صحيح.');
     const created = [];
     for (const task of tasks) {
-      const rows = await sql`INSERT INTO tasks(title, required, active, created_by, created_by_name, created_at) VALUES (${task.title}, ${task.required}, TRUE, ${user.id}, ${user.username}, NOW()) RETURNING id`;
+      const rows = await sql`INSERT INTO tasks(title, points, required, active, created_by, created_by_name, created_at) VALUES (${task.title}, ${task.points}, ${task.required}, TRUE, ${user.id}, ${user.username}, NOW()) RETURNING id`;
       created.push({ id: Number(rows[0].id), ...task });
     }
     let discordPosted = false;
     let warning = '';
     try {
-      const lines = created.map((task) => `• [${task.required ? 'إجباري' : 'اختياري'}] #${task.id} — ${task.title}`);
+      const lines = created.map((task) => `• [${task.required ? 'إجباري' : 'اختياري'}] #${task.id} — ${task.title} | ⭐ ${task.points} نقطة`);
       let batch = [];
       let charCount = '📋 مهمات جديدة | إدارة البرج\n'.length;
       const batches = [];
@@ -620,10 +629,12 @@ async function handleApi(parts, req, res) {
     if (!found.length) return sendError(res, 404, 'المهمة مش موجودة أو اتقفلت.');
     const updates = [];
     if (typeof req.body?.required === 'boolean') updates.push({ field: 'required', value: req.body.required });
+    if (req.body?.points !== undefined) { const points = Number(req.body.points); if (!Number.isFinite(points) || points < 0 || points > 100000) return sendError(res, 400, 'عدد النقاط غير صالح.'); updates.push({ field: 'points', value: Math.round(points * 100) / 100 }); }
     if (typeof req.body?.active === 'boolean') updates.push({ field: 'active', value: req.body.active });
     if (!updates.length) return sendError(res, 400, 'مفيش تعديل صالح.');
     for (const item of updates) {
       if (item.field === 'required') await sql`UPDATE tasks SET required = ${item.value} WHERE id = ${id}`;
+      if (item.field === 'points') await sql`UPDATE tasks SET points = ${item.value} WHERE id = ${id}`;
       if (item.field === 'active') await sql`UPDATE tasks SET active = ${item.value} WHERE id = ${id}`;
     }
     return sendJson(res, 200, { ok: true });
@@ -633,7 +644,7 @@ async function handleApi(parts, req, res) {
     const taskIdsInput = Array.isArray(req.body?.taskIds) ? req.body.taskIds : [];
     const taskIds = [...new Set(taskIdsInput.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))].slice(0, 40);
     if (!taskIds.length) return sendError(res, 400, 'اختار مهمة واحدة على الأقل.');
-    const activeTasks = await sql`SELECT id, title, required FROM tasks WHERE active = TRUE`;
+    const activeTasks = await sql`SELECT id, title, points, required FROM tasks WHERE active = TRUE`;
     const byId = new Map(activeTasks.map((row) => [Number(row.id), row]));
     const foundTasks = taskIds.map((id) => byId.get(id)).filter(Boolean);
     if (foundTasks.length !== taskIds.length) return sendError(res, 400, 'في مهمة من اللي اخترتها مش موجودة أو اتقفلت. حدّث الصفحة وجرب تاني.');
@@ -660,7 +671,7 @@ async function handleApi(parts, req, res) {
     if (!links.length && !files.length) return sendError(res, 400, 'ضيف رابط دليل أو ارفع صورة/فيديو قبل الإرسال.');
     const note = cleanText(req.body?.note, 600);
     const inserted = await sql`INSERT INTO submissions(user_id, username, avatar_url, note, evidence_links, files_json, submitted_at, status)
-      VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, ${note}, ${JSON.stringify(links)}::jsonb, ${JSON.stringify(files)}::jsonb, NOW(), 'submitted') RETURNING id, submitted_at`;
+      VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, ${note}, ${JSON.stringify(links)}::jsonb, ${JSON.stringify(files)}::jsonb, NOW(), 'pending') RETURNING id, submitted_at`;
     const submissionId = Number(inserted[0].id);
     for (const taskId of taskIds) await sql`INSERT INTO submission_tasks(submission_id, task_id) VALUES (${submissionId}, ${taskId}) ON CONFLICT DO NOTHING`;
     const base = siteUrl(req);
@@ -679,9 +690,10 @@ async function handleApi(parts, req, res) {
         '**الملفات الخاصة:**', fileText,
         `**التاريخ:** <t:${Math.floor(Date.now() / 1000)}:F>`,
       ].filter(Boolean).join('\n');
-      await postDiscordMessage(TASK_SUBMISSIONS_CHANNEL_ID, content);
+      await postDiscordMessage(SUBMISSION_REVIEW_CHANNEL_ID, `${content}\n\n⏳ الحالة: بانتظار مراجعة المسؤولين\n🌐 راجع التسليم من لوحة الموقع للموافقة أو الرفض.`);
       discordPosted = true;
     } catch (error) { warning = cleanText(error.message, 220); console.error('[submission post]', warning); }
+    try { await postDiscordMessage(TASK_SUBMISSIONS_CHANNEL_ID, `📨 تسليم جديد #${submissionId} من <@${user.id}> — بانتظار الموافقة. لا تُضاف النقاط إلا بعد اعتماد المسؤولين.`); } catch {}
     return sendJson(res, 201, { ok: true, submissionId, discordPosted, warning, message: discordPosted ? 'اتسجل تسليم المهمة واترسل لروم التسليم.' : 'اتسجل التسليم في الموقع، لكن البوت لم يستطع إرساله لروم التسليم.' });
   }
 
@@ -693,13 +705,13 @@ async function handleApi(parts, req, res) {
     let taskRows = [];
     if (ids.length) {
       const placeholders = ids.map((_, index) => `$${index + 1}`).join(', ');
-      taskRows = await sql.query(`SELECT st.submission_id, t.id, t.title, t.required FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id IN (${placeholders}) ORDER BY t.required DESC, t.id`, ids);
+      taskRows = await sql.query(`SELECT st.submission_id, t.id, t.title, t.points, t.required FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id IN (${placeholders}) ORDER BY t.required DESC, t.id`, ids);
     }
     const tasksBySubmission = new Map();
     for (const row of taskRows) {
       const key = Number(row.submission_id);
       if (!tasksBySubmission.has(key)) tasksBySubmission.set(key, []);
-      tasksBySubmission.get(key).push({ id: Number(row.id), title: row.title, required: Boolean(row.required) });
+      tasksBySubmission.get(key).push({ id: Number(row.id), title: row.title, points: Number(row.points || 0), required: Boolean(row.required) });
     }
     const submissions = rows.map((row) => {
       const files = parseJson(row.files_json, []).map((file) => ({ ...file, url: `/api/evidence?token=${encodeURIComponent(file.token)}` }));
@@ -708,6 +720,48 @@ async function handleApi(parts, req, res) {
     return sendJson(res, 200, { submissions });
   }
 
+  if (route === 'points' && req.method === 'GET') {
+    const targetId = cleanText(req.query?.userId || user.id, 32);
+    if (targetId !== user.id && !canManage(user)) return sendError(res, 403, 'تقدر تشوف نقاطك فقط.');
+    const rows = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${targetId}`;
+    const recent = await sql`SELECT amount, reason, source, created_at FROM staff_points WHERE user_id = ${targetId} ORDER BY id DESC LIMIT 30`;
+    return sendJson(res, 200, { userId: targetId, points: Number(rows[0]?.total || 0), entries: recent.map(x => ({ amount: Number(x.amount), reason: x.reason, source: x.source, createdAt: x.created_at })) });
+  }
+  if (route === 'points' && req.method === 'POST') {
+    if (!canManage(user)) return sendError(res, 403, 'إضافة النقاط اليدوية للمسؤولين فقط.');
+    if (!ensureSameOrigin(req, res)) return;
+    const targetId = cleanText(req.body?.userId, 32);
+    const username = cleanText(req.body?.username || targetId, 100);
+    const amount = Number(req.body?.amount);
+    const reason = cleanText(req.body?.reason, 300);
+    if (!/^\d{17,20}$/.test(targetId) || !Number.isFinite(amount) || amount === 0 || Math.abs(amount) > 100000) return sendError(res, 400, 'حدد Discord ID صحيح ومقدار نقاط غير صفري (يسمح بالكسور).');
+    await sql`INSERT INTO staff_points(user_id, username, amount, reason, actor_id, actor_name, source, created_at) VALUES (${targetId}, ${username}, ${Math.round(amount*100)/100}, ${reason}, ${user.id}, ${user.username}, 'manual', NOW())`;
+    try { await postDiscordMessage(POINTS_LOG_CHANNEL_ID, `⭐ **تعديل نقاط يدوي**\\n**العضو:** <@${targetId}> (${username})\\n**التغيير:** ${amount > 0 ? '+' : ''}${Math.round(amount*100)/100} نقطة\\n**السبب:** ${reason || 'بدون سبب'}\\n**بواسطة:** <@${user.id}>`); } catch (e) { console.error('[points log]', cleanText(e.message,180)); }
+    const total = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${targetId}`;
+    return sendJson(res, 201, { ok: true, points: Number(total[0]?.total || 0) });
+  }
+  if (route === 'submissions' && parts.length === 3 && req.method === 'POST' && ['approve','reject'].includes(parts[2])) {
+    if (!canManage(user)) return sendError(res, 403, 'مراجعة التسليمات للمسؤولين فقط.');
+    if (!ensureSameOrigin(req, res)) return;
+    const id = Number(parts[1]);
+    const rows = await sql`SELECT * FROM submissions WHERE id = ${id} LIMIT 1`;
+    if (!rows.length) return sendError(res, 404, 'التسليم غير موجود.');
+    const sub = rows[0];
+    if (sub.status !== 'pending') return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
+    if (parts[2] === 'reject') {
+      const reason = cleanText(req.body?.reason, 300);
+      await sql`UPDATE submissions SET status = 'rejected', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending'`;
+      try { await postDiscordMessage(POINTS_LOG_CHANNEL_ID, `❌ تم رفض التسليم #${id} للعضو <@${sub.user_id}> بواسطة <@${user.id}>. السبب: ${reason || 'لم يُذكر سبب'}`); } catch {}
+      return sendJson(res, 200, { ok: true, status: 'rejected' });
+    }
+    const taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${id}`;
+    const amount = Math.round(taskRows.reduce((sum, t) => sum + Number(t.points || 0), 0) * 100) / 100;
+    const marked = await sql`UPDATE submissions SET status = 'approved', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id`;
+    if (!marked.length) return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
+    if (amount > 0) await sql`INSERT INTO staff_points(user_id, username, amount, reason, actor_id, actor_name, source, submission_id, created_at) VALUES (${sub.user_id}, ${sub.username}, ${amount}, ${`اعتماد تسليم #${id}`}, ${user.id}, ${user.username}, 'task', ${id}, NOW())`;
+    try { await postDiscordMessage(POINTS_LOG_CHANNEL_ID, `✅ **تم اعتماد تسليم مهمة**\\n**العضو:** <@${sub.user_id}>\\n**التسليم:** #${id}\\n**النقاط المضافة:** +${amount}\\n**المسؤول:** <@${user.id}>\\n**المهمات:** ${taskRows.map(t=>`${t.title} (${t.points})`).join('، ') || '—'}`); } catch {}
+    return sendJson(res, 200, { ok: true, status: 'approved', awarded: amount });
+  }
   if (route === 'chat' && parts.length === 2 && req.method === 'GET') {
     const room = parts[1];
     if (!['staff', 'management'].includes(room)) return sendError(res, 404, 'غرفة الشات مش موجودة.');

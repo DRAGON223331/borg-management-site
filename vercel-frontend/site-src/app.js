@@ -1,3 +1,5 @@
+import { upload as uploadToBlob } from '@vercel/blob/client';
+
 'use strict';
 
 const state = {
@@ -40,19 +42,43 @@ function showToast(message, type = 'info') {
   $('#toast-region').appendChild(toast);
   setTimeout(() => toast.remove(), 4300);
 }
+
 async function api(url, options = {}) {
-  const response = await fetch(url, { credentials: 'same-origin', ...options });
+  const response = await fetch(url, {
+    credentials: 'same-origin',
+    ...options
+  });
+
   const contentType = response.headers.get('content-type') || '';
-  const data = contentType.includes('application/json') ? await response.json() : { error: await response.text() };
+  let data;
+
+  if (contentType.includes('application/json')) {
+    data = await response.json();
+  } else {
+    const text = await response.text();
+    data = { error: text };
+  }
+
+  // عدم وجود جلسة عند فتح الموقع لأول مرة أمر طبيعي.
+  if (
+    url.split('?')[0] === '/api/me' &&
+    response.status === 401
+  ) {
+    return { authenticated: false };
+  }
+
   if (!response.ok) {
     if (response.status === 401 && state.user) {
       state.user = null;
       showLogin();
     }
+
     throw new Error(data.error || 'حصل خطأ في الطلب.');
   }
+
   return data;
 }
+
 function setButtonLoading(button, loading, text = 'جاري التنفيذ...') {
   if (!button) return;
   if (loading) {
@@ -104,9 +130,12 @@ async function initialize() {
       $$('.manager-only').forEach((element) => element.classList.remove('hidden'));
       $('#submissions-heading').textContent = 'آخر تسليمات الاستاف';
     }
-    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions()]);
+    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints()]);
     startChatPolling();
     setInterval(checkBotStatus, 30000);
+    setInterval(() => {
+      if ($('.page.active-page')?.id === 'page-tasks') loadTasks();
+    }, 60000);
   } catch (error) {
     showFatal(error.message || 'حصل خطأ أثناء تحميل الموقع.');
   }
@@ -125,7 +154,7 @@ function wireNavigation() {
   $$('.nav-tab').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.page)));
   $$('[data-go]').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.go)));
   $('#logout-btn').addEventListener('click', async () => {
-    try { await api('/auth/logout', { method: 'POST' }); }
+    try { await api('/api/auth/logout', { method: 'POST' }); }
     catch { /* cookie can expire by itself; still refresh */ }
     location.href = '/';
   });
@@ -148,9 +177,10 @@ async function checkBotStatus() {
     const health = await api('/api/health');
     const pill = $('#bot-status');
     const dot = $('.status-dot', pill);
-    pill.querySelector('span:last-child').textContent = health.botReady ? 'البوت متصل' : 'البوت غير متصل';
-    dot.classList.toggle('offline', !health.botReady);
-    pill.title = health.botReady ? 'اتصال البوت يعمل' : (health.botLastError || 'راجع إعدادات البوت');
+    const ready = Boolean(health.botReady && health.databaseReady && health.storageReady);
+    pill.querySelector('span:last-child').textContent = ready ? 'الخدمات جاهزة' : 'الإعدادات ناقصة';
+    dot.classList.toggle('offline', !ready);
+    pill.title = ready ? 'Discord API وقاعدة البيانات والتخزين جاهزين' : (!health.botReady ? (health.botLastError || 'راجع توكن البوت وصلاحياته') : !health.databaseReady ? 'اربط PostgreSQL بالمشروع من Vercel' : 'أنشئ Blob Store خاصًا واربطه بالمشروع');
   } catch { /* don't disrupt the interface for the status indicator */ }
 }
 
@@ -198,14 +228,14 @@ function renderTaskList() {
         <div class="task-row-desc">أُضيفت بواسطة ${escapeHtml(task.created_by_name || 'الإدارة')} · ${formatDate(task.created_at, { day: 'numeric', month: 'short' })}</div>
         <div class="task-row-meta">
           <span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? '● مهمة إجبارية' : '○ مهمة اختيارية'}</span>
-          <span class="task-id">#${task.id}</span>
+          <span class="task-id">#${task.id} · ⭐ ${Number(task.points || 0)} نقطة</span>
           ${task.completedByMe ? '<span class="task-tag completed">✓ تم تسليمها</span>' : ''}
         </div>
       </div>
       <div class="task-row-actions">
         ${task.completedByMe ? '<span class="task-complete-label">منجزة</span>' : ''}
-        ${state.user.canManage ? `<label class="task-manager-toggle"><input type="checkbox" data-required-toggle="${task.id}" ${task.required ? 'checked' : ''}> إجبارية</label>` : ''}
-        ${state.user.canManage ? `<button type="button" class="task-delete-button" data-delete-task="${task.id}" aria-label="حذف المهمة ${task.id}">🗑️ حذف</button>` : ''}
+      ${state.user.canManage ? `<label class="task-manager-toggle"><input type="checkbox" data-required-toggle="${task.id}" ${task.required ? 'checked' : ''}> إجبارية</label>` : ''}
+${state.user.canManage ? `<button type="button" class="task-delete-button" data-delete-task="${task.id}" aria-label="حذف المهمة ${task.id}">🗑️ حذف</button>` : ''}
       </div>
     </article>
   `).join('');
@@ -286,6 +316,7 @@ function wireTasks() {
     if (event.key === 'Enter') { event.preventDefault(); queueCurrentTask(); }
   });
   $('#publish-tasks-btn').addEventListener('click', publishQueuedTasks);
+  $('#manual-points-btn')?.addEventListener('click', sendManualPoints);
   $('#evidence-files').addEventListener('change', renderFileList);
   $('#submission-form').addEventListener('submit', submitTasks);
   $('#refresh-submissions-btn').addEventListener('click', loadSubmissions);
@@ -296,7 +327,9 @@ function queueCurrentTask() {
   const title = input.value.trim();
   if (!title) return showToast('اكتب اسم المهمة الأول.', 'error');
   if (state.queue.length >= 40) return showToast('أقصى عدد للمهمات في الدفعة الواحدة 40 مهمة.', 'error');
-  state.queue.push({ key: state.queueNextId++, title, required: $('#new-task-required').value === '1' });
+  const points = Number($('#new-task-points').value);
+  if (!Number.isFinite(points) || points < 0 || points > 100000) return showToast('اكتب عدد نقاط صحيح من 0 إلى 100000.', 'error');
+  state.queue.push({ key: state.queueNextId++, title, required: $('#new-task-required').value === '1', points: Math.round(points * 100) / 100 });
   input.value = '';
   input.focus();
   renderTaskQueue();
@@ -312,7 +345,7 @@ function renderTaskQueue() {
   queue.innerHTML = state.queue.map((item) => `
     <div class="queued-task" data-queue-key="${item.key}">
       <span class="task-id">${String(state.queue.indexOf(item) + 1).padStart(2, '0')}</span>
-      <div class="queued-task-title">${escapeHtml(item.title)}</div>
+      <div class="queued-task-title">${escapeHtml(item.title)} · ⭐ ${item.points} نقطة</div>
       <select data-queue-required="${item.key}" aria-label="نوع المهمة"><option value="1" ${item.required ? 'selected' : ''}>إجبارية</option><option value="0" ${!item.required ? 'selected' : ''}>اختيارية</option></select>
       <button class="remove-queue-item" data-remove-queue="${item.key}" aria-label="حذف المهمة">×</button>
     </div>
@@ -333,7 +366,7 @@ async function publishQueuedTasks() {
   try {
     const result = await api('/api/tasks', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tasks: state.queue.map(({ title, required }) => ({ title, required })) }),
+      body: JSON.stringify({ tasks: state.queue.map(({ title, required, points }) => ({ title, required, points })) }),
     });
     state.queue = [];
     renderTaskQueue();
@@ -356,15 +389,43 @@ async function submitTasks(event) {
   const links = $('#evidence-links').value.trim();
   const files = [...$('#evidence-files').files];
   if (!links && !files.length) return showToast('ضيف رابط دليل أو ارفع صورة/فيديو.', 'error');
-  const data = new FormData();
-  data.append('taskIds', JSON.stringify(taskIds));
-  data.append('evidenceLinks', links);
-  data.append('note', $('#submission-note').value.trim());
-  files.forEach((file) => data.append('evidenceFiles', file));
+  const maximumBytes = 100 * 1024 * 1024;
+  for (const file of files) {
+    if (!(file.type.startsWith('image/') || file.type.startsWith('video/'))) return showToast(`الملف ${file.name} مش صورة أو فيديو مدعوم.`, 'error');
+    if (file.size > maximumBytes) return showToast(`حجم ${file.name} أكبر من الحد المسموح (100MB).`, 'error');
+  }
   const button = $('#submit-tasks-btn');
-  setButtonLoading(button, true, 'جاري إرسال التسليم...');
+  setButtonLoading(button, true, 'جاري تجهيز التسليم...');
   try {
-    const result = await api('/api/submissions', { method: 'POST', body: data });
+    const uploadedFiles = [];
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-100) || 'evidence-file';
+      const pathname = `evidence/${state.user.id}/${Date.now()}-${index}-${safeName}`;
+      button.textContent = `جاري رفع الملف ${index + 1} من ${files.length}...`;
+      const blob = await uploadToBlob(pathname, file, {
+        access: 'private',
+        handleUploadUrl: '/api/uploads/token',
+        multipart: file.size > 5 * 1024 * 1024,
+        contentType: file.type,
+        onUploadProgress: (event) => {
+          const percentage = Math.round(event.percentage || 0);
+          button.textContent = `رفع الملف ${index + 1}/${files.length} · ${percentage}%`;
+        },
+      });
+      uploadedFiles.push({ pathname: blob.pathname, originalName: file.name, mimeType: file.type, size: file.size });
+    }
+    button.textContent = 'جاري تسجيل التسليم...';
+    const result = await api('/api/submissions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        taskIds,
+        evidenceLinks: links,
+        note: $('#submission-note').value.trim(),
+        files: uploadedFiles,
+      }),
+    });
     state.selectedTaskIds.clear();
     $('#submission-form').reset();
     renderFileList();
@@ -374,7 +435,6 @@ async function submitTasks(event) {
   } catch (error) { showToast(error.message, 'error'); }
   finally { setButtonLoading(button, false); }
 }
-
 async function loadSubmissions() {
   try {
     const result = await api('/api/submissions');
@@ -387,11 +447,27 @@ async function loadSubmissions() {
       const files = (submission.files || []).map((file) => `<a href="${escapeHtml(file.url)}" target="_blank" rel="noopener noreferrer">📎 ${escapeHtml(file.originalName || 'ملف مرفوع')}</a>`).join('');
       const links = (submission.evidenceLinks || []).map((link) => `<a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">↗ فتح رابط دليل</a>`).join('');
       const tasks = (submission.tasks || []).map((task) => `<span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? 'إجباري' : 'اختياري'} · ${escapeHtml(task.title)}</span>`).join('');
-      return `<article class="submission-card"><div class="submission-top"><div class="submission-user"><img src="${escapeHtml(submission.avatarUrl || avatarFallback(submission.userId))}" alt=""><span>${escapeHtml(submission.username)}</span><span class="task-id">#${submission.id}</span></div><time class="submission-date">${formatDate(submission.submittedAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</time></div><div class="submission-task-list">${tasks}</div>${submission.note ? `<div class="submission-note">${escapeHtml(submission.note)}</div>` : ''}${files || links ? `<div class="submission-evidence">${files}${links}</div>` : ''}</article>`;
+      return `<article class="submission-card"><div class="submission-top"><div class="submission-user"><img src="${escapeHtml(submission.avatarUrl || avatarFallback(submission.userId))}" alt=""><span>${escapeHtml(submission.username)}</span><span class="task-id">#${submission.id}</span><span class="task-tag ${submission.status === 'approved' ? 'completed' : submission.status === 'rejected' ? 'required' : 'optional'}">${submission.status === 'approved' ? 'تمت الموافقة' : submission.status === 'rejected' ? 'مرفوض' : 'بانتظار الموافقة'}</span></div><time class="submission-date">${formatDate(submission.submittedAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</time></div><div class="submission-task-list">${tasks}</div>${submission.note ? `<div class="submission-note">${escapeHtml(submission.note)}</div>` : ''}${files || links ? `<div class="submission-evidence">${files}${links}</div>` : ''}${state.user.canManage && submission.status === 'pending' ? `<div class="manager-actions"><button class="primary-button" data-review-submission="approve" data-id="${submission.id}">موافقة وإضافة النقاط</button><button class="secondary-button" data-review-submission="reject" data-id="${submission.id}">رفض التسليم</button></div>` : ''}</article>`;
     }).join('');
+    $$('[data-review-submission]').forEach(button => button.addEventListener('click', async () => { const action = button.dataset.reviewSubmission; const id = button.dataset.id; let reason = ''; if (action === 'reject') { reason = window.prompt('سبب رفض التسليم (اختياري):') || ''; } button.disabled = true; try { const result = await api(`/api/submissions/${id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }) }); showToast(action === 'approve' ? `تمت الموافقة وإضافة ${result.awarded} نقطة.` : 'تم رفض التسليم.', 'success'); await Promise.all([loadSubmissions(), loadMyPoints()]); } catch (error) { showToast(error.message, 'error'); button.disabled = false; } }));
   } catch (error) {
     $('#submissions-list').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
   }
+}
+
+async function loadMyPoints() {
+  try { const result = await api('/api/points'); const node = $('#my-points-total'); if (node) node.textContent = Number(result.points || 0).toLocaleString('en-US', { maximumFractionDigits: 2 }); }
+  catch { const node = $('#my-points-total'); if (node) node.textContent = '—'; }
+}
+async function sendManualPoints() {
+  const userId = $('#manual-points-user').value.trim();
+  const amount = Number($('#manual-points-amount').value);
+  const reason = $('#manual-points-reason').value.trim();
+  if (!/^\d{17,20}$/.test(userId) || !Number.isFinite(amount) || amount === 0) return showToast('اكتب Discord ID صحيح ومقدار نقاط غير صفري.', 'error');
+  const button = $('#manual-points-btn'); button.disabled = true;
+  try { await api('/api/points', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ userId, amount, reason, username: userId }) }); showToast('تم تعديل النقاط وتسجيل العملية.', 'success'); $('#manual-points-amount').value = ''; $('#manual-points-reason').value = ''; }
+  catch (error) { showToast(error.message, 'error'); }
+  finally { button.disabled = false; }
 }
 
 async function loadRoster() {
@@ -444,7 +520,7 @@ function startChatPolling() {
       }
       if (added) renderChat(room);
     } catch { /* Keep the current chat visible during brief network errors. */ }
-  }, 2500);
+  }, 4000);
 }
 function wireChats() {
   $('#staff-chat-form').addEventListener('submit', (event) => sendChat(event, 'staff'));
