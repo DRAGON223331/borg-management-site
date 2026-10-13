@@ -266,16 +266,44 @@ async function postDiscordMessage(channelId, content) {
   }
   return last;
 }
-function parseRoute(req) {
-  const parts = req.query?.path;
-  const segments = Array.isArray(parts) ? parts : (parts ? String(parts).split('/') : []);
-  return segments.map((part) => decodeURIComponent(String(part))).filter(Boolean);
-}
+
 function parseRequestUrl(req) {
-  const host = req.headers.host || 'localhost';
-  const proto = req.headers['x-forwarded-proto'] || 'https';
+  const host = req.headers?.host || 'localhost';
+  const proto = req.headers?.['x-forwarded-proto'] || 'https';
+
   return new URL(req.url || '/', `${proto}://${host}`);
 }
+
+function parseRoute(req) {
+  const parts = req.query?.path;
+  let segments;
+
+  if (Array.isArray(parts) && parts.length > 0) {
+    segments = parts;
+  } else if (
+    parts !== undefined &&
+    parts !== null &&
+    String(parts).length > 0
+  ) {
+    segments = String(parts).split('/');
+  } else {
+    const url = parseRequestUrl(req);
+    let pathname = url.pathname || '/';
+
+    if (pathname === '/api') {
+      pathname = '/';
+    } else if (pathname.startsWith('/api/')) {
+      pathname = pathname.slice('/api/'.length);
+    }
+
+    segments = pathname.split('/');
+  }
+
+  return segments
+    .map((part) => decodeURIComponent(String(part)))
+    .filter(Boolean);
+}
+
 
 async function handleAuth(parts, req, res) {
   const action = parts[1] || '';
