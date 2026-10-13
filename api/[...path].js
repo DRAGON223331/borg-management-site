@@ -560,6 +560,37 @@ async function handleApi(parts, req, res) {
     } catch (error) { warning = cleanText(error.message, 220); console.error('[task post]', warning); }
     return sendJson(res, 201, { created, discordPosted, warning, message: discordPosted ? 'تم إنشاء المهمات ونشرها في روم المهمات.' : 'تم حفظ المهمات في الموقع، لكن البوت لم يستطع نشرها في ديسكورد.' });
   }
+  
+  if (route === 'tasks' && parts.length === 2 && req.method === 'DELETE') {
+    if (!user.isManager) {
+      return sendError(res, 403, 'حذف المهمات متاح لمسؤولي الإدارة فقط.');
+    }
+
+    if (!ensureSameOrigin(req, res)) return;
+
+    const id = Number(parts[1]);
+
+    if (!Number.isSafeInteger(id) || id < 1) {
+      return sendError(res, 400, 'رقم المهمة غير صالح.');
+    }
+
+    const deleted = await sql`
+      UPDATE tasks
+      SET active = FALSE
+      WHERE id = ${id} AND active = TRUE
+      RETURNING id
+    `;
+
+    if (!deleted.length) {
+      return sendError(res, 404, 'المهمة مش موجودة أو تم حذفها بالفعل.');
+    }
+
+    return sendJson(res, 200, {
+      ok: true,
+      message: 'تم حذف المهمة من القائمة الحالية، وسجل التسليمات القديم محفوظ.'
+    });
+  }
+
   if (route === 'tasks' && parts.length === 2 && req.method === 'PATCH') {
     if (!canManage(user)) return sendError(res, 403, 'الصلاحية دي للمسؤولين فقط.');
     const id = Number(parts[1]);
