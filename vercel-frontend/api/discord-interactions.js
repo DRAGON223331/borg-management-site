@@ -92,6 +92,38 @@ function buildLeaveEmbed(item, status, reviewerId, note) {
 function isAdministrator(permissionBits) {
   try { return (BigInt(permissionBits || '0') & 8n) === 8n; } catch { return false; }
 }
+const fmtPoints = (n) => (Math.round(Number(n || 0) * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 });
+async function handleCommand(interaction, res) {
+  const name = String(interaction.data?.name || '');
+  if (name !== 'نقاطي' && name !== 'mypoints') return send(res, { type: 4, data: { content: 'الأمر ده مش مدعوم.', flags: 64 } });
+  const userId = String(interaction.member?.user?.id || interaction.user?.id || '');
+  let responded = false;
+  const reply = (payload) => { if (!responded) { responded = true; send(res, payload); } };
+  const timer = setTimeout(() => reply({ type: 5, data: { flags: 64 } }), 2300); // deferred, ephemeral
+  let data;
+  try {
+    const sql = await getSql();
+    const total = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${userId}`;
+    const recent = await sql`SELECT amount, reason FROM staff_points WHERE user_id = ${userId} ORDER BY id DESC LIMIT 5`;
+    const embed = {
+      title: '⭐ نقاطك',
+      description: `عندك **${fmtPoints(total[0]?.total)}** نقطة`,
+      color: 0x8b5cf6,
+      footer: { text: 'إدارة البرج' },
+    };
+    if (recent.length) embed.fields = [{ name: 'آخر الحركات', value: recent.map((r) => `${Number(r.amount) >= 0 ? '➕' : '➖'} ${fmtPoints(Math.abs(Number(r.amount)))} — ${cleanText(r.reason, 80) || 'بدون سبب'}`).join('\n').slice(0, 1024) }];
+    data = { embeds: [embed], flags: 64 };
+  } catch (error) {
+    console.error('[points command]', cleanText(error?.message || error, 200));
+    data = { content: 'تعذر جلب نقاطك دلوقتي: ' + cleanText(error?.message || error, 120), flags: 64 };
+  }
+  clearTimeout(timer);
+  if (!responded) return reply({ type: 4, data });
+  // Already deferred: fill in the reply through the interaction webhook (no bot token needed).
+  try {
+    await fetch(`${DISCORD_API}/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+  } catch (error) { console.error('[points command followup]', cleanText(error?.message || error, 160)); }
+}
 async function handler(req, res) {
   if (req.method !== 'POST') return send(res, { error: 'Method Not Allowed' }, 405);
   let rawBody;
@@ -102,6 +134,7 @@ async function handler(req, res) {
   let interaction;
   try { interaction = JSON.parse(rawBody.toString('utf8')); } catch { return send(res, { error: 'Invalid JSON' }, 400); }
   if (interaction.type === 1) return send(res, { type: 1 }); // Discord PING verification
+  if (interaction.type === 2) return handleCommand(interaction, res);
   if (interaction.type !== 3) return send(res, { type: 4, data: { content: 'نوع التفاعل غير مدعوم.', flags: 64 } });
 
   const customId = String(interaction.data?.custom_id || '');

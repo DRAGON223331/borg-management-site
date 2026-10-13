@@ -704,6 +704,15 @@ async function handleApi(parts, req, res) {
   if (route === 'uploads' && parts[1] === 'token') return handleUploadToken(req, res);
   if (!user) return sendError(res, 401, 'سجل دخولك بديسكورد أولًا.');
 
+  if (route === 'register-commands' && req.method === 'GET') {
+    if (!canManage(user)) return sendError(res, 403, 'متاح لمسؤولي الإدارة فقط.');
+    const commands = [
+      { name: 'نقاطي', type: 1, description: 'اعرف عندك كام نقطة' },
+      { name: 'mypoints', type: 1, description: 'Show how many points you have' },
+    ];
+    const registered = await discordApi(`/applications/${DISCORD_CLIENT_ID}/commands`, { method: 'PUT', body: JSON.stringify(commands) });
+    return sendJson(res, 200, { ok: true, commands: (registered || []).map((c) => c.name) });
+  }
   if (route === 'roster' && req.method === 'GET') {
     try { return sendJson(res, 200, await getRoster()); }
     catch (error) { console.error('[roster]', cleanText(error.message, 200)); return sendError(res, 503, `تعذر تحميل قائمة الاستاف: ${cleanText(error.message, 200)}`); }
