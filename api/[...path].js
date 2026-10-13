@@ -354,6 +354,17 @@ async function syncChannelMessageCounts(sql, { force = false, budgetMs = 9000 } 
   })();
   return messageSyncPromise;
 }
+
+// ───────── تسجيل أمر السلاش (mypoints فقط) ─────────
+const SLASH_COMMANDS = [
+  { name: 'mypoints', type: 1, description: 'Show how many points you have', description_localizations: { ar: 'اعرف عندك كام نقطة' } },
+];
+let commandsRegisteredAt = 0;
+async function registerSlashCommands() {
+  const registered = await discordApi(`/applications/${DISCORD_CLIENT_ID}/commands`, { method: 'PUT', body: JSON.stringify(SLASH_COMMANDS) });
+  commandsRegisteredAt = Date.now();
+  return (registered || []).map((c) => c.name);
+}
 async function getDailyStaffMessageStats(sql) {
   const [rows, todayRows] = await Promise.all([
     sql`SELECT user_id AS "userId", MAX(username) AS username, COUNT(*)::integer AS count
@@ -808,6 +819,10 @@ async function handleApi(parts, req, res) {
       try { await discordApi('/users/@me'); }
       catch (error) { botReady = false; botLastError = cleanText(error.message, 200); }
     }
+    if (botReady && Date.now() - commandsRegisteredAt > 6 * 60 * 60 * 1000) {
+      commandsRegisteredAt = Date.now() - 5 * 60 * 60 * 1000; // لو فشل التسجيل يعيد المحاولة بعد ساعة
+      try { await registerSlashCommands(); } catch (error) { console.error('[register commands]', cleanText(error?.message || error, 200)); }
+    }
     return sendJson(res, 200, { ok: true, botReady, botLastError, storageReady: Boolean(process.env.BLOB_READ_WRITE_TOKEN), databaseReady: Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || process.env.DATABASE_URL_UNPOOLED || process.env.POSTGRES_PRISMA_URL) });
   }
   if (route === 'me' && req.method === 'GET') {
@@ -831,12 +846,7 @@ async function handleApi(parts, req, res) {
 
   if (route === 'register-commands' && req.method === 'GET') {
     if (!canManage(user)) return sendError(res, 403, 'متاح لمسؤولي الإدارة فقط.');
-    const commands = [
-      { name: 'نقاطي', type: 1, description: 'اعرف عندك كام نقطة' },
-      { name: 'mypoints', type: 1, description: 'Show how many points you have' },
-    ];
-    const registered = await discordApi(`/applications/${DISCORD_CLIENT_ID}/commands`, { method: 'PUT', body: JSON.stringify(commands) });
-    return sendJson(res, 200, { ok: true, commands: (registered || []).map((c) => c.name) });
+    return sendJson(res, 200, { ok: true, commands: await registerSlashCommands() });
   }
   if (route === 'roster' && req.method === 'GET') {
     try { return sendJson(res, 200, await getRoster()); }

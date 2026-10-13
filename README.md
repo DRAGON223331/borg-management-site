@@ -139,4 +139,4 @@ To improve compatibility with Vercel route resolution, the project includes dedi
 - **لو بتشغّل `server.js`** (اتصال Gateway دائم): الأمر شغال تلقائيًا.
 - **لو على Vercel**: Vercel Functions مش بتقدر تسمع رسائل عادية، فشغّل مجلد `bot-worker/` على استضافة Node دائمة (Railway / Render / VPS) بالمتغيرين `DISCORD_BOT_TOKEN` و`DATABASE_URL` (نفس قاعدة بيانات الموقع)، بالأمر `npm install && npm start`.
 - في الحالتين لازم تفعّل **Message Content Intent** من Discord Developer Portal ← Bot ← Privileged Gateway Intents.
-- الرد بيكون في نفس الروم (رسائل ديسكورد العادية مفيش فيها رد خاص زي الـslash). الأمر `/نقاطي` القديم لسه شغال.
+- الرد بيكون في نفس الروم (رسائل ديسكورد العادية مفيش فيها رد خاص زي الـslash). الأمر السلاش الوحيد هو `/mypoints` (بيتسجل تلقائيًا).
