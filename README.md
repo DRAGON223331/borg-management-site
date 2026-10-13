@@ -126,3 +126,6 @@ To improve compatibility with Vercel route resolution, the project includes dedi
 - أضف في Vercel المتغير `CRON_SECRET` (أي نص عشوائي طويل)؛ Vercel يرسله تلقائيًا مع المهمة.
 - الرتب: `LEAVE_ROLE_MAIN_ID` و`LEAVE_ROLE_STAFF_ID` (الافتراضي: رتبتا الإدارة المحددتان). البوت يحتاج صلاحية Manage Roles ورتبته أعلى من هذه الرتب.
 - لا تُسحب الرتبة إلا إذا كان البوت هو من أعطاها.
+
+## Vercel setup
+`vercel.json` uses explicit `builds` so only `api/handler.js` and `api/discord-interactions.js` become Functions (2 total, far under the Hobby limit of 12) no matter what other files exist in the repo.

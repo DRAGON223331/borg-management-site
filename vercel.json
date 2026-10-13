@@ -1,76 +1,53 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": null,
   "version": 2,
-  "buildCommand": "npm run build",
-  "outputDirectory": "dist",
-  "installCommand": "npm install",
-  "functions": {
-    "api/[...path].js": {
-      "maxDuration": 60
-    },
-    "api/r.js": {
-      "maxDuration": 60
-    },
-    "api/discord-interactions.js": {
-      "maxDuration": 60
-    }
-  },
-  "headers": [
+  "builds": [
     {
-      "source": "/(.*)",
-      "headers": [
-        {
-          "key": "X-Content-Type-Options",
-          "value": "nosniff"
-        },
-        {
-          "key": "X-Frame-Options",
-          "value": "DENY"
-        },
-        {
-          "key": "Referrer-Policy",
-          "value": "strict-origin-when-cross-origin"
-        },
-        {
-          "key": "Permissions-Policy",
-          "value": "camera=(), microphone=(), geolocation=()"
-        }
-      ]
+      "src": "api/handler.js",
+      "use": "@vercel/node",
+      "config": {
+        "maxDuration": 60
+      }
+    },
+    {
+      "src": "api/discord-interactions.js",
+      "use": "@vercel/node",
+      "config": {
+        "maxDuration": 60
+      }
+    },
+    {
+      "src": "package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "dist"
+      }
     }
   ],
-  "rewrites": [
+  "routes": [
     {
-      "source": "/auth/:path*",
-      "destination": "/api/auth/:path*"
+      "src": "/(.*)",
+      "headers": {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "Permissions-Policy": "camera=(), microphone=(), geolocation=()"
+      },
+      "continue": true
     },
     {
-      "source": "/api/tasks/:id",
-      "destination": "/api/r?p=tasks/:id"
+      "handle": "filesystem"
     },
     {
-      "source": "/api/chat/:room",
-      "destination": "/api/r?p=chat/:room"
+      "src": "/api/discord-interactions",
+      "dest": "/api/discord-interactions.js"
     },
     {
-      "source": "/api/staff-stats/:userId",
-      "destination": "/api/r?p=staff-stats/:userId"
+      "src": "/api/(.*)",
+      "dest": "/api/handler.js?p=$1"
     },
     {
-      "source": "/api/submissions/:id/:action",
-      "destination": "/api/r?p=submissions/:id/:action"
-    },
-    {
-      "source": "/api/staff-requests/:id/:action",
-      "destination": "/api/r?p=staff-requests/:id/:action"
-    },
-    {
-      "source": "/api/leave-requests/:id/:action",
-      "destination": "/api/r?p=leave-requests/:id/:action"
-    },
-    {
-      "source": "/api/cron/leave-sync",
-      "destination": "/api/r?p=cron/leave-sync"
+      "src": "/auth/(.*)",
+      "dest": "/api/handler.js?p=auth/$1"
     }
   ],
   "crons": [
