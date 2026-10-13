@@ -234,6 +234,7 @@ function renderTaskList() {
       </div>
       <div class="task-row-actions">
         ${task.completedByMe ? '<span class="task-complete-label">منجزة</span>' : ''}
+      ${state.user.canManage ? `<label class="task-points-editor" title="تعديل نقاط المهمة">⭐ <input type="number" min="0" max="100000" step="0.01" value="${Number(task.points || 0)}" data-task-points="${task.id}" aria-label="نقاط المهمة ${task.id}"> <span>نقطة</span></label>` : ''}
       ${state.user.canManage ? `<label class="task-manager-toggle"><input type="checkbox" data-required-toggle="${task.id}" ${task.required ? 'checked' : ''}> إجبارية</label>` : ''}
 ${state.user.canManage ? `<button type="button" class="task-delete-button" data-delete-task="${task.id}" aria-label="حذف المهمة ${task.id}">🗑️ حذف</button>` : ''}
       </div>
@@ -244,6 +245,25 @@ ${state.user.canManage ? `<button type="button" class="task-delete-button" data-
     const id = Number(checkbox.dataset.selectTask);
     if (checkbox.checked) state.selectedTaskIds.add(id); else state.selectedTaskIds.delete(id);
     renderSelectedTasks();
+  }));
+  $$('[data-task-points]').forEach((input) => input.addEventListener('change', async () => {
+    const id = Number(input.dataset.taskPoints);
+    const raw = input.value.trim();
+    const points = Number(raw);
+    const original = state.tasks.find((item) => item.id === id);
+    if (!raw || !Number.isFinite(points) || points < 0 || points > 100000 || Math.round(points * 100) / 100 !== points) {
+      input.value = String(Number(original?.points || 0));
+      return showToast('اكتب نقاطًا من 0 إلى 100000 وبحد أقصى منزلتين عشريتين، مثل 0.1 أو 0.25.', 'error');
+    }
+    input.disabled = true;
+    try {
+      await api(`/api/tasks/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ points: Math.round(points * 100) / 100 }) });
+      showToast(`تم تحديث نقاط المهمة إلى ${points} نقطة.`, 'success');
+      await loadTasks();
+    } catch (error) {
+      input.value = String(Number(original?.points || 0));
+      showToast(error.message || 'تعذر تحديث نقاط المهمة.', 'error');
+    } finally { input.disabled = false; }
   }));
   $$('[data-required-toggle]').forEach((checkbox) => checkbox.addEventListener('change', async () => {
     const id = Number(checkbox.dataset.requiredToggle);
@@ -327,10 +347,12 @@ function queueCurrentTask() {
   const title = input.value.trim();
   if (!title) return showToast('اكتب اسم المهمة الأول.', 'error');
   if (state.queue.length >= 40) return showToast('أقصى عدد للمهمات في الدفعة الواحدة 40 مهمة.', 'error');
-  const points = Number($('#new-task-points').value);
-  if (!Number.isFinite(points) || points < 0 || points > 100000) return showToast('اكتب عدد نقاط صحيح من 0 إلى 100000.', 'error');
+  const pointsRaw = $('#new-task-points').value.trim();
+  const points = Number(pointsRaw);
+  if (!pointsRaw || !Number.isFinite(points) || points < 0 || points > 100000 || Math.round(points * 100) / 100 !== points) return showToast('اكتب نقاطًا من 0 إلى 100000 وبحد أقصى منزلتين عشريتين، مثل 0.1 أو 0.25.', 'error');
   state.queue.push({ key: state.queueNextId++, title, required: $('#new-task-required').value === '1', points: Math.round(points * 100) / 100 });
   input.value = '';
+  $('#new-task-points').value = '1';
   input.focus();
   renderTaskQueue();
 }
@@ -345,7 +367,8 @@ function renderTaskQueue() {
   queue.innerHTML = state.queue.map((item) => `
     <div class="queued-task" data-queue-key="${item.key}">
       <span class="task-id">${String(state.queue.indexOf(item) + 1).padStart(2, '0')}</span>
-      <div class="queued-task-title">${escapeHtml(item.title)} · ⭐ ${item.points} نقطة</div>
+      <div class="queued-task-title">${escapeHtml(item.title)}</div>
+      <label class="queued-task-points" title="عدد نقاط هذه المهمة">⭐ <input type="number" min="0" max="100000" step="0.01" value="${Number(item.points)}" data-queue-points="${item.key}" aria-label="نقاط ${escapeHtml(item.title)}"> <span>نقطة</span></label>
       <select data-queue-required="${item.key}" aria-label="نوع المهمة"><option value="1" ${item.required ? 'selected' : ''}>إجبارية</option><option value="0" ${!item.required ? 'selected' : ''}>اختيارية</option></select>
       <button class="remove-queue-item" data-remove-queue="${item.key}" aria-label="حذف المهمة">×</button>
     </div>
@@ -353,6 +376,18 @@ function renderTaskQueue() {
   $$('[data-queue-required]').forEach((select) => select.addEventListener('change', () => {
     const item = state.queue.find((row) => row.key === Number(select.dataset.queueRequired));
     if (item) item.required = select.value === '1';
+  }));
+  $$('[data-queue-points]').forEach((input) => input.addEventListener('change', () => {
+    const item = state.queue.find((row) => row.key === Number(input.dataset.queuePoints));
+    const raw = input.value.trim();
+    const points = Number(raw);
+    if (!item) return;
+    if (!raw || !Number.isFinite(points) || points < 0 || points > 100000 || Math.round(points * 100) / 100 !== points) {
+      input.value = String(item.points);
+      return showToast('اكتب نقاطًا من 0 إلى 100000 وبحد أقصى منزلتين عشريتين، مثل 0.1 أو 0.25.', 'error');
+    }
+    item.points = Math.round(points * 100) / 100;
+    renderTaskQueue();
   }));
   $$('[data-remove-queue]').forEach((button) => button.addEventListener('click', () => {
     state.queue = state.queue.filter((row) => row.key !== Number(button.dataset.removeQueue));

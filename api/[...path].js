@@ -218,6 +218,7 @@ function parseTaskLines(content) {
     const explicitMatch = line.match(/^(?:مهمة|task)\s*[:：-]\s*(.+)$/i);
     let title = '';
     let required = false;
+    let points = 1;
     if (taskMatch) {
       const tag = (taskMatch[1] || '').toLowerCase();
       title = taskMatch[2].trim();
@@ -227,8 +228,13 @@ function parseTaskLines(content) {
       required = /^\[(?:إجباري|اجباري|required|mandatory)\]/i.test(title);
       title = title.replace(/^\[(?:إجباري|اجباري|required|mandatory|اختياري|optional)\]\s*/i, '');
     } else continue;
+    const pointsMatch = title.match(/\s+\[(\d+(?:[.,]\d{1,2})?)\s*(?:نقطة|نقاط|points?)\]\s*$/i);
+    if (pointsMatch) {
+      points = Number(pointsMatch[1].replace(',', '.'));
+      title = title.slice(0, pointsMatch.index).trim();
+    }
     title = cleanText(title.replace(/^#\d+\s*[—–-]\s*/, '').replace(/^#\d+\s+/, ''), 240);
-    if (title && !/^(?:مهمات جديدة|المهمات|المهام|إدارة البرج)$/i.test(title)) tasks.push({ title, required });
+    if (title && !/^(?:مهمات جديدة|المهمات|المهام|إدارة البرج)$/i.test(title)) tasks.push({ title, required, points });
   }
   return tasks;
 }
@@ -244,8 +250,8 @@ async function syncDiscordTasks(sql) {
       const parsed = parseTaskLines(message.content);
       for (let index = 0; index < parsed.length; index += 1) {
         const task = parsed[index];
-        await sql`INSERT INTO tasks (title, required, active, created_by, created_by_name, created_at, source_message_id, source_line_index)
-          VALUES (${task.title}, ${task.required}, TRUE, ${message.author?.id || 'discord-system'}, ${message.author?.global_name || message.author?.username || 'Discord'}, NOW(), ${message.id}, ${index})
+        await sql`INSERT INTO tasks (title, points, required, active, created_by, created_by_name, created_at, source_message_id, source_line_index)
+          VALUES (${task.title}, ${task.points ?? 1}, ${task.required}, TRUE, ${message.author?.id || 'discord-system'}, ${message.author?.global_name || message.author?.username || 'Discord'}, NOW(), ${message.id}, ${index})
           ON CONFLICT (source_message_id, source_line_index) DO NOTHING`;
       }
     }
@@ -274,7 +280,15 @@ async function postDiscordMessage(channelId, content) {
   }
   return last;
 }
-
+function formatPoints(value) {
+  return (Math.round(Number(value || 0) * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 });
+}
+async function postDiscordEmbed(channelId, embed) {
+  return discordApi(`/channels/${channelId}/messages`, {
+    method: 'POST',
+    body: JSON.stringify({ embeds: [embed], allowed_mentions: { parse: [] } }),
+  });
+}
 function parseRequestUrl(req) {
   const host = req.headers?.host || 'localhost';
   const proto = req.headers?.['x-forwarded-proto'] || 'https';
@@ -561,7 +575,7 @@ async function handleApi(parts, req, res) {
     if (!canManage(user)) return sendError(res, 403, 'الصلاحية دي للمسؤولين فقط.');
     const raw = Array.isArray(req.body?.tasks) ? req.body.tasks : [];
     if (!raw.length || raw.length > 40) return sendError(res, 400, 'أضف من مهمة واحدة إلى 40 مهمة في المرة الواحدة.');
-    const tasks = raw.map((item) => { const points = Number(typeof item === 'string' ? 1 : (item?.points ?? 1)); return { title: cleanText(typeof item === 'string' ? item : item?.title, 240), required: typeof item === 'string' ? false : Boolean(item?.required), points: Number.isFinite(points) && points >= 0 && points <= 100000 ? Math.round(points * 100) / 100 : NaN }; }).filter((task) => task.title);
+    const tasks = raw.map((item) => { const points = Number(typeof item === 'string' ? 1 : (item?.points ?? 1)); return { title: cleanText(typeof item === 'string' ? item : item?.title, 240), required: typeof item === 'string' ? false : Boolean(item?.required), points: Number.isFinite(points) && points >= 0 && points <= 100000 && Math.round(points * 100) / 100 === points ? Math.round(points * 100) / 100 : NaN }; }).filter((task) => task.title);
     if (tasks.some((task) => !Number.isFinite(task.points))) return sendError(res, 400, 'عدد النقاط لازم يكون رقمًا من 0 إلى 100000، ويسمح بالكسور مثل 0.1.');
     if (!tasks.length) return sendError(res, 400, 'اكتب اسم مهمة صحيح.');
     const created = [];
@@ -572,7 +586,7 @@ async function handleApi(parts, req, res) {
     let discordPosted = false;
     let warning = '';
     try {
-      const lines = created.map((task) => `• [${task.required ? 'إجباري' : 'اختياري'}] #${task.id} — ${task.title} | ⭐ ${task.points} نقطة`);
+      const lines = created.map((task) => `• [${task.required ? 'إجباري' : 'اختياري'}] #${task.id} — ${task.title} [${formatPoints(task.points)} نقطة]`);
       let batch = [];
       let charCount = '📋 مهمات جديدة | إدارة البرج\n'.length;
       const batches = [];
@@ -629,7 +643,7 @@ async function handleApi(parts, req, res) {
     if (!found.length) return sendError(res, 404, 'المهمة مش موجودة أو اتقفلت.');
     const updates = [];
     if (typeof req.body?.required === 'boolean') updates.push({ field: 'required', value: req.body.required });
-    if (req.body?.points !== undefined) { const points = Number(req.body.points); if (!Number.isFinite(points) || points < 0 || points > 100000) return sendError(res, 400, 'عدد النقاط غير صالح.'); updates.push({ field: 'points', value: Math.round(points * 100) / 100 }); }
+    if (req.body?.points !== undefined) { const points = Number(req.body.points); if (!Number.isFinite(points) || points < 0 || points > 100000 || Math.round(points * 100) / 100 !== points) return sendError(res, 400, 'عدد النقاط غير صالح؛ استخدم رقمًا من منزلتين عشريتين كحد أقصى مثل 0.1 أو 0.25.'); updates.push({ field: 'points', value: Math.round(points * 100) / 100 }); }
     if (typeof req.body?.active === 'boolean') updates.push({ field: 'active', value: req.body.active });
     if (!updates.length) return sendError(res, 400, 'مفيش تعديل صالح.');
     for (const item of updates) {
@@ -734,11 +748,29 @@ async function handleApi(parts, req, res) {
     const username = cleanText(req.body?.username || targetId, 100);
     const amount = Number(req.body?.amount);
     const reason = cleanText(req.body?.reason, 300);
-    if (!/^\d{17,20}$/.test(targetId) || !Number.isFinite(amount) || amount === 0 || Math.abs(amount) > 100000) return sendError(res, 400, 'حدد Discord ID صحيح ومقدار نقاط غير صفري (يسمح بالكسور).');
-    await sql`INSERT INTO staff_points(user_id, username, amount, reason, actor_id, actor_name, source, created_at) VALUES (${targetId}, ${username}, ${Math.round(amount*100)/100}, ${reason}, ${user.id}, ${user.username}, 'manual', NOW())`;
-    try { await postDiscordMessage(POINTS_LOG_CHANNEL_ID, `⭐ **تعديل نقاط يدوي**\\n**العضو:** <@${targetId}> (${username})\\n**التغيير:** ${amount > 0 ? '+' : ''}${Math.round(amount*100)/100} نقطة\\n**السبب:** ${reason || 'بدون سبب'}\\n**بواسطة:** <@${user.id}>`); } catch (e) { console.error('[points log]', cleanText(e.message,180)); }
+    if (!/^\d{17,20}$/.test(targetId) || !Number.isFinite(amount) || amount === 0 || Math.abs(amount) > 100000 || Math.round(amount * 100) / 100 !== amount) return sendError(res, 400, 'حدد Discord ID صحيحًا ومقدار نقاط غير صفري حتى منزلتين عشريتين مثل 0.1 أو 0.25.');
+    const cleanAmount = Math.round(amount * 100) / 100;
+    await sql`INSERT INTO staff_points(user_id, username, amount, reason, actor_id, actor_name, source, created_at) VALUES (${targetId}, ${username}, ${cleanAmount}, ${reason}, ${user.id}, ${user.username}, 'manual', NOW())`;
     const total = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${targetId}`;
-    return sendJson(res, 201, { ok: true, points: Number(total[0]?.total || 0) });
+    const currentTotal = Number(total[0]?.total || 0);
+    try {
+      await postDiscordEmbed(POINTS_LOG_CHANNEL_ID, {
+        title: cleanAmount > 0 ? '⭐ تعديل النقاط — إضافة رصيد' : '⭐ تعديل النقاط — خصم رصيد',
+        description: 'تم تسجيل حركة نقاط يدوية من لوحة إدارة البرج.',
+        color: cleanAmount > 0 ? 0x22C55E : 0xEF4444,
+        fields: [
+          { name: '👤 العضو', value: `<@${targetId}>\n\`${targetId}\``, inline: true },
+          { name: '💠 مقدار التغيير', value: `**${cleanAmount > 0 ? '+' : ''}${formatPoints(cleanAmount)} نقطة**`, inline: true },
+          { name: '📊 الرصيد الحالي', value: `**${formatPoints(currentTotal)} نقطة**`, inline: true },
+          { name: '📝 السبب', value: (reason || 'لم يتم تحديد سبب').slice(0, 1024), inline: false },
+          { name: '🛡️ بواسطة المسؤول', value: `<@${user.id}>\n\`${user.id}\``, inline: true },
+          { name: '🕒 وقت التعديل', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true },
+        ],
+        footer: { text: 'Borg Management • Points Ledger' },
+        timestamp: new Date().toISOString(),
+      });
+    } catch (e) { console.error('[points log]', cleanText(e.message, 180)); }
+    return sendJson(res, 201, { ok: true, points: currentTotal });
   }
   if (route === 'submissions' && parts.length === 3 && req.method === 'POST' && ['approve','reject'].includes(parts[2])) {
     if (!canManage(user)) return sendError(res, 403, 'مراجعة التسليمات للمسؤولين فقط.');
@@ -751,7 +783,20 @@ async function handleApi(parts, req, res) {
     if (parts[2] === 'reject') {
       const reason = cleanText(req.body?.reason, 300);
       await sql`UPDATE submissions SET status = 'rejected', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending'`;
-      try { await postDiscordMessage(POINTS_LOG_CHANNEL_ID, `❌ تم رفض التسليم #${id} للعضو <@${sub.user_id}> بواسطة <@${user.id}>. السبب: ${reason || 'لم يُذكر سبب'}`); } catch {}
+      try {
+        await postDiscordEmbed(POINTS_LOG_CHANNEL_ID, {
+          title: '❌ تم رفض تسليم مهمة',
+          description: `تم رفض التسليم **#${id}**، ولم تتم إضافة أي نقاط إلى رصيد العضو.`,
+          color: 0xEF4444,
+          fields: [
+            { name: '👤 العضو', value: `<@${sub.user_id}>`, inline: true },
+            { name: '🛡️ المسؤول', value: `<@${user.id}>`, inline: true },
+            { name: '📝 سبب الرفض', value: (reason || 'لم يتم تحديد سبب').slice(0, 1024), inline: false },
+          ],
+          footer: { text: 'Borg Management • Task Review' },
+          timestamp: new Date().toISOString(),
+        });
+      } catch (e) { console.error('[submission reject log]', cleanText(e.message, 180)); }
       return sendJson(res, 200, { ok: true, status: 'rejected' });
     }
     const taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${id}`;
@@ -759,7 +804,25 @@ async function handleApi(parts, req, res) {
     const marked = await sql`UPDATE submissions SET status = 'approved', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id`;
     if (!marked.length) return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
     if (amount > 0) await sql`INSERT INTO staff_points(user_id, username, amount, reason, actor_id, actor_name, source, submission_id, created_at) VALUES (${sub.user_id}, ${sub.username}, ${amount}, ${`اعتماد تسليم #${id}`}, ${user.id}, ${user.username}, 'task', ${id}, NOW())`;
-    try { await postDiscordMessage(POINTS_LOG_CHANNEL_ID, `✅ **تم اعتماد تسليم مهمة**\\n**العضو:** <@${sub.user_id}>\\n**التسليم:** #${id}\\n**النقاط المضافة:** +${amount}\\n**المسؤول:** <@${user.id}>\\n**المهمات:** ${taskRows.map(t=>`${t.title} (${t.points})`).join('، ') || '—'}`); } catch {}
+    const totalAfterRows = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${sub.user_id}`;
+    const totalAfter = Number(totalAfterRows[0]?.total || 0);
+    const taskSummary = taskRows.map(t => `• **${cleanText(t.title, 180)}** — ${formatPoints(t.points)} نقطة`).join('\n').slice(0, 1024) || 'لا توجد مهمات مرتبطة بالتسليم.';
+    try {
+      await postDiscordEmbed(POINTS_LOG_CHANNEL_ID, {
+        title: '✅ اعتماد تسليم مهمة وإضافة النقاط',
+        description: `تمت مراجعة التسليم **#${id}** واعتماده بواسطة الإدارة.`,
+        color: 0x22C55E,
+        fields: [
+          { name: '👤 العضو', value: `<@${sub.user_id}>`, inline: true },
+          { name: '💎 النقاط المضافة', value: `**+${formatPoints(amount)} نقطة**`, inline: true },
+          { name: '📊 الرصيد بعد الاعتماد', value: `**${formatPoints(totalAfter)} نقطة**`, inline: true },
+          { name: '🛡️ المسؤول', value: `<@${user.id}>`, inline: true },
+          { name: '📋 تفاصيل المهمات والنقاط', value: taskSummary, inline: false },
+        ],
+        footer: { text: 'Borg Management • Task Review' },
+        timestamp: new Date().toISOString(),
+      });
+    } catch (e) { console.error('[submission approve log]', cleanText(e.message, 180)); }
     return sendJson(res, 200, { ok: true, status: 'approved', awarded: amount });
   }
   if (route === 'chat' && parts.length === 2 && req.method === 'GET') {

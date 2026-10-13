@@ -154,6 +154,11 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .queued-task { display: flex; align-items: center; gap: 10px; background: rgba(11,17,30,.65); border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px; }
 .queued-task-title { flex: 1; min-width: 0; font-size: 11px; overflow-wrap: anywhere; }
 .queued-task select { background: #1a263b; color: #e9e5ff; border: 1px solid var(--border); border-radius: 8px; padding: 6px 7px; font-size: 10px; }
+.queued-task-points, .task-points-editor { display: inline-flex; align-items: center; gap: 5px; color: #d9ccff; font-size: 10px; white-space: nowrap; }
+.queued-task-points input, .task-points-editor input { width: 68px; min-width: 0; padding: 6px 7px; border: 1px solid rgba(137,114,251,.32); border-radius: 7px; background: #0d1524; color: #f3efff; font: inherit; font-variant-numeric: tabular-nums; }
+.queued-task-points input:focus, .task-points-editor input:focus { outline: 1px solid rgba(137,114,251,.65); }
+.task-points-editor input { width: 64px; }
+.task-points-editor:has(input:disabled) { opacity: .6; }
 .remove-queue-item { border: 0; color: #8a99b0; background: transparent; font-size: 17px; padding: 2px 5px; }
 .task-delete-button { border: 1px solid rgba(248,113,113,.24); border-radius: 8px; padding: 6px 9px; color: #fca5a5; background: rgba(127,29,29,.15); font-size: 10px; font-weight: 800; white-space: nowrap; cursor: pointer; }
 .task-delete-button:hover { background: rgba(127,29,29,.28); border-color: rgba(248,113,113,.45); }
@@ -327,6 +332,8 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   .queued-task { gap: 6px; padding: 8px; }
   .queued-task-title { font-size: 10px; }
   .queued-task select { font-size: 9px; max-width: 90px; }
+  .queued-task-points input { width: 56px; }
+  .queued-task-points, .task-points-editor { font-size: 9px; }
   .manager-actions { align-items: stretch; flex-direction: column; }
   .login-card { padding: 35px 22px 28px; }
 }
