@@ -130,7 +130,7 @@ function wireNavigation() {
   $$('.nav-tab').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.page)));
   $$('[data-go]').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.go)));
   $('#logout-btn').addEventListener('click', async () => {
-    try { await api('/auth/logout', { method: 'POST' }); }
+    try { await api('/api/auth/logout', { method: 'POST' }); }
     catch { /* cookie can expire by itself; still refresh */ }
     location.href = '/';
   });
