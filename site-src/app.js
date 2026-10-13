@@ -234,7 +234,8 @@ function renderTaskList() {
       </div>
       <div class="task-row-actions">
         ${task.completedByMe ? '<span class="task-complete-label">منجزة</span>' : ''}
-        ${state.user.canManage ? `<label class="task-manager-toggle"><input type="checkbox" data-required-toggle="${task.id}" ${task.required ? 'checked' : ''}> إجبارية</label>` : ''}
+      ${state.user.canManage ? `<label class="task-manager-toggle"><input type="checkbox" data-required-toggle="${task.id}" ${task.required ? 'checked' : ''}> إجبارية</label>` : ''}
+${state.user.isManager ? `<button type="button" class="task-delete-button" data-delete-task="${task.id}">🗑️ حذف</button>` : ''}
       </div>
     </article>
   `).join('');
