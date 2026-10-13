@@ -14,6 +14,7 @@ const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
 const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
+const LEAVE_REQUEST_CHANNEL_ID = '1558102515885678734';
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '1559176035432402976';
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const COOKIE_SECRET = process.env.SESSION_SECRET || '';
@@ -185,6 +186,21 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_chat_room_id ON chat_messages(room, id DESC)`;
+    await sql`CREATE TABLE IF NOT EXISTS leave_requests (
+      id BIGSERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      username TEXT NOT NULL,
+      avatar_url TEXT,
+      start_date DATE NOT NULL,
+      end_date DATE NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      review_note TEXT NOT NULL DEFAULT '',
+      reviewed_by TEXT,
+      reviewed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_leave_requests_user ON leave_requests(user_id, created_at DESC)`;
   })();
   return schemaPromise;
 }
@@ -652,6 +668,56 @@ async function handleApi(parts, req, res) {
       if (item.field === 'active') await sql`UPDATE tasks SET active = ${item.value} WHERE id = ${id}`;
     }
     return sendJson(res, 200, { ok: true });
+  }
+
+  if (route === 'leave-requests' && parts.length === 1 && req.method === 'POST') {
+    const startDate = cleanText(req.body?.startDate, 10);
+    const endDate = cleanText(req.body?.endDate, 10);
+    const reason = cleanText(req.body?.reason, 600);
+    const validDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+    if (!validDate(startDate) || !validDate(endDate) || endDate < startDate) return sendError(res, 400, 'اختار تاريخ بداية ونهاية صحيحين، وتأكد إن النهاية ليست قبل البداية.');
+    if (!reason) return sendError(res, 400, 'اكتب سبب طلب الإجازة.');
+    const inserted = await sql`INSERT INTO leave_requests(user_id, username, avatar_url, start_date, end_date, reason, status, created_at)
+      VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, ${startDate}, ${endDate}, ${reason}, 'pending', NOW()) RETURNING id, created_at`;
+    const id = Number(inserted[0].id);
+    let discordPosted = false;
+    try {
+      await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, {
+        title: `🗓️ طلب إجازة جديد #${id}`,
+        description: 'طلب إجازة جديد بانتظار مراجعة مسؤولي الإدارة من لوحة الموقع.',
+        color: 0x8b5cf6,
+        fields: [
+          { name: '👤 العضو', value: `<@${user.id}>\n\`${user.id}\``, inline: true },
+          { name: '📅 من', value: startDate, inline: true },
+          { name: '📅 إلى', value: endDate, inline: true },
+          { name: '📝 السبب', value: reason.slice(0, 1024), inline: false },
+          { name: '🔎 المراجعة', value: `رقم الطلب: #${id}\nالموافقة أو الرفض من لوحة إدارة البرج.`, inline: false },
+        ],
+        timestamp: new Date().toISOString(),
+        footer: { text: 'إدارة البرج • طلبات الإجازة' },
+        ...(user.avatarUrl ? { thumbnail: { url: user.avatarUrl } } : {}),
+      });
+      discordPosted = true;
+    } catch (error) { console.error('[leave request post]', cleanText(error.message, 200)); }
+    return sendJson(res, 201, { ok: true, id, discordPosted, message: discordPosted ? 'تم إرسال طلب الإجازة لروم الإدارة.' : 'تم حفظ الطلب، لكن البوت لم يستطع إرساله إلى روم ديسكورد. راجع إعدادات البوت.' });
+  }
+  if (route === 'leave-requests' && parts.length === 1 && req.method === 'GET') {
+    const rows = canManage(user)
+      ? await sql`SELECT * FROM leave_requests ORDER BY id DESC LIMIT 100`
+      : await sql`SELECT * FROM leave_requests WHERE user_id = ${user.id} ORDER BY id DESC LIMIT 40`;
+    return sendJson(res, 200, { requests: rows.map(row => ({ id: Number(row.id), userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, startDate: String(row.start_date).slice(0, 10), endDate: String(row.end_date).slice(0, 10), reason: row.reason, status: row.status, reviewNote: row.review_note, reviewedBy: row.reviewed_by, reviewedAt: row.reviewed_at, createdAt: row.created_at })) });
+  }
+  if (route === 'leave-requests' && parts.length === 3 && req.method === 'POST' && ['approve', 'reject'].includes(parts[2])) {
+    if (!canManage(user)) return sendError(res, 403, 'مراجعة طلبات الإجازة متاحة لمسؤولي الإدارة فقط.');
+    const id = Number(parts[1]);
+    if (!Number.isSafeInteger(id) || id < 1) return sendError(res, 400, 'رقم طلب الإجازة غير صالح.');
+    const note = cleanText(req.body?.note, 400);
+    const status = parts[2] === 'approve' ? 'approved' : 'rejected';
+    const rows = await sql`UPDATE leave_requests SET status = ${status}, review_note = ${note}, reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id, user_id, username, start_date, end_date`;
+    if (!rows.length) return sendError(res, 404, 'الطلب غير موجود أو تمت مراجعته بالفعل.');
+    const item = rows[0];
+    try { await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, { title: status === 'approved' ? `✅ تمت الموافقة على طلب الإجازة #${id}` : `❌ تم رفض طلب الإجازة #${id}`, description: `العضو: <@${item.user_id}>\nالفترة: ${String(item.start_date).slice(0,10)} — ${String(item.end_date).slice(0,10)}\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}`, color: status === 'approved' ? 0x22c55e : 0xef4444, timestamp: new Date().toISOString() }); } catch (error) { console.error('[leave review log]', cleanText(error.message, 180)); }
+    return sendJson(res, 200, { ok: true, message: status === 'approved' ? 'تمت الموافقة على طلب الإجازة.' : 'تم رفض طلب الإجازة.' });
   }
 
   if (route === 'submissions' && parts.length === 1 && req.method === 'POST') {

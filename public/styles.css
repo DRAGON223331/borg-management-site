@@ -337,3 +337,17 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   .manager-actions { align-items: stretch; flex-direction: column; }
   .login-card { padding: 35px 22px 28px; }
 }
+
+
+.leave-request-box { margin-top: 24px; padding: clamp(17px, 2vw, 24px); border: 1px solid rgba(137,114,251,.2); border-radius: 19px; background: linear-gradient(145deg, rgba(137,114,251,.055), #111a29 45%); }
+.leave-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; margin: 16px 0 20px; }
+.leave-form label { align-self: end; font-size: 11px; color: var(--muted); }
+.leave-form input, .leave-form textarea { width: 100%; min-width: 0; border: 1px solid rgba(165,180,205,.16); border-radius: 11px; background: #0d1524; color: var(--text); padding: 11px 13px; font: inherit; }
+.leave-form textarea, .leave-form button { grid-column: 1 / -1; }
+.leave-requests-list { display: grid; gap: 10px; margin-top: 14px; }
+.leave-card { padding: 14px; border: 1px solid rgba(165,180,205,.12); border-radius: 12px; background: rgba(8,14,26,.45); }
+.leave-card-top { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.leave-dates { margin-top: 10px; color: #c5b9ff; direction:ltr; text-align:right; font-size:12px; }
+.leave-card p { font-size:12px; line-height:1.7; overflow-wrap:anywhere; }
+.member-row { cursor: context-menu; }
+@media (max-width: 620px) { .leave-form { grid-template-columns: 1fr; } .leave-form label { margin-top: 4px; } }

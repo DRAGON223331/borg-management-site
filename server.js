@@ -31,6 +31,7 @@ const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
 const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
 const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
+const LEAVE_REQUEST_CHANNEL_ID = '1558102515885678734';
 const MANAGER_IDS = new Set((process.env.MANAGER_IDS || '1286035404323164172,1525203473262706821,848304089057460254,1475483362536980552')
   .split(',').map((x) => x.trim()).filter(Boolean));
 const ATTACHMENT_LIMIT_MB = Math.max(1, Number(process.env.DISCORD_ATTACHMENT_LIMIT_MB || 8));
@@ -106,6 +107,22 @@ db.exec(`
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_chat_room_id ON chat_messages(room, id DESC);
+
+  CREATE TABLE IF NOT EXISTS leave_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    avatar_url TEXT,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    review_note TEXT NOT NULL DEFAULT '',
+    reviewed_by TEXT,
+    reviewed_at TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_leave_requests_user ON leave_requests(user_id, created_at DESC);
 `);
 
 class SqliteSessionStore extends session.Store {
@@ -709,6 +726,46 @@ app.get('/api/submissions', requireAuth, (req, res) => {
     tasks: mapTasks.all(row.id).map((task) => ({ ...task, required: Boolean(task.required) })),
   }));
   res.json({ submissions: data });
+});
+
+app.post('/api/leave-requests', requireAuth, async (req, res) => {
+  const startDate = cleanText(req.body?.startDate, 10);
+  const endDate = cleanText(req.body?.endDate, 10);
+  const reason = cleanText(req.body?.reason, 600);
+  const validDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+  if (!validDate(startDate) || !validDate(endDate) || endDate < startDate) return res.status(400).json({ error: 'اختار تاريخ بداية ونهاية صحيحين، وتأكد إن النهاية ليست قبل البداية.' });
+  if (!reason) return res.status(400).json({ error: 'اكتب سبب طلب الإجازة.' });
+  const user = req.session.user;
+  const result = db.prepare(`INSERT INTO leave_requests(user_id, username, avatar_url, start_date, end_date, reason, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`).run(user.id, user.username, profileAvatar(user), startDate, endDate, reason, nowIso());
+  const id = Number(result.lastInsertRowid);
+  let discordPosted = false;
+  try {
+    const channel = await fetchTextChannel(LEAVE_REQUEST_CHANNEL_ID);
+    const embed = new EmbedBuilder().setColor(0x8b5cf6).setTitle(`🗓️ طلب إجازة جديد #${id}`).setDescription('طلب إجازة جديد بانتظار مراجعة مسؤولي الإدارة من لوحة الموقع.').addFields(
+      { name: '👤 العضو', value: `<@${user.id}>\n\`${user.id}\``, inline: true },
+      { name: '📅 من', value: startDate, inline: true }, { name: '📅 إلى', value: endDate, inline: true },
+      { name: '📝 السبب', value: reason.slice(0, 1024), inline: false },
+      { name: '🔎 المراجعة', value: `رقم الطلب: #${id}\nالموافقة أو الرفض من لوحة إدارة البرج.`, inline: false },
+    ).setTimestamp(new Date()).setFooter({ text: 'إدارة البرج • طلبات الإجازة' });
+    await channel.send({ embeds: [embed], allowedMentions: { parse: [] } }); discordPosted = true;
+  } catch (error) { console.error('[leave request post]', error.message); }
+  res.status(201).json({ ok: true, id, discordPosted, message: discordPosted ? 'تم إرسال طلب الإجازة لروم الإدارة.' : 'تم حفظ الطلب، لكن البوت لم يستطع إرساله إلى روم ديسكورد.' });
+});
+app.get('/api/leave-requests', requireAuth, (req, res) => {
+  const user = req.session.user;
+  const rows = canManage(user) ? db.prepare('SELECT * FROM leave_requests ORDER BY id DESC LIMIT 100').all() : db.prepare('SELECT * FROM leave_requests WHERE user_id = ? ORDER BY id DESC LIMIT 40').all(user.id);
+  res.json({ requests: rows.map(row => ({ id: row.id, userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, startDate: row.start_date, endDate: row.end_date, reason: row.reason, status: row.status, reviewNote: row.review_note, reviewedBy: row.reviewed_by, reviewedAt: row.reviewed_at, createdAt: row.created_at })) });
+});
+app.post('/api/leave-requests/:id/:action', requireAuth, async (req, res) => {
+  const user = req.session.user;
+  if (!canManage(user)) return res.status(403).json({ error: 'مراجعة طلبات الإجازة متاحة لمسؤولي الإدارة فقط.' });
+  const id = Number(req.params.id); const action = req.params.action;
+  if (!Number.isSafeInteger(id) || id < 1 || !['approve', 'reject'].includes(action)) return res.status(400).json({ error: 'طلب المراجعة غير صالح.' });
+  const status = action === 'approve' ? 'approved' : 'rejected'; const note = cleanText(req.body?.note, 400);
+  const update = db.prepare("UPDATE leave_requests SET status = ?, review_note = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ? AND status = 'pending'").run(status, note, user.id, nowIso(), id);
+  if (!update.changes) return res.status(404).json({ error: 'الطلب غير موجود أو تمت مراجعته بالفعل.' });
+  try { const channel = await fetchTextChannel(LEAVE_REQUEST_CHANNEL_ID); await channel.send({ embeds: [new EmbedBuilder().setColor(status === 'approved' ? 0x22c55e : 0xef4444).setTitle(status === 'approved' ? `✅ تمت الموافقة على طلب الإجازة #${id}` : `❌ تم رفض طلب الإجازة #${id}`).setDescription(`المراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}`).setTimestamp(new Date())], allowedMentions: { parse: [] } }); } catch (error) { console.error('[leave review log]', error.message); }
+  res.json({ ok: true, message: status === 'approved' ? 'تمت الموافقة على طلب الإجازة.' : 'تم رفض طلب الإجازة.' });
 });
 
 app.get('/api/chat/:room', requireAuth, (req, res) => {

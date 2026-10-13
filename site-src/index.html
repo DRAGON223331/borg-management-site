@@ -91,6 +91,22 @@
               <div class="chat-symbol">☷</div><div><h3>التواصل مع الفريق</h3><p>استخدم شات الاستاف للتنسيق، وشات المسؤولين متاح للمسؤولين المحددين فقط.</p><button class="secondary-button compact" data-go="staff-chat">فتح شات الاستاف</button></div>
             </article>
           </div>
+
+          <section class="leave-request-box">
+            <div class="section-title-row"><div><span class="tiny-label">STAFF LEAVE</span><h2>طلب إجازة</h2></div><span class="manager-badge">مراجعة الإدارة</span></div>
+            <p class="muted small-copy">قدّم طلبك وحدد المدة والسبب، وهيظهر لمسؤولي الإدارة للمراجعة.</p>
+            <form id="leave-request-form" class="leave-form">
+              <label for="leave-start">من تاريخ</label><input id="leave-start" type="date" required>
+              <label for="leave-end">إلى تاريخ</label><input id="leave-end" type="date" required>
+              <label for="leave-reason">سبب الإجازة</label><textarea id="leave-reason" rows="3" maxlength="600" placeholder="اكتب سبب الإجازة..." required></textarea>
+              <button type="submit" class="primary-button">إرسال طلب الإجازة</button>
+            </form>
+            <div id="leave-requests-list" class="leave-requests-list"><div class="loading-state">جاري تحميل طلبات الإجازة...</div></div>
+          </section>
+          <section id="manager-leave-section" class="leave-request-box hidden">
+            <div class="section-title-row"><div><span class="tiny-label">MANAGEMENT REVIEW</span><h2>مراجعة طلبات الإجازة</h2></div><button id="refresh-leaves-btn" class="text-button" type="button">تحديث ↻</button></div>
+            <div id="manager-leave-list" class="leave-requests-list"><div class="loading-state">جاري تحميل الطلبات...</div></div>
+          </section>
         </section>
 
         <section id="page-tasks" class="page">

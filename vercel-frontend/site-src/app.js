@@ -125,12 +125,14 @@ async function initialize() {
     wireTasks();
     wireChats();
     wireRoster();
+    wireLeaveRequests();
     if (state.user.canManage) {
       $('#task-manager').classList.remove('hidden');
       $$('.manager-only').forEach((element) => element.classList.remove('hidden'));
       $('#submissions-heading').textContent = 'آخر تسليمات الاستاف';
+      $('#manager-leave-section').classList.remove('hidden');
     }
-    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints()]);
+    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests()]);
     startChatPolling();
     setInterval(checkBotStatus, 30000);
     setInterval(() => {
@@ -530,9 +532,63 @@ function renderRoster() {
   $('#roster-content').innerHTML = groups.map((group) => `
     <section class="roster-group">
       <div class="roster-role-heading"><span class="role-pin" style="background:${/^#[0-9a-f]{6}$/i.test(group.color) ? group.color : '#64748b'}"></span><span>${escapeHtml(group.name)}</span><span class="role-line"></span></div>
-      ${group.members.map((member) => `<div class="member-row" title="${escapeHtml(member.username)}"><div class="member-avatar-wrap"><img class="member-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><span class="member-state"></span></div><div style="min-width:0"><div class="member-row-name">${escapeHtml(member.username)}</div><div class="member-row-handle">@${escapeHtml(member.handle)}</div></div><span class="member-rank-dot" style="background:${/^#[0-9a-f]{6}$/i.test(member.roleColor) ? member.roleColor : '#64748b'}"></span></div>`).join('')}
+      ${group.members.map((member) => `<div class="member-row" data-user-id="${escapeHtml(member.id)}" title="${escapeHtml(member.username)} — كلك يمين لنسخ ID"><div class="member-avatar-wrap"><img class="member-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><span class="member-state"></span></div><div style="min-width:0"><div class="member-row-name">${escapeHtml(member.username)}</div><div class="member-row-handle">@${escapeHtml(member.handle)}</div></div><span class="member-rank-dot" style="background:${/^#[0-9a-f]{6}$/i.test(member.roleColor) ? member.roleColor : '#64748b'}"></span></div>`).join('')}
     </section>
   `).join('');
+}
+
+function wireLeaveRequests() {
+  $('#leave-request-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const startDate = $('#leave-start').value;
+    const endDate = $('#leave-end').value;
+    const reason = $('#leave-reason').value.trim();
+    if (!startDate || !endDate || endDate < startDate) return showToast('تأكد إن تاريخ النهاية هو نفس تاريخ البداية أو بعده.', 'error');
+    const button = $('button[type="submit"]', event.currentTarget);
+    setButtonLoading(button, true, 'جاري إرسال الطلب...');
+    try {
+      const result = await api('/api/leave-requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ startDate, endDate, reason }) });
+      showToast(result.message || 'تم إرسال طلب الإجازة للإدارة.', 'success');
+      event.currentTarget.reset();
+      await loadLeaveRequests();
+    } catch (error) { showToast(error.message, 'error'); }
+    finally { setButtonLoading(button, false); }
+  });
+  $('#refresh-leaves-btn')?.addEventListener('click', loadLeaveRequests);
+  document.addEventListener('contextmenu', async (event) => {
+    const row = event.target.closest('.member-row[data-user-id]');
+    if (!row) return;
+    event.preventDefault();
+    const id = row.dataset.userId;
+    try { await navigator.clipboard.writeText(id); showToast(`تم نسخ Discord ID: ${id}`, 'success'); }
+    catch { window.prompt('انسخ Discord ID:', id); }
+  });
+  document.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-leave-review]');
+    if (!button) return;
+    const action = button.dataset.leaveReview;
+    let note = '';
+    if (action === 'reject') note = window.prompt('اكتب سبب الرفض (اختياري):') || '';
+    button.disabled = true;
+    try {
+      const result = await api(`/api/leave-requests/${button.dataset.id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }) });
+      showToast(result.message || 'تم تحديث طلب الإجازة.', 'success');
+      await loadLeaveRequests();
+    } catch (error) { showToast(error.message, 'error'); button.disabled = false; }
+  });
+}
+async function loadLeaveRequests() {
+  try {
+    const result = await api('/api/leave-requests');
+    const requests = result.requests || [];
+    const statusText = { pending: 'بانتظار المراجعة', approved: 'تمت الموافقة', rejected: 'مرفوض' };
+    const render = (item, manager = false) => `<article class="leave-card"><div class="leave-card-top"><b>${escapeHtml(item.username)}</b><span class="task-tag ${item.status === 'approved' ? 'completed' : item.status === 'rejected' ? 'required' : 'optional'}">${statusText[item.status] || item.status}</span></div><div class="leave-dates">${escapeHtml(item.startDate)} — ${escapeHtml(item.endDate)}</div><p>${escapeHtml(item.reason)}</p><small class="muted">Discord ID: <code>${escapeHtml(item.userId)}</code> · ${formatDate(item.createdAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</small>${item.reviewNote ? `<p class="muted">ملاحظة الإدارة: ${escapeHtml(item.reviewNote)}</p>` : ''}${manager && item.status === 'pending' ? `<div class="manager-actions"><button class="primary-button" data-leave-review="approve" data-id="${item.id}">موافقة</button><button class="secondary-button" data-leave-review="reject" data-id="${item.id}">رفض</button></div>` : ''}</article>`;
+    $('#leave-requests-list').innerHTML = requests.length ? requests.filter(x => x.userId === state.user.id || state.user.canManage).map(x => render(x)).join('') || '<div class="task-empty">لسه مفيش طلبات إجازة.</div>' : '<div class="task-empty">لسه مفيش طلبات إجازة.</div>';
+    if (state.user.canManage) $('#manager-leave-list').innerHTML = requests.length ? requests.map(x => render(x, true)).join('') : '<div class="task-empty">مفيش طلبات إجازة للمراجعة.</div>';
+  } catch (error) {
+    $('#leave-requests-list').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
+    if (state.user.canManage) $('#manager-leave-list').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
+  }
 }
 
 function startChatPolling() {
