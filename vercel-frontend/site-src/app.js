@@ -14,6 +14,9 @@ const state = {
   chatMessageIds: { staff: new Set(), management: new Set() },
   chatLoaded: { staff: false, management: false },
   onlineUserIds: new Set(),
+  dailyMessageStats: { dailyStats: [], dailyTotal: 0, dailyDate: null },
+  staffStats: [],
+  activeStaffProfileId: null,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -127,16 +130,22 @@ async function initialize() {
     wireChats();
     wireRoster();
     wireLeaveRequests();
+    wireManagementApplications();
     if (state.user.canManage) {
       $('#task-manager').classList.remove('hidden');
       $$('.manager-only').forEach((element) => element.classList.remove('hidden'));
       $('#submissions-heading').textContent = 'آخر تسليمات الاستاف';
       $('#manager-leave-section').classList.remove('hidden');
+      $('#manager-application-section')?.classList.remove('hidden');
+      $('#management-application-box')?.classList.add('hidden');
+    } else if (state.user.isAdmin || state.user.isManager) {
+      $('#management-application-box')?.classList.add('hidden');
     }
-    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests()]);
+    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests(), loadManagementApplications(), loadStaffStats()]);
     startChatPolling();
     startPresenceHeartbeat();
     setInterval(checkBotStatus, 30000);
+    setInterval(() => { if (state.user) loadStaffStats(); }, 45000);
     setInterval(() => {
       if ($('.page.active-page')?.id === 'page-tasks') loadTasks();
     }, 60000);
@@ -155,6 +164,7 @@ function renderProfile() {
 }
 
 function wireNavigation() {
+  $('#staff-profile-back')?.addEventListener('click', () => { state.activeStaffProfileId = null; openPage('overview'); });
   $$('.nav-tab').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.page)));
   $$('[data-go]').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.go)));
   $('#logout-btn').addEventListener('click', async () => {
@@ -165,11 +175,13 @@ function wireNavigation() {
 }
 function openPage(page) {
   if (page === 'management-chat' && !state.user?.canManage) return;
+  if (page === 'staff-profile' && !state.activeStaffProfileId) return;
   $$('.page').forEach((element) => element.classList.remove('active-page'));
   $(`#page-${page}`)?.classList.add('active-page');
   $$('.nav-tab').forEach((element) => element.classList.toggle('active', element.dataset.page === page));
   if (page === 'staff-chat') loadChat('staff');
   if (page === 'management-chat') loadChat('management');
+  if (page === 'staff-profile') loadStaffProfile(state.activeStaffProfileId);
   if (page === 'tasks') {
     loadTasks();
     loadSubmissions();
@@ -515,6 +527,7 @@ async function loadRoster() {
     $('#staff-count').textContent = state.roster.memberCount ?? '—';
     renderRoster();
     renderDailyMessageStats();
+    renderAdminOverview();
     await refreshPresence();
   } catch (error) {
     $('#roster-content').innerHTML = `<div class="loading-state">${escapeHtml(error.message)}<br><small>راجع صلاحيات البوت وإعدادات Server Members Intent.</small></div>`;
@@ -522,12 +535,22 @@ async function loadRoster() {
 }
 function wireRoster() {
   $('#roster-search').addEventListener('input', renderRoster);
+  $('#roster-content').addEventListener('click', (event) => {
+    const row = event.target.closest('.member-row[data-user-id]');
+    if (row) openStaffProfile(row.dataset.userId);
+  });
+  $('#roster-content').addEventListener('keydown', (event) => {
+    if (!['Enter', ' '].includes(event.key)) return;
+    const row = event.target.closest('.member-row[data-user-id]');
+    if (row) { event.preventDefault(); openStaffProfile(row.dataset.userId); }
+  });
 }
 async function refreshPresence() {
   try {
     const result = await api('/api/presence');
     state.onlineUserIds = new Set((result.online || []).map(item => String(item.userId)));
     renderRoster();
+    renderAdminOverview();
     const footer = $('.roster-footer');
     if (footer) footer.innerHTML = `<span class="status-dot"></span> ${state.onlineUserIds.size} متصل الآن · التحديث مباشر`;
   } catch { /* Presence is optional if the endpoint is temporarily unavailable. */ }
@@ -554,7 +577,7 @@ function renderRoster() {
   $('#roster-content').innerHTML = groups.map((group) => `
     <section class="roster-group">
       <div class="roster-role-heading"><span class="role-pin" style="background:${/^#[0-9a-f]{6}$/i.test(group.color) ? group.color : '#64748b'}"></span><span>${escapeHtml(group.name)}</span><span class="role-line"></span></div>
-      ${group.members.map((member) => `<div class="member-row" data-user-id="${escapeHtml(member.id)}" title="${escapeHtml(member.username)} — كلك يمين لنسخ ID"><div class="member-avatar-wrap"><img class="member-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><span class="member-state ${state.onlineUserIds.has(String(member.id)) ? 'is-online' : 'is-offline'}"></span></div><div style="min-width:0"><div class="member-row-name">${escapeHtml(member.username)}</div><div class="member-row-handle">@${escapeHtml(member.handle)}</div></div><span class="member-rank-dot" style="background:${/^#[0-9a-f]{6}$/i.test(member.roleColor) ? member.roleColor : '#64748b'}"></span></div>`).join('')}
+      ${group.members.map((member) => `<div class="member-row" role="button" tabindex="0" data-user-id="${escapeHtml(member.id)}" title="${escapeHtml(member.username)} — اضغط لفتح الملف، وكلك يمين لنسخ ID"><div class="member-avatar-wrap"><img class="member-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><span class="member-state ${state.onlineUserIds.has(String(member.id)) ? 'is-online' : 'is-offline'}"></span></div><div style="min-width:0"><div class="member-row-name">${escapeHtml(member.username)}${member.isAdmin ? '<span class="member-admin-tag">إدارة</span>' : ''}</div><div class="member-row-handle">@${escapeHtml(member.handle)}</div></div><span class="member-rank-dot" style="background:${/^#[0-9a-f]{6}$/i.test(member.roleColor) ? member.roleColor : '#64748b'}"></span></div>`).join('')}
     </section>
   `).join('');
 }
@@ -613,6 +636,125 @@ async function loadLeaveRequests() {
   }
 }
 
+
+function flattenRoster() {
+  return (state.roster.groups || []).flatMap((group) => group.members || []);
+}
+async function loadStaffStats() {
+  try {
+    const result = await api('/api/staff-stats');
+    state.staffStats = Array.isArray(result.stats) ? result.stats : [];
+    if (result.dailyDate) state.dailyMessageStats.dailyDate = result.dailyDate;
+    state.dailyMessageStats.dailyStats = state.staffStats.map((row) => ({ userId: row.userId, username: row.username || row.userId, count: Number(row.dailyMessages) || 0 }));
+    state.dailyMessageStats.dailyTotal = state.dailyMessageStats.dailyStats.reduce((sum, row) => sum + row.count, 0);
+    renderDailyMessageStats();
+    renderAdminOverview();
+  } catch (error) {
+    const node = $('#admin-overview-cards');
+    if (node && !state.staffStats.length) node.innerHTML = `<div class="loading-state">${escapeHtml(error.message)}</div>`;
+  }
+}
+function findStaffProfileMember(userId) {
+  return flattenRoster().find((item) => String(item.id) === String(userId)) || (() => {
+    const stats = (state.staffStats || []).find((item) => String(item.userId) === String(userId));
+    return stats ? { id: String(userId), username: stats.username || String(userId), handle: String(userId), avatarUrl: avatarFallback(userId), roleName: 'عضو غير موجود حاليًا في قائمة الاستاف', roles: [], isAdmin: false } : null;
+  })();
+}
+function renderAdminOverview() {
+  const container = $('#admin-overview-cards');
+  if (!container) return;
+  const statsById = new Map((state.staffStats || []).map((item) => [String(item.userId), item]));
+  const admins = flattenRoster().filter((member) => member.isAdmin);
+  if (!admins.length) {
+    container.innerHTML = '<div class="task-empty">لا توجد حسابات إدارية محددة في قائمة الاستاف حتى الآن.</div>';
+    return;
+  }
+  container.innerHTML = admins.map((member) => {
+    const stats = statsById.get(String(member.id)) || {};
+    const online = state.onlineUserIds.has(String(member.id));
+    return `<button type="button" class="admin-overview-card" data-open-staff-profile="${escapeHtml(member.id)}"><div class="admin-overview-top"><img src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="admin-overview-name"><b>${escapeHtml(member.username)}</b><small>${escapeHtml(member.roleName || 'مسؤول')}</small></div><span class="online-pill ${online ? 'online' : 'offline'}"><i></i>${online ? 'أونلاين' : 'أوفلاين'}</span></div><div class="admin-overview-metrics"><span><b>${Number(stats.dailyMessages || 0).toLocaleString('en-US')}</b><small>رسائل اليوم</small></span><span><b>${Number(stats.totalSubmissions || 0).toLocaleString('en-US')}</b><small>تسليمات</small></span><span><b>${Number(stats.totalPoints || 0).toLocaleString('en-US')}</b><small>نقاط</small></span></div><span class="admin-overview-link">فتح الملف الكامل ←</span></button>`;
+  }).join('');
+  $$('[data-open-staff-profile]', container).forEach((button) => button.addEventListener('click', () => openStaffProfile(button.dataset.openStaffProfile)));
+}
+async function openStaffProfile(userId) {
+  const member = findStaffProfileMember(userId);
+  if (!member) return showToast('لا توجد بيانات إحصائية لهذا العضو بعد.', 'error');
+  state.activeStaffProfileId = String(userId);
+  $('#staff-profile-content').innerHTML = '<div class="loading-state">جاري تحميل ملف العضو والإحصائيات...</div>';
+  openPage('staff-profile');
+}
+async function loadStaffProfile(userId, providedMember = null) {
+  const member = providedMember || findStaffProfileMember(userId);
+  if (!member) return;
+  try {
+    const response = await api(`/api/staff-stats/${encodeURIComponent(userId)}`);
+    if (String(state.activeStaffProfileId) !== String(userId)) return;
+    renderStaffProfile(member, response.stats || {}, response.recentSubmissions || [], response.recentLeaves || []);
+  } catch (error) {
+    $('#staff-profile-content').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
+  }
+}
+function renderStaffProfile(member, stats, submissions, leaves) {
+  const roles = (member.roles || []).map((role) => `<span class="profile-role-chip">${escapeHtml(role.name)}</span>`).join('') || '<span class="muted">لا توجد رتب إضافية</span>';
+  const online = state.onlineUserIds.has(String(member.id));
+  const statCard = (label, value, note = '') => { const displayValue = typeof value === 'string' && !/^\d+(?:\.\d+)?$/.test(value) ? escapeHtml(value) : Number(value || 0).toLocaleString('en-US'); return `<article class="staff-detail-stat"><small>${label}</small><strong>${displayValue}</strong>${note ? `<span>${note}</span>` : ''}</article>`; };
+  const statusText = { approved: 'تمت الموافقة', submitted: 'بانتظار المراجعة', pending: 'بانتظار المراجعة', rejected: 'مرفوض' };
+  const submissionsHtml = submissions.length ? submissions.map((item) => `<article class="profile-history-row"><div><b>تسليم #${Number(item.id)}</b><small>${escapeHtml(formatDate(item.submittedAt, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}</small>${item.note ? `<p>${escapeHtml(item.note)}</p>` : ''}</div><span class="task-tag ${item.status === 'approved' ? 'completed' : item.status === 'rejected' ? 'required' : 'optional'}">${statusText[item.status] || escapeHtml(item.status)}</span></article>`).join('') : '<div class="task-empty">لا توجد تسليمات مسجلة لهذا العضو.</div>';
+  const leavesHtml = leaves.length ? leaves.map((item) => `<article class="profile-history-row"><div><b>طلب إجازة #${Number(item.id)}</b><small>${escapeHtml(item.startDate)} — ${escapeHtml(item.endDate)}</small><p>${escapeHtml(item.reason)}</p></div><span class="task-tag ${item.status === 'approved' ? 'completed' : item.status === 'rejected' ? 'required' : 'optional'}">${statusText[item.status] || 'بانتظار المراجعة'}</span></article>`).join('') : '<div class="task-empty">لا توجد طلبات إجازة.</div>';
+  $('#staff-profile-content').innerHTML = `<div class="staff-profile-hero"><img class="staff-profile-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="staff-profile-identity"><span class="tiny-label">${member.isAdmin ? 'ADMINISTRATOR PROFILE' : 'STAFF MEMBER PROFILE'}</span><h1>${escapeHtml(member.username)}</h1><p>@${escapeHtml(member.handle || member.id)} · <code>${escapeHtml(member.id)}</code></p><div class="staff-profile-status"><span class="online-pill ${online ? 'online' : 'offline'}"><i></i>${online ? 'متصل بالموقع الآن' : 'غير متصل بالموقع'}</span><span class="manager-badge">${escapeHtml(member.roleName || 'عضو الاستاف')}</span></div></div></div><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">PERMISSIONS</span><h2>الرتب والصلاحيات</h2></div></div><div class="staff-profile-roles">${roles}</div></section><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">ACTIVITY OVERVIEW</span><h2>إحصائيات العضو</h2></div><small class="muted">تاريخ الإحصائيات: ${escapeHtml(state.dailyMessageStats.dailyDate || 'اليوم')}</small></div><div class="staff-detail-grid">${statCard('رسائل اليوم', stats.dailyMessages, 'في شات الاستاف')}${statCard('إجمالي الرسائل', stats.totalMessages, 'كل الرسائل المسجلة')}${statCard('إجمالي التسليمات', stats.totalSubmissions)}${statCard('التسليمات المقبولة', stats.approvedSubmissions)}${statCard('التسليمات المعلقة', stats.pendingSubmissions)}${statCard('النقاط المسجلة', stats.totalPoints)}${statCard('طلبات الإجازة', stats.leaveRequests)}${statCard('حالة الاتصال', online ? 'متصل' : 'أوفلاين', 'حالة الاتصال الحالية')}</div></section><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">SUBMISSION HISTORY</span><h2>آخر التسليمات</h2></div></div><div class="profile-history-list">${submissionsHtml}</div></section><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">LEAVE HISTORY</span><h2>طلبات الإجازة</h2></div></div><div class="profile-history-list">${leavesHtml}</div></section>`;
+}
+
+function wireManagementApplications() {
+  $('#management-application-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const reason = $('#management-application-reason').value.trim();
+    if (reason.length < 30) return showToast('اكتب تفاصيل أكثر عن سبب رغبتك في الانضمام للإدارة (30 حرفًا على الأقل).', 'error');
+    const button = $('button[type="submit"]', event.currentTarget);
+    setButtonLoading(button, true, 'جاري إرسال الطلب...');
+    try {
+      const result = await api('/api/management-requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }) });
+      showToast(result.message || 'تم إرسال طلب الانضمام للإدارة.', result.discordPosted ? 'success' : 'error');
+      event.currentTarget.reset();
+      await loadManagementApplications();
+    } catch (error) { showToast(error.message, 'error'); }
+    finally { setButtonLoading(button, false); }
+  });
+  $('#refresh-management-requests-btn')?.addEventListener('click', loadManagementApplications);
+  document.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-management-request-review]');
+    if (!button) return;
+    const action = button.dataset.managementRequestReview;
+    const note = action === 'reject' ? (window.prompt('سبب رفض طلب الإدارة (اختياري):') || '') : '';
+    button.disabled = true;
+    try {
+      const result = await api(`/api/management-requests/${button.dataset.id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }) });
+      showToast(result.message || (action === 'approve' ? 'تمت الموافقة وإضافة الرتب.' : 'تم رفض الطلب.'), 'success');
+      await Promise.all([loadManagementApplications(), loadRoster(), loadStaffStats()]);
+    } catch (error) { showToast(error.message, 'error'); button.disabled = false; }
+  });
+}
+async function loadManagementApplications() {
+  try {
+    const result = await api('/api/management-requests');
+    const requests = result.requests || [];
+    const statusText = { pending: 'بانتظار المراجعة', approved: 'تمت الموافقة', rejected: 'مرفوض' };
+    const render = (item, manager = false) => `<article class="leave-card management-app-card"><div class="leave-card-top"><b>${escapeHtml(item.username)}</b><span class="task-tag ${item.status === 'approved' ? 'completed' : item.status === 'rejected' ? 'required' : 'optional'}">${statusText[item.status] || item.status}</span></div><p>${escapeHtml(item.reason)}</p><small class="muted">Discord ID: <code>${escapeHtml(item.userId)}</code> · ${formatDate(item.createdAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</small>${item.reviewNote ? `<p class="muted">ملاحظة الإدارة: ${escapeHtml(item.reviewNote)}</p>` : ''}${!manager && item.userId === state.user.id && item.status === 'approved' && !state.user.canManage ? '<p class="muted">تمت الموافقة وإضافة الرتب. سجّل خروجك ثم ادخل مجددًا لتفعيل صلاحيات الإدارة في الموقع.</p>' : ''}${manager && item.status === 'pending' ? `<div class="manager-actions"><button class="primary-button" data-management-request-review="approve" data-id="${item.id}">موافقة وإضافة الرتب</button><button class="secondary-button" data-management-request-review="reject" data-id="${item.id}">رفض الطلب</button></div>` : ''}</article>`;
+    const mine = requests.filter((item) => item.userId === state.user.id);
+    const ownNode = $('#management-application-status-list');
+    if (ownNode) ownNode.innerHTML = mine.length ? mine.map((item) => render(item)).join('') : '<div class="task-empty">لسه مبعتش طلب انضمام للإدارة.</div>';
+    const applicationSubmit = $('#management-application-form button[type="submit"]');
+    const hasPendingApplication = mine.some((item) => item.status === 'pending');
+    if (applicationSubmit && !state.user.canManage) { applicationSubmit.disabled = hasPendingApplication; applicationSubmit.textContent = hasPendingApplication ? 'طلبك قيد المراجعة' : 'إرسال طلب الإدارة'; }
+    const managerNode = $('#manager-management-requests-list');
+    if (managerNode && state.user.canManage) managerNode.innerHTML = requests.length ? requests.map((item) => render(item, true)).join('') : '<div class="task-empty">مفيش طلبات إدارة حاليًا.</div>';
+  } catch (error) {
+    const ownNode = $('#management-application-status-list');
+    if (ownNode) ownNode.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
+    const managerNode = $('#manager-management-requests-list');
+    if (managerNode && state.user.canManage) managerNode.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
+  }
+}
+
 function updateDailyMessageStats(data = {}) {
   state.dailyMessageStats = {
     dailyStats: Array.isArray(data.dailyStats) ? data.dailyStats : state.dailyMessageStats.dailyStats,
@@ -622,7 +764,7 @@ function updateDailyMessageStats(data = {}) {
   renderDailyMessageStats();
 }
 function renderDailyMessageStats() {
-  const data = state.dailyMessageStats;
+  const data = state.dailyMessageStats || { dailyStats: [], dailyTotal: 0, dailyDate: null };
   const counts = new Map((data.dailyStats || []).map((row) => [String(row.userId), { ...row, count: Number(row.count) || 0 }]));
   const membersById = new Map();
   for (const group of (state.roster.groups || [])) {
@@ -651,13 +793,14 @@ function renderDailyMessageStats() {
     return;
   }
   listNode.innerHTML = members.map((member, index) => `
-    <div class="daily-message-row">
+    <button type="button" class="daily-message-row daily-message-row-clickable" data-open-staff-profile="${escapeHtml(member.id)}">
       <span class="daily-message-rank">${index + 1}</span>
       <img class="daily-message-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt="">
       <div class="daily-message-member"><b>${escapeHtml(member.username || member.handle || member.id)}</b><small>${escapeHtml(member.handle ? `@${member.handle}` : `ID: ${member.id}`)}</small></div>
       <span class="daily-message-count">${Number(member.count || 0).toLocaleString('en-US')} <small>رسالة</small></span>
-    </div>
+    </button>
   `).join('');
+  $$('.daily-message-row-clickable').forEach((button) => button.addEventListener('click', () => openStaffProfile(button.dataset.openStaffProfile)));
 }
 
 function startChatPolling() {

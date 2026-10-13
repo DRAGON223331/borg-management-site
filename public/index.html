@@ -80,6 +80,11 @@
             <article class="stat-card"><div class="stat-icon blue">↗</div><div><span>إنجازاتك المسجلة</span><strong id="stat-done">0</strong></div><div class="stat-foot">مهمات عليها تسليم منك</div></article>
           </div>
 
+          <section id="admin-overview-section" class="admin-overview-section">
+            <div class="section-title-row"><div><span class="tiny-label">MANAGEMENT ANALYTICS</span><h2>إحصائيات المسؤولين</h2><p class="muted small-copy">اضغط على أي مسؤول لفتح ملفه الكامل وإحصائياته.</p></div></div>
+            <div id="admin-overview-cards" class="admin-overview-cards"><div class="loading-state">جاري تحميل إحصائيات الإدارة...</div></div>
+          </section>
+
           <div class="section-title-row"><div><span class="tiny-label">YOUR WORKSPACE</span><h2>ابدأ من هنا</h2></div><button class="text-button" data-go="tasks">عرض كل المهمات ←</button></div>
           <div id="overview-task-list" class="overview-task-list"><div class="loading-state">جاري تجهيز لوحة المتابعة...</div></div>
 
@@ -106,6 +111,20 @@
           <section id="manager-leave-section" class="leave-request-box hidden">
             <div class="section-title-row"><div><span class="tiny-label">MANAGEMENT REVIEW</span><h2>مراجعة طلبات الإجازة</h2></div><button id="refresh-leaves-btn" class="text-button" type="button">تحديث ↻</button></div>
             <div id="manager-leave-list" class="leave-requests-list"><div class="loading-state">جاري تحميل الطلبات...</div></div>
+          </section>
+          <section id="management-application-box" class="leave-request-box management-application-box">
+            <div class="section-title-row"><div><span class="tiny-label">JOIN MANAGEMENT</span><h2>طلب الانضمام للإدارة</h2></div><span class="manager-badge">مراجعة مسؤولي الإدارة</span></div>
+            <p class="muted small-copy">اشرح ليه شايف نفسك مناسب للإدارة وخبرتك في الاستاف. الطلب هيروح لروم المراجعة، والموافقة بتضيف رتبة الإدارة في السيرفرين.</p>
+            <form id="management-application-form" class="leave-form">
+              <label for="management-application-reason">سبب التقديم وخبرتك</label><textarea id="management-application-reason" rows="4" maxlength="1000" minlength="30" placeholder="اكتب خبرتك، نشاطك، وليه عايز تنضم للإدارة..." required></textarea>
+              <button type="submit" class="primary-button">إرسال طلب الإدارة</button>
+            </form>
+            <div id="management-application-status-list" class="leave-requests-list"><div class="loading-state">جاري تحميل حالة طلباتك...</div></div>
+          </section>
+          <section id="manager-application-section" class="leave-request-box hidden">
+            <div class="section-title-row"><div><span class="tiny-label">MANAGEMENT APPLICATION REVIEW</span><h2>طلبات الانضمام للإدارة</h2></div><button id="refresh-management-requests-btn" class="text-button" type="button">تحديث ↻</button></div>
+            <p class="muted small-copy">الموافقة تضيف الرتبتين تلقائيًا: رتبة السيرفر الأساسي ورتبة سيرفر الإدارة.</p>
+            <div id="manager-management-requests-list" class="leave-requests-list"><div class="loading-state">جاري تحميل الطلبات...</div></div>
           </section>
         </section>
 
@@ -154,6 +173,11 @@
             <div class="section-title-row"><div><span class="tiny-label">SUBMISSION HISTORY</span><h2 id="submissions-heading">آخر تسليماتي</h2></div><button id="refresh-submissions-btn" class="text-button">تحديث ↻</button></div>
             <div id="submissions-list" class="submissions-list"><div class="loading-state">جاري تحميل سجل التسليم...</div></div>
           </section>
+        </section>
+
+        <section id="page-staff-profile" class="page staff-profile-page">
+          <div class="staff-profile-toolbar"><button id="staff-profile-back" type="button" class="secondary-button">→ الرجوع للرئيسية</button><span class="tiny-label">FULL STAFF PROFILE</span></div>
+          <div id="staff-profile-content"><div class="loading-state">اختار عضوًا من قائمة الاستاف لفتح ملفه.</div></div>
         </section>
 
         <section id="page-staff-chat" class="page chat-page">

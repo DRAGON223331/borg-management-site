@@ -17,6 +17,12 @@
     },
     "api/submissions/[id]/[action].js": {
       "maxDuration": 60
+    },
+    "api/staff-stats/[userId].js": {
+      "maxDuration": 60
+    },
+    "api/management-requests/[id]/[action].js": {
+      "maxDuration": 60
     }
   },
   "headers": [

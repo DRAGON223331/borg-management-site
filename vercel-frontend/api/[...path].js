@@ -10,6 +10,8 @@ const COOKIE_MAX_AGE = 7 * 24 * 60 * 60;
 const MANAGER_IDS = new Set((process.env.MANAGER_IDS || '1286035404323164172,1525203473262706821,848304089057460254,1475483362536980552').split(',').map((x) => x.trim()).filter(Boolean));
 const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID || '883871561474539630';
 const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
+const MANAGEMENT_MAIN_ROLE_ID = process.env.MANAGEMENT_MAIN_ROLE_ID || '1538623033806168135';
+const MANAGEMENT_STAFF_ROLE_ID = process.env.MANAGEMENT_STAFF_ROLE_ID || '1559628523809804288';
 const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
@@ -212,6 +214,19 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_leave_requests_user ON leave_requests(user_id, created_at DESC)`;
+    await sql`CREATE TABLE IF NOT EXISTS management_requests (
+      id BIGSERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      username TEXT NOT NULL,
+      avatar_url TEXT,
+      reason TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      review_note TEXT NOT NULL DEFAULT '',
+      reviewed_by TEXT,
+      reviewed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_management_requests_user ON management_requests(user_id, created_at DESC)`;
   })();
   return schemaPromise;
 }
@@ -232,6 +247,38 @@ async function getDailyStaffMessageStats(sql) {
     dailyTotal: dailyStats.reduce((total, row) => total + row.count, 0),
     dailyDate: todayRows[0]?.dailyDate || null,
   };
+}
+
+
+async function getAllStaffStats(sql) {
+  const [messages, submissions, points, leaves, online, daily] = await Promise.all([
+    sql`SELECT user_id AS "userId", MAX(username) AS username, COUNT(*)::integer AS "totalMessages" FROM chat_messages WHERE room = 'staff' GROUP BY user_id`,
+    sql`SELECT user_id AS "userId", COUNT(*)::integer AS "totalSubmissions", COUNT(*) FILTER (WHERE status = 'approved')::integer AS "approvedSubmissions", COUNT(*) FILTER (WHERE status IN ('submitted','pending'))::integer AS "pendingSubmissions", COUNT(*) FILTER (WHERE status = 'rejected')::integer AS "rejectedSubmissions" FROM submissions GROUP BY user_id`,
+    sql`SELECT user_id AS "userId", COALESCE(SUM(amount),0)::numeric AS "totalPoints" FROM staff_points GROUP BY user_id`,
+    sql`SELECT user_id AS "userId", COUNT(*)::integer AS "leaveRequests" FROM leave_requests GROUP BY user_id`,
+    sql`SELECT user_id AS "userId", last_seen AS "lastSeen" FROM site_presence WHERE last_seen > NOW() - INTERVAL '90 seconds'`,
+    getDailyStaffMessageStats(sql),
+  ]);
+  const byId = new Map();
+  const ensure = (id, username = '') => {
+    const key = String(id);
+    if (!byId.has(key)) byId.set(key, { userId: key, username, dailyMessages: 0, totalMessages: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, online: false, lastSeen: null });
+    const row = byId.get(key);
+    if (username) row.username = username;
+    return row;
+  };
+  for (const row of messages) Object.assign(ensure(row.userId, row.username), { totalMessages: Number(row.totalMessages) || 0 });
+  for (const row of submissions) Object.assign(ensure(row.userId), { totalSubmissions: Number(row.totalSubmissions) || 0, approvedSubmissions: Number(row.approvedSubmissions) || 0, pendingSubmissions: Number(row.pendingSubmissions) || 0, rejectedSubmissions: Number(row.rejectedSubmissions) || 0 });
+  for (const row of points) ensure(row.userId).totalPoints = Number(row.totalPoints) || 0;
+  for (const row of leaves) ensure(row.userId).leaveRequests = Number(row.leaveRequests) || 0;
+  for (const row of online) Object.assign(ensure(row.userId), { online: true, lastSeen: row.lastSeen });
+  for (const row of daily.dailyStats || []) ensure(row.userId, row.username).dailyMessages = Number(row.count) || 0;
+  return [...byId.values()];
+}
+async function addManagementRoles(userId) {
+  // Role assignment is idempotent; Discord returns 204 when a role is added.
+  await discordApi(`/guilds/${MAIN_GUILD_ID}/members/${userId}/roles/${MANAGEMENT_MAIN_ROLE_ID}`, { method: 'PUT' });
+  await discordApi(`/guilds/${STAFF_GUILD_ID}/members/${userId}/roles/${MANAGEMENT_STAFF_ROLE_ID}`, { method: 'PUT' });
 }
 
 async function discordApi(route, options = {}) {
@@ -407,7 +454,11 @@ async function handleAuth(parts, req, res) {
       const mainGuild = guilds.find((guild) => guild.id === MAIN_GUILD_ID);
       const isManager = MANAGER_IDS.has(discordUser.id);
       const hasAdmin = (guild) => { try { return (BigInt(guild?.permissions || 0) & 8n) === 8n; } catch { return false; } };
-      const isAdmin = hasAdmin(staffGuild) || hasAdmin(mainGuild);
+      const memberLookups = await Promise.allSettled([discordApi(`/guilds/${MAIN_GUILD_ID}/members/${discordUser.id}`), discordApi(`/guilds/${STAFF_GUILD_ID}/members/${discordUser.id}`)]);
+      const mainMemberData = memberLookups[0].status === 'fulfilled' ? memberLookups[0].value : null;
+      const staffMemberData = memberLookups[1].status === 'fulfilled' ? memberLookups[1].value : null;
+      const hasManagementRole = (mainMemberData?.roles || []).includes(MANAGEMENT_MAIN_ROLE_ID) || (staffMemberData?.roles || []).includes(MANAGEMENT_STAFF_ROLE_ID);
+      const isAdmin = hasAdmin(staffGuild) || hasAdmin(mainGuild) || hasManagementRole;
       if (!staffGuild && !isAdmin && !isManager) {
         res.setHeader('Set-Cookie', clearCookie(OAUTH_COOKIE));
         return sendText(res, 403, `الحساب ده مش عضو في سيرفر الاستاف، ومش معاه صلاحية Administrator في السيرفر الأساسي. ادخل سيرفر الاستاف (${STAFF_GUILD_ID}) ثم جرّب تاني.`);
@@ -521,12 +572,14 @@ async function fetchGuildMembers(guildId) {
 async function getRoster() {
   // The directory still lists staff-server members, but their displayed roles
   // come from the main server so the hierarchy reflects the real admin ranks.
-  const [mainGuild, mainRoles, staffMembers, mainMembers] = await Promise.all([
+  const [mainGuild, mainRoles, staffMembers, mainMembers, staffRoles] = await Promise.all([
     discordApi(`/guilds/${MAIN_GUILD_ID}`),
     discordApi(`/guilds/${MAIN_GUILD_ID}/roles`),
     fetchGuildMembers(STAFF_GUILD_ID),
     fetchGuildMembers(MAIN_GUILD_ID),
+    discordApi(`/guilds/${STAFF_GUILD_ID}/roles`),
   ]);
+  const staffRoleById = new Map((staffRoles || []).map((role) => [role.id, role]));
   const sortedRoles = (mainRoles || []).filter((role) => role.id !== MAIN_GUILD_ID)
     .sort((a, b) => b.position - a.position || a.name.localeCompare(b.name, 'ar'));
   const roleById = new Map(sortedRoles.map((role) => [role.id, role]));
@@ -559,6 +612,7 @@ async function getRoster() {
       rolePosition: highest?.position ?? (mainMember ? -1 : -2),
       roleColor: highest ? toHex(highest.color) : '#64748b',
       roles: assigned.map((role) => ({ id: role.id, name: role.name, position: role.position, color: toHex(role.color) })),
+      isAdmin: MANAGER_IDS.has(member.user.id) || (member.roles || []).includes(MANAGEMENT_STAFF_ROLE_ID) || assigned.some((role) => role.id === MANAGEMENT_MAIN_ROLE_ID || (() => { try { return (BigInt(role.permissions || 0) & 8n) === 8n; } catch { return false; } })()),
     };
     if (!mainMember) {
       missingMainGuild.push(row);
@@ -607,6 +661,61 @@ async function handleApi(parts, req, res) {
 
   await ensureSchema();
   const sql = await getSql();
+
+
+  if (route === 'staff-stats' && parts.length === 1 && req.method === 'GET') {
+    const stats = await getAllStaffStats(sql);
+    return sendJson(res, 200, { stats, dailyDate: (await getDailyStaffMessageStats(sql)).dailyDate });
+  }
+  if (route === 'staff-stats' && parts.length === 2 && req.method === 'GET') {
+    const targetId = cleanText(parts[1], 24);
+    if (!/^\d{15,22}$/.test(targetId)) return sendError(res, 400, 'Discord ID غير صالح.');
+    const allStats = await getAllStaffStats(sql);
+    const stats = allStats.find((row) => row.userId === targetId) || { userId: targetId, dailyMessages: 0, totalMessages: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, online: false, lastSeen: null };
+    const [submissionRows, leaveRows] = await Promise.all([
+      sql`SELECT id, submitted_at AS "submittedAt", status, note FROM submissions WHERE user_id = ${targetId} ORDER BY submitted_at DESC LIMIT 10`,
+      sql`SELECT id, start_date AS "startDate", end_date AS "endDate", reason, status, created_at AS "createdAt", review_note AS "reviewNote" FROM leave_requests WHERE user_id = ${targetId} ORDER BY created_at DESC LIMIT 10`,
+    ]);
+    return sendJson(res, 200, { stats, recentSubmissions: submissionRows.map((row) => ({ ...row, id: Number(row.id) })), recentLeaves: leaveRows.map((row) => ({ ...row, id: Number(row.id), startDate: String(row.startDate).slice(0,10), endDate: String(row.endDate).slice(0,10) })) });
+  }
+
+  if (route === 'management-requests' && parts.length === 1 && req.method === 'POST') {
+    if (user.isAdmin || user.isManager) return sendError(res, 403, 'حسابك يحمل صلاحيات الإدارة بالفعل.');
+    const reason = cleanText(req.body?.reason, 1000);
+    if (reason.length < 30) return sendError(res, 400, 'اكتب تفاصيل أكثر عن سبب رغبتك في الانضمام للإدارة (30 حرفًا على الأقل).');
+    const pending = await sql`SELECT id FROM management_requests WHERE user_id = ${user.id} AND status = 'pending' LIMIT 1`;
+    if (pending.length) return sendError(res, 409, 'عندك طلب انضمام للإدارة لسه بانتظار المراجعة.');
+    const inserted = await sql`INSERT INTO management_requests(user_id, username, avatar_url, reason, status, created_at) VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, ${reason}, 'pending', NOW()) RETURNING id`;
+    const id = Number(inserted[0].id);
+    let discordPosted = false;
+    try {
+      await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, { title: `🛡️ طلب انضمام للإدارة جديد #${id}`, description: 'طلب جديد بانتظار مراجعة مسؤولي الإدارة من لوحة الموقع.', color: 0x8b5cf6, fields: [ { name: '👤 المتقدم', value: `<@${user.id}>\n\`${user.id}\``, inline: true }, { name: '📝 سبب التقديم والخبرة', value: reason.slice(0,1024), inline: false }, { name: '🔎 المراجعة', value: `رقم الطلب: #${id}\nالموافقة أو الرفض من لوحة إدارة البرج.`, inline: false } ], timestamp: new Date().toISOString(), footer: { text: 'إدارة البرج • طلبات الانضمام للإدارة' }, ...(user.avatarUrl ? { thumbnail: { url: user.avatarUrl } } : {}) });
+      discordPosted = true;
+    } catch (error) { console.error('[management request post]', cleanText(error.message, 200)); }
+    return sendJson(res, 201, { ok: true, id, discordPosted, message: discordPosted ? 'تم إرسال طلبك إلى روم المراجعة.' : 'تم حفظ الطلب، لكن تعذر إرساله إلى ديسكورد. راجع صلاحيات البوت.' });
+  }
+  if (route === 'management-requests' && parts.length === 1 && req.method === 'GET') {
+    const rows = canManage(user) ? await sql`SELECT * FROM management_requests ORDER BY id DESC LIMIT 100` : await sql`SELECT * FROM management_requests WHERE user_id = ${user.id} ORDER BY id DESC LIMIT 20`;
+    return sendJson(res, 200, { requests: rows.map((row) => ({ id: Number(row.id), userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, reason: row.reason, status: row.status, reviewNote: row.review_note, reviewedBy: row.reviewed_by, reviewedAt: row.reviewed_at, createdAt: row.created_at })) });
+  }
+  if (route === 'management-requests' && parts.length === 3 && req.method === 'POST' && ['approve','reject'].includes(parts[2])) {
+    if (!canManage(user)) return sendError(res, 403, 'مراجعة طلبات الإدارة للمسؤولين فقط.');
+    const id = Number(parts[1]);
+    if (!Number.isSafeInteger(id) || id < 1) return sendError(res, 400, 'رقم طلب الإدارة غير صالح.');
+    const found = await sql`SELECT id, user_id, username FROM management_requests WHERE id = ${id} AND status = 'pending' LIMIT 1`;
+    if (!found.length) return sendError(res, 404, 'الطلب غير موجود أو تمت مراجعته بالفعل.');
+    const item = found[0];
+    const status = parts[2] === 'approve' ? 'approved' : 'rejected';
+    const note = cleanText(req.body?.note, 400);
+    if (status === 'approved') {
+      try { await addManagementRoles(item.user_id); }
+      catch (error) { console.error('[management role assignment]', cleanText(error.message, 220)); return sendError(res, 502, `تعذر إضافة الرتبتين. تأكد أن العضو موجود في السيرفرين وأن البوت يستطيع إدارة الرتب. تفاصيل Discord: ${cleanText(error.message, 160)}`); }
+    }
+    const updated = await sql`UPDATE management_requests SET status = ${status}, review_note = ${note}, reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id`;
+    if (!updated.length) return sendError(res, 409, 'تمت مراجعة الطلب من مسؤول آخر بالفعل.');
+    try { await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, { title: status === 'approved' ? `✅ تمت الموافقة على طلب الإدارة #${id}` : `❌ تم رفض طلب الإدارة #${id}`, description: `المتقدم: <@${item.user_id}>\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}${status === 'approved' ? `\nتمت إضافة الرتبتين <@&${MANAGEMENT_MAIN_ROLE_ID}> و<@&${MANAGEMENT_STAFF_ROLE_ID}>.` : ''}`, color: status === 'approved' ? 0x22c55e : 0xef4444, timestamp: new Date().toISOString() }); } catch (error) { console.error('[management request review log]', cleanText(error.message, 180)); }
+    return sendJson(res, 200, { ok: true, status, message: status === 'approved' ? 'تمت الموافقة وإضافة الرتب في السيرفرين.' : 'تم رفض طلب الانضمام للإدارة.' });
+  }
 
   if (route === 'tasks' && parts.length === 1 && req.method === 'GET') {
     await syncDiscordTasks(sql);

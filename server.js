@@ -28,6 +28,8 @@ const DISCORD_REDIRECT_URI = process.env.DISCORD_REDIRECT_URI || `${SITE_URL}/au
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID || '883871561474539630';
 const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
+const MANAGEMENT_MAIN_ROLE_ID = process.env.MANAGEMENT_MAIN_ROLE_ID || '1538623033806168135';
+const MANAGEMENT_STAFF_ROLE_ID = process.env.MANAGEMENT_STAFF_ROLE_ID || '1559628523809804288';
 const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
 const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
@@ -130,6 +132,19 @@ db.exec(`
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_leave_requests_user ON leave_requests(user_id, created_at DESC);
+  CREATE TABLE IF NOT EXISTS management_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    avatar_url TEXT,
+    reason TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    review_note TEXT NOT NULL DEFAULT '',
+    reviewed_by TEXT,
+    reviewed_at TEXT,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_management_requests_user ON management_requests(user_id, created_at DESC);
 `);
 
 class SqliteSessionStore extends session.Store {
@@ -252,6 +267,32 @@ function getDailyStaffMessageStats() {
   const dailyStats = rows.map((row) => ({ userId: row.userId, username: row.username, count: Number(row.count) || 0 }));
   return { dailyStats, dailyTotal: dailyStats.reduce((total, row) => total + row.count, 0), dailyDate: range.date };
 }
+
+function getAllStaffStats() {
+  const byId = new Map();
+  const ensure = (id, username = '') => {
+    const key = String(id);
+    if (!byId.has(key)) byId.set(key, { userId: key, username, dailyMessages: 0, totalMessages: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, online: false, lastSeen: null });
+    const row = byId.get(key); if (username) row.username = username; return row;
+  };
+  const daily = getDailyStaffMessageStats();
+  for (const row of db.prepare("SELECT user_id AS userId, MAX(username) AS username, COUNT(*) AS totalMessages FROM chat_messages WHERE room = 'staff' GROUP BY user_id").all()) Object.assign(ensure(row.userId, row.username), { totalMessages: Number(row.totalMessages) || 0 });
+  for (const row of db.prepare("SELECT user_id AS userId, COUNT(*) AS totalSubmissions, SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approvedSubmissions, SUM(CASE WHEN status IN ('submitted','pending') THEN 1 ELSE 0 END) AS pendingSubmissions, SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejectedSubmissions FROM submissions GROUP BY user_id").all()) Object.assign(ensure(row.userId), { totalSubmissions: Number(row.totalSubmissions) || 0, approvedSubmissions: Number(row.approvedSubmissions) || 0, pendingSubmissions: Number(row.pendingSubmissions) || 0, rejectedSubmissions: Number(row.rejectedSubmissions) || 0 });
+  for (const row of db.prepare('SELECT user_id AS userId, COALESCE(SUM(amount),0) AS totalPoints FROM staff_points GROUP BY user_id').all()) ensure(row.userId).totalPoints = Number(row.totalPoints) || 0;
+  for (const row of db.prepare('SELECT user_id AS userId, COUNT(*) AS leaveRequests FROM leave_requests GROUP BY user_id').all()) ensure(row.userId).leaveRequests = Number(row.leaveRequests) || 0;
+  const cutoff = new Date(Date.now() - 90 * 1000).toISOString();
+  for (const row of db.prepare('SELECT user_id AS userId, last_seen AS lastSeen FROM site_presence WHERE last_seen > ?').all(cutoff)) Object.assign(ensure(row.userId), { online: true, lastSeen: row.lastSeen });
+  for (const row of daily.dailyStats || []) ensure(row.userId, row.username).dailyMessages = Number(row.count) || 0;
+  return [...byId.values()];
+}
+function grantManagementRoles(userId) {
+  if (!botReady) throw new Error('البوت غير متصل بديسكورد حاليًا.');
+  return Promise.all([
+    client.guilds.fetch(MAIN_GUILD_ID).then((guild) => guild.members.fetch(userId)).then((member) => member.roles.add(MANAGEMENT_MAIN_ROLE_ID, 'Approved admin application from Borg Management site')),
+    client.guilds.fetch(STAFF_GUILD_ID).then((guild) => guild.members.fetch(userId)).then((member) => member.roles.add(MANAGEMENT_STAFF_ROLE_ID, 'Approved admin application from Borg Management site')),
+  ]);
+}
+
 function avatarUrl(user) {
   if (!user) return null;
   if (user.avatar) return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=128`;
@@ -426,6 +467,7 @@ async function getStaffRoster() {
       rolePosition: highest ? highest.position : (mainMember ? -1 : -2),
       roleColor: highest ? highest.hexColor : '#64748b',
       roles: assignedRoles.map((role) => ({ id: role.id, name: role.name, position: role.position, color: role.hexColor })),
+      isAdmin: MANAGER_IDS.has(member.id) || member.roles.cache.has(MANAGEMENT_STAFF_ROLE_ID) || Boolean(mainMember?.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID)) || member.permissions.has(PermissionsBitField.Flags.Administrator) || Boolean(mainMember?.permissions.has(PermissionsBitField.Flags.Administrator)),
     };
     if (!mainMember) {
       missingMainGuild.push(row);
@@ -500,7 +542,12 @@ app.get('/auth/callback', authLimiter, async (req, res) => {
     const staffGuild = guilds.find((guild) => guild.id === STAFF_GUILD_ID);
     const mainGuild = guilds.find((guild) => guild.id === MAIN_GUILD_ID);
     const isManager = MANAGER_IDS.has(discordUser.id);
-    const isAdmin = hasAdministratorPermission(staffGuild) || hasAdministratorPermission(mainGuild);
+    const [mainMemberForRoles, staffMemberForRoles] = await Promise.all([
+      client.guilds.fetch(MAIN_GUILD_ID).then((guild) => guild.members.fetch(discordUser.id)).catch(() => null),
+      client.guilds.fetch(STAFF_GUILD_ID).then((guild) => guild.members.fetch(discordUser.id)).catch(() => null),
+    ]);
+    const hasManagementRole = Boolean(mainMemberForRoles?.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID) || staffMemberForRoles?.roles.cache.has(MANAGEMENT_STAFF_ROLE_ID));
+    const isAdmin = hasAdministratorPermission(staffGuild) || hasAdministratorPermission(mainGuild) || hasManagementRole;
     if (!staffGuild && !isAdmin && !isManager) {
       return res.status(403).send(`الحساب ده مش عضو في سيرفر الاستاف، ومش معاه صلاحية Administrator في السيرفر الأساسي. ادخل سيرفر الاستاف (${STAFF_GUILD_ID}) ثم جرّب تاني.`);
     }
@@ -544,6 +591,21 @@ app.get('/api/roster', requireAuth, async (req, res) => {
     console.error('[roster]', error.message);
     res.status(503).json({ error: `تعذر تحميل قائمة الاستاف: ${cleanText(error.message, 220)}` });
   }
+});
+
+
+app.get('/api/staff-stats', requireAuth, (req, res) => {
+  try { res.set('Cache-Control', 'no-store'); res.json({ stats: getAllStaffStats(), dailyDate: getDailyStaffMessageStats().dailyDate }); }
+  catch (error) { res.status(500).json({ error: `تعذر تحميل الإحصائيات: ${cleanText(error.message, 180)}` }); }
+});
+app.get('/api/staff-stats/:userId', requireAuth, (req, res) => {
+  const targetId = cleanText(req.params.userId, 24);
+  if (!/^\d{15,22}$/.test(targetId)) return res.status(400).json({ error: 'Discord ID غير صالح.' });
+  const stats = getAllStaffStats().find((row) => row.userId === targetId) || { userId: targetId, dailyMessages: 0, totalMessages: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, online: false, lastSeen: null };
+  const recentSubmissions = db.prepare('SELECT id, submitted_at AS submittedAt, status, note FROM submissions WHERE user_id = ? ORDER BY submitted_at DESC LIMIT 10').all(targetId);
+  const recentLeaves = db.prepare('SELECT id, start_date AS startDate, end_date AS endDate, reason, status, created_at AS createdAt, review_note AS reviewNote FROM leave_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 10').all(targetId);
+  res.set('Cache-Control', 'no-store');
+  res.json({ stats, recentSubmissions, recentLeaves });
 });
 
 app.get('/api/tasks', requireAuth, (req, res) => {
@@ -810,6 +872,55 @@ app.post('/api/leave-requests/:id/:action', requireAuth, async (req, res) => {
   if (!update.changes) return res.status(404).json({ error: 'الطلب غير موجود أو تمت مراجعته بالفعل.' });
   try { const channel = await fetchTextChannel(LEAVE_REQUEST_CHANNEL_ID); await channel.send({ embeds: [new EmbedBuilder().setColor(status === 'approved' ? 0x22c55e : 0xef4444).setTitle(status === 'approved' ? `✅ تمت الموافقة على طلب الإجازة #${id}` : `❌ تم رفض طلب الإجازة #${id}`).setDescription(`المراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}`).setTimestamp(new Date())], allowedMentions: { parse: [] } }); } catch (error) { console.error('[leave review log]', error.message); }
   res.json({ ok: true, message: status === 'approved' ? 'تمت الموافقة على طلب الإجازة.' : 'تم رفض طلب الإجازة.' });
+});
+
+
+app.post('/api/management-requests', requireAuth, async (req, res) => {
+  const user = req.session.user;
+  if (user.isAdmin || user.isManager) return res.status(403).json({ error: 'حسابك يحمل صلاحيات الإدارة بالفعل.' });
+  const reason = cleanText(req.body?.reason, 1000);
+  if (reason.length < 30) return res.status(400).json({ error: 'اكتب تفاصيل أكثر عن سبب رغبتك في الانضمام للإدارة (30 حرفًا على الأقل).' });
+  if (db.prepare("SELECT id FROM management_requests WHERE user_id = ? AND status = 'pending' LIMIT 1").get(user.id)) return res.status(409).json({ error: 'عندك طلب انضمام للإدارة لسه بانتظار المراجعة.' });
+  const createdAt = nowIso();
+  const inserted = db.prepare("INSERT INTO management_requests(user_id, username, avatar_url, reason, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)").run(user.id, user.username, profileAvatar(user), reason, createdAt);
+  const id = Number(inserted.lastInsertRowid);
+  let discordPosted = false;
+  try {
+    const channel = await fetchTextChannel(LEAVE_REQUEST_CHANNEL_ID);
+    const embed = new EmbedBuilder().setColor(0x8b5cf6).setTitle(`🛡️ طلب انضمام للإدارة جديد #${id}`).setDescription('طلب جديد بانتظار مراجعة مسؤولي الإدارة من لوحة الموقع.').addFields(
+      { name: '👤 المتقدم', value: `<@${user.id}>\n\`${user.id}\``, inline: true },
+      { name: '📝 سبب التقديم والخبرة', value: reason.slice(0,1024), inline: false },
+      { name: '🔎 المراجعة', value: `رقم الطلب: #${id}\nالموافقة أو الرفض من لوحة إدارة البرج.`, inline: false },
+    ).setTimestamp(new Date()).setFooter({ text: 'إدارة البرج • طلبات الانضمام للإدارة' });
+    await channel.send({ embeds: [embed], allowedMentions: { parse: [] } }); discordPosted = true;
+  } catch (error) { console.error('[management request post]', error.message); }
+  res.status(201).json({ ok: true, id, discordPosted, message: discordPosted ? 'تم إرسال طلبك إلى روم المراجعة.' : 'تم حفظ الطلب، لكن تعذر إرساله إلى ديسكورد. راجع صلاحيات البوت.' });
+});
+app.get('/api/management-requests', requireAuth, (req, res) => {
+  const user = req.session.user;
+  const rows = canManage(user) ? db.prepare('SELECT * FROM management_requests ORDER BY id DESC LIMIT 100').all() : db.prepare('SELECT * FROM management_requests WHERE user_id = ? ORDER BY id DESC LIMIT 20').all(user.id);
+  res.json({ requests: rows.map((row) => ({ id: row.id, userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, reason: row.reason, status: row.status, reviewNote: row.review_note, reviewedBy: row.reviewed_by, reviewedAt: row.reviewed_at, createdAt: row.created_at })) });
+});
+app.post('/api/management-requests/:id/:action', requireAuth, async (req, res) => {
+  const user = req.session.user;
+  if (!canManage(user)) return res.status(403).json({ error: 'مراجعة طلبات الإدارة للمسؤولين فقط.' });
+  const id = Number(req.params.id), action = req.params.action;
+  if (!Number.isSafeInteger(id) || id < 1 || !['approve','reject'].includes(action)) return res.status(400).json({ error: 'طلب المراجعة غير صالح.' });
+  const item = db.prepare("SELECT id, user_id, username FROM management_requests WHERE id = ? AND status = 'pending'").get(id);
+  if (!item) return res.status(404).json({ error: 'الطلب غير موجود أو تمت مراجعته بالفعل.' });
+  const status = action === 'approve' ? 'approved' : 'rejected';
+  const note = cleanText(req.body?.note, 400);
+  if (status === 'approved') {
+    try { await grantManagementRoles(item.user_id); }
+    catch (error) { console.error('[management role assignment]', error.message); return res.status(502).json({ error: `تعذر إضافة الرتبتين. تأكد أن العضو موجود في السيرفرين وأن البوت يستطيع إدارة الرتب. تفاصيل Discord: ${cleanText(error.message, 160)}` }); }
+  }
+  const update = db.prepare("UPDATE management_requests SET status = ?, review_note = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ? AND status = 'pending'").run(status, note, user.id, nowIso(), id);
+  if (!update.changes) return res.status(409).json({ error: 'تمت مراجعة الطلب من مسؤول آخر بالفعل.' });
+  try {
+    const channel = await fetchTextChannel(LEAVE_REQUEST_CHANNEL_ID);
+    await channel.send({ embeds: [new EmbedBuilder().setColor(status === 'approved' ? 0x22c55e : 0xef4444).setTitle(status === 'approved' ? `✅ تمت الموافقة على طلب الإدارة #${id}` : `❌ تم رفض طلب الإدارة #${id}`).setDescription(`المتقدم: <@${item.user_id}>\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}${status === 'approved' ? `\nتمت إضافة الرتبتين <@&${MANAGEMENT_MAIN_ROLE_ID}> و<@&${MANAGEMENT_STAFF_ROLE_ID}>.` : ''}`).setTimestamp(new Date())], allowedMentions: { parse: [] } });
+  } catch (error) { console.error('[management request review log]', error.message); }
+  res.json({ ok: true, status, message: status === 'approved' ? 'تمت الموافقة وإضافة الرتب في السيرفرين.' : 'تم رفض طلب الانضمام للإدارة.' });
 });
 
 app.post('/api/presence', requireAuth, (req, res) => {

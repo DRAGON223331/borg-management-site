@@ -56,6 +56,8 @@
 | `TASK_SUBMISSIONS_CHANNEL_ID` | `1556651404154642504` |
 | `SUBMISSION_REVIEW_CHANNEL_ID` | `1556945732957765722` (روم أدلة المهمات والمراجعة) |
 | `MANAGER_IDS` | `1286035404323164172,1525203473262706821,848304089057460254,1475483362536980552` |
+| `MANAGEMENT_MAIN_ROLE_ID` | `1538623033806168135` — رتبة الموافقة في السيرفر الأساسي |
+| `MANAGEMENT_STAFF_ROLE_ID` | `1559628523809804288` — رتبة الموافقة في سيرفر الإدارة |
 | `MAX_UPLOAD_MB` | `100` |
 
 لا تضف يدويًا `DATABASE_URL` أو `BLOB_READ_WRITE_TOKEN` إذا كان التكامل قد أضافهما تلقائيًا. لا ترفع قيمة Client Secret أو Bot Token إلى GitHub مطلقًا.
@@ -101,3 +103,7 @@
 ### Explicit nested API routes
 
 To improve compatibility with Vercel route resolution, the project includes dedicated wrappers for `/api/tasks/:id`, `/api/chat/:room`, and `/api/submissions/:id/:action`. They forward requests to the shared API handler and do not require a separate backend service.
+
+
+## إحصائيات الإدارة وطلبات الترقية
+تعرض الصفحة الرئيسية ملخصات المسؤولين، والضغط على اسم عضو من القائمة الجانبية يفتح ملفه الكامل. طلبات الانضمام للإدارة تُرسل إلى روم المراجعة `1558102515885678734` ويمكن قبولها أو رفضها من لوحة الموقع. الموافقة تضيف الرتبتين المحددتين أعلاه، بشرط صلاحيات البوت ووجود المتقدم في السيرفرين.
