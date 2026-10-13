@@ -83,7 +83,9 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .member-row:hover { background: rgba(160,174,200,.06); }
 .member-avatar-wrap { position: relative; flex: 0 0 auto; }
 .member-avatar { width: 32px; height: 32px; border-radius: 11px; background: #202b40; object-fit: cover; }
-.member-state { width: 8px; height: 8px; position: absolute; bottom: -1px; left: -1px; border: 2px solid #0d1422; border-radius: 50%; background: #56647b; }
+.member-state { width: 9px; height: 9px; position: absolute; bottom: -1px; left: -1px; border: 2px solid #0d1422; border-radius: 50%; background: #56647b; }
+.member-state.is-online { background: #22c55e; box-shadow: 0 0 0 2px rgba(34,197,94,.12); }
+.member-state.is-offline { background: #64748b; }
 .member-row-name { font-size: 11px; font-weight: 700; color: #dbe3f2; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .member-row-handle { margin-top: 4px; font-size: 9px; color: #65748b; direction: ltr; text-align: right; }
 .member-rank-dot { width: 5px; height: 5px; border-radius: 50%; margin-right: auto; flex: 0 0 auto; }

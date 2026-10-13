@@ -13,6 +13,7 @@ const state = {
   chatMessages: { staff: [], management: [] },
   chatMessageIds: { staff: new Set(), management: new Set() },
   chatLoaded: { staff: false, management: false },
+  onlineUserIds: new Set(),
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -134,6 +135,7 @@ async function initialize() {
     }
     await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests()]);
     startChatPolling();
+    startPresenceHeartbeat();
     setInterval(checkBotStatus, 30000);
     setInterval(() => {
       if ($('.page.active-page')?.id === 'page-tasks') loadTasks();
@@ -512,12 +514,31 @@ async function loadRoster() {
     state.roster = await api('/api/roster');
     $('#staff-count').textContent = state.roster.memberCount ?? '—';
     renderRoster();
+    await refreshPresence();
   } catch (error) {
     $('#roster-content').innerHTML = `<div class="loading-state">${escapeHtml(error.message)}<br><small>راجع صلاحيات البوت وإعدادات Server Members Intent.</small></div>`;
   }
 }
 function wireRoster() {
   $('#roster-search').addEventListener('input', renderRoster);
+}
+async function refreshPresence() {
+  try {
+    const result = await api('/api/presence');
+    state.onlineUserIds = new Set((result.online || []).map(item => String(item.userId)));
+    renderRoster();
+    const footer = $('.roster-footer');
+    if (footer) footer.innerHTML = `<span class="status-dot"></span> ${state.onlineUserIds.size} متصل الآن · التحديث مباشر`;
+  } catch { /* Presence is optional if the endpoint is temporarily unavailable. */ }
+}
+function startPresenceHeartbeat() {
+  const beat = async () => {
+    if (!state.user) return;
+    try { await api('/api/presence', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch { /* Retry on the next heartbeat. */ }
+    await refreshPresence();
+  };
+  beat();
+  setInterval(beat, 30000);
 }
 function renderRoster() {
   const query = $('#roster-search').value.trim().toLocaleLowerCase('ar');
@@ -532,7 +553,7 @@ function renderRoster() {
   $('#roster-content').innerHTML = groups.map((group) => `
     <section class="roster-group">
       <div class="roster-role-heading"><span class="role-pin" style="background:${/^#[0-9a-f]{6}$/i.test(group.color) ? group.color : '#64748b'}"></span><span>${escapeHtml(group.name)}</span><span class="role-line"></span></div>
-      ${group.members.map((member) => `<div class="member-row" data-user-id="${escapeHtml(member.id)}" title="${escapeHtml(member.username)} — كلك يمين لنسخ ID"><div class="member-avatar-wrap"><img class="member-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><span class="member-state"></span></div><div style="min-width:0"><div class="member-row-name">${escapeHtml(member.username)}</div><div class="member-row-handle">@${escapeHtml(member.handle)}</div></div><span class="member-rank-dot" style="background:${/^#[0-9a-f]{6}$/i.test(member.roleColor) ? member.roleColor : '#64748b'}"></span></div>`).join('')}
+      ${group.members.map((member) => `<div class="member-row" data-user-id="${escapeHtml(member.id)}" title="${escapeHtml(member.username)} — كلك يمين لنسخ ID"><div class="member-avatar-wrap"><img class="member-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><span class="member-state ${state.onlineUserIds.has(String(member.id)) ? 'is-online' : 'is-offline'}"></span></div><div style="min-width:0"><div class="member-row-name">${escapeHtml(member.username)}</div><div class="member-row-handle">@${escapeHtml(member.handle)}</div></div><span class="member-rank-dot" style="background:${/^#[0-9a-f]{6}$/i.test(member.roleColor) ? member.roleColor : '#64748b'}"></span></div>`).join('')}
     </section>
   `).join('');
 }

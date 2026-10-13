@@ -186,6 +186,9 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_chat_room_id ON chat_messages(room, id DESC)`;
+    await sql`CREATE TABLE IF NOT EXISTS site_presence (user_id TEXT PRIMARY KEY, username TEXT NOT NULL, avatar_url TEXT, last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_site_presence_last_seen ON site_presence(last_seen DESC)`;
+    await sql`CREATE TABLE IF NOT EXISTS notification_state (notification_key TEXT PRIMARY KEY, last_sent_at TIMESTAMPTZ NOT NULL DEFAULT '1970-01-01T00:00:00Z')`;
     await sql`CREATE TABLE IF NOT EXISTS leave_requests (
       id BIGSERIAL PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -905,15 +908,34 @@ async function handleApi(parts, req, res) {
     const rows = await sql`SELECT * FROM (SELECT * FROM chat_messages WHERE room = ${room} ORDER BY id DESC LIMIT 100) AS recent ORDER BY id ASC`;
     return sendJson(res, 200, { messages: rows.map((row) => ({ id: Number(row.id), room: row.room, userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, content: row.content, createdAt: row.created_at })) });
   }
+  if (route === 'presence' && parts.length === 1 && req.method === 'POST') {
+    await sql`INSERT INTO site_presence(user_id, username, avatar_url, last_seen) VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, NOW()) ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, avatar_url = EXCLUDED.avatar_url, last_seen = NOW()`;
+    return sendJson(res, 200, { ok: true });
+  }
+  if (route === 'presence' && parts.length === 1 && req.method === 'GET') {
+    const rows = await sql`SELECT user_id AS "userId", username, avatar_url AS "avatarUrl", last_seen AS "lastSeen" FROM site_presence WHERE last_seen > NOW() - INTERVAL '90 seconds' ORDER BY username`;
+    return sendJson(res, 200, { online: rows.map(row => ({ userId: row.userId, username: row.username, avatarUrl: row.avatarUrl, lastSeen: row.lastSeen })) });
+  }
   if (route === 'chat' && parts.length === 2 && req.method === 'POST') {
     const room = parts[1];
     if (!['staff', 'management'].includes(room)) return sendError(res, 404, 'غرفة الشات مش موجودة.');
     if (!canReadRoom(user, room)) return sendError(res, 403, 'الشات ده مخصص للمسؤولين.');
     const content = cleanText(req.body?.content, 1500);
     if (!content) return sendError(res, 400, 'اكتب رسالة قبل الإرسال.');
-    const rows = await sql`INSERT INTO chat_messages(room, user_id, username, avatar_url, content, created_at)
-      VALUES (${room}, ${user.id}, ${user.username}, ${user.avatarUrl || null}, ${content}, NOW()) RETURNING id, created_at`;
-    return sendJson(res, 201, { message: { id: Number(rows[0].id), room, userId: user.id, username: user.username, avatarUrl: user.avatarUrl, content, createdAt: rows[0].created_at } });
+    const rows = await sql`INSERT INTO chat_messages(room, user_id, username, avatar_url, content, created_at) VALUES (${room}, ${user.id}, ${user.username}, ${user.avatarUrl || null}, ${content}, NOW()) RETURNING id, created_at`;
+    let notified = false;
+    if (room === 'staff' && BOT_TOKEN && MANAGER_IDS.size) {
+      try {
+        const gate = await sql`INSERT INTO notification_state(notification_key, last_sent_at) VALUES ('staff_chat_dm', NOW()) ON CONFLICT (notification_key) DO UPDATE SET last_sent_at = NOW() WHERE notification_state.last_sent_at < NOW() - INTERVAL '5 minutes' RETURNING notification_key`;
+        if (gate.length) {
+          const preview = content.length > 220 ? `${content.slice(0, 217)}...` : content;
+          const dmText = `💬 **رسالة جديدة في شات الاستاف بالموقع**\n**المرسل:** ${cleanText(user.username, 80)}\n**الرسالة:** ${preview}\n\nالتنبيهات متجمعة بحد أقصى رسالة واحدة كل 5 دقائق.`;
+          await Promise.all([...MANAGER_IDS].map(async managerId => { try { const dm = await discordApi('/users/@me/channels', { method: 'POST', body: JSON.stringify({ recipient_id: managerId }) }); await discordApi(`/channels/${dm.id}/messages`, { method: 'POST', body: JSON.stringify({ content: dmText, allowed_mentions: { parse: [] } }) }); } catch (error) { console.error('[staff chat DM]', managerId, cleanText(error.message, 180)); } }));
+          notified = true;
+        }
+      } catch (error) { console.error('[staff chat notification]', cleanText(error.message, 180)); }
+    }
+    return sendJson(res, 201, { message: { id: Number(rows[0].id), room, userId: user.id, username: user.username, avatarUrl: user.avatarUrl, content, createdAt: rows[0].created_at }, notificationSent: notified });
   }
   sendError(res, 404, 'المسار غير موجود.');
 }
