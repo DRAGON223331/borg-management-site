@@ -13,6 +13,7 @@ const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
 const MANAGEMENT_MAIN_ROLE_ID = process.env.MANAGEMENT_MAIN_ROLE_ID || '1538623033806168135';
 const MANAGEMENT_STAFF_ROLE_ID = process.env.MANAGEMENT_STAFF_ROLE_ID || '1559628523809804288';
 const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
+const TASK_PING_ROLE_ID = (process.env.TASK_PING_ROLE_ID || '1556647362062188544').trim(); // رتبة بتتمنشن مع كل مهمات جديدة
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
 const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
@@ -488,7 +489,7 @@ async function syncDiscordTasks(sql) {
   } })();
   return taskSyncPromise;
 }
-async function postDiscordMessage(channelId, content) {
+async function postDiscordMessage(channelId, content, allowedMentions = { parse: [] }) {
   const parts = [];
   let current = '';
   for (const line of String(content || '').split('\n')) {
@@ -499,7 +500,7 @@ async function postDiscordMessage(channelId, content) {
   let last = null;
   for (const part of parts.length ? parts : ['']) {
     last = await discordApi(`/channels/${channelId}/messages`, {
-      method: 'POST', body: JSON.stringify({ content: part.slice(0, 1990), allowed_mentions: { parse: [] } }),
+      method: 'POST', body: JSON.stringify({ content: part.slice(0, 1990), allowed_mentions: allowedMentions }),
     });
   }
   return last;
@@ -962,8 +963,13 @@ async function handleApi(parts, req, res) {
         batch.push(line); charCount += line.length + 1;
       }
       if (batch.length) batches.push(batch);
-      for (const items of batches) {
-        const message = await postDiscordMessage(TASKS_CHANNEL_ID, `📋 **مهمات جديدة | إدارة البرج**\n${items.join('\n')}`);
+      for (const [batchIndex, items] of batches.entries()) {
+        const pingRole = batchIndex === 0 && /^\d{15,22}$/.test(TASK_PING_ROLE_ID); // المنشن في أول رسالة بس عشان ما يتكررش
+        const message = await postDiscordMessage(
+          TASKS_CHANNEL_ID,
+          `${pingRole ? `<@&${TASK_PING_ROLE_ID}> ` : ''}📋 **مهمات جديدة | إدارة البرج**\n${items.join('\n')}`,
+          pingRole ? { parse: [], roles: [TASK_PING_ROLE_ID] } : { parse: [] },
+        );
         const matchIds = items.map((line) => Number(line.match(/#(\d+)/)?.[1])).filter(Number.isInteger);
         for (let i = 0; i < matchIds.length; i += 1) await sql`UPDATE tasks SET source_message_id = ${message.id}, source_line_index = ${i} WHERE id = ${matchIds[i]}`;
       }

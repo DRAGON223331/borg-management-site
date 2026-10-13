@@ -36,6 +36,7 @@ const MANAGEMENT_MAIN_ROLE_ID = process.env.MANAGEMENT_MAIN_ROLE_ID || '15386230
 const MANAGEMENT_STAFF_ROLE_ID = process.env.MANAGEMENT_STAFF_ROLE_ID || '1559628523809804288';
 const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 // الروم الوحيد الذي تُحسب منه رسائل الاستاف.
+const TASK_PING_ROLE_ID = (process.env.TASK_PING_ROLE_ID || '1556647362062188544').trim(); // رتبة بتتمنشن مع كل مهمات جديدة
 const MESSAGE_COUNT_CHANNEL_ID = (process.env.MESSAGE_COUNT_CHANNEL_ID || '1552049641913065552').trim();
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
 const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
@@ -855,10 +856,11 @@ app.post('/api/tasks', requireAuth, requireManager, async (req, res) => {
       currentLength += line.length + 1;
     }
     if (batch.length) batches.push(batch);
-    for (const batchRows of batches) {
+    for (const [batchIndex, batchRows] of batches.entries()) {
+      const pingRole = batchIndex === 0 && /^\d{15,22}$/.test(TASK_PING_ROLE_ID); // المنشن في أول رسالة بس
       const message = await channel.send({
-        content: `📋 **مهمات جديدة | إدارة البرج**\n${batchRows.map((row) => row.line).join('\n')}`,
-        allowedMentions: { parse: [] },
+        content: `${pingRole ? `<@&${TASK_PING_ROLE_ID}> ` : ''}📋 **مهمات جديدة | إدارة البرج**\n${batchRows.map((row) => row.line).join('\n')}`,
+        allowedMentions: pingRole ? { parse: [], roles: [TASK_PING_ROLE_ID] } : { parse: [] },
       });
       batchRows.forEach((row, index) => {
         db.prepare('UPDATE tasks SET source_message_id = ?, source_line_index = ? WHERE id = ?').run(message.id, index, row.id);
