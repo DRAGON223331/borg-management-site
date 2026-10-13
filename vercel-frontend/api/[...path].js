@@ -16,7 +16,7 @@ const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
 const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
-const LEAVE_REQUEST_CHANNEL_ID = '1558102515885678734';
+const LEAVE_REQUEST_CHANNEL_ID = process.env.LEAVE_REQUEST_CHANNEL_ID || '1556945732957765722';
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '1559176035432402976';
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const COOKIE_SECRET = process.env.SESSION_SECRET || '';
@@ -817,8 +817,17 @@ async function handleApi(parts, req, res) {
     const startDate = cleanText(req.body?.startDate, 10);
     const endDate = cleanText(req.body?.endDate, 10);
     const reason = cleanText(req.body?.reason, 600);
-    const validDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
-    if (!validDate(startDate) || !validDate(endDate) || endDate < startDate) return sendError(res, 400, 'اختار تاريخ بداية ونهاية صحيحين، وتأكد إن النهاية ليست قبل البداية.');
+    const validDate = (value) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const [year, month, day] = value.split('-').map(Number);
+      const date = new Date(Date.UTC(year, month - 1, day));
+      const today = new Date();
+      const todayUtc = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+      const maxDate = new Date(Date.UTC(today.getFullYear() + 5, today.getMonth(), today.getDate()));
+      return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 &&
+        date.getUTCDate() === day && date >= todayUtc && date <= maxDate;
+    };
+    if (!validDate(startDate) || !validDate(endDate) || endDate < startDate) return sendError(res, 400, 'اختار تاريخًا صحيحًا من اليوم وحتى 5 سنوات قادمة، وتأكد إن تاريخ النهاية ليس قبل البداية.');
     if (!reason) return sendError(res, 400, 'اكتب سبب طلب الإجازة.');
     const inserted = await sql`INSERT INTO leave_requests(user_id, username, avatar_url, start_date, end_date, reason, status, created_at)
       VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, ${startDate}, ${endDate}, ${reason}, 'pending', NOW()) RETURNING id, created_at`;

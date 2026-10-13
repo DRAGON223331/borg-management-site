@@ -580,12 +580,25 @@ function renderRoster() {
 }
 
 function wireLeaveRequests() {
+  const formatDateInput = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  const today = new Date();
+  const maxLeaveDate = new Date(today);
+  maxLeaveDate.setFullYear(maxLeaveDate.getFullYear() + 5);
+  const startInput = $('#leave-start');
+  const endInput = $('#leave-end');
+  [startInput, endInput].filter(Boolean).forEach((input) => {
+    input.min = formatDateInput(today);
+    input.max = formatDateInput(maxLeaveDate);
+  });
+  startInput?.addEventListener('change', () => {
+    if (endInput) endInput.min = startInput.value || formatDateInput(today);
+  });
   $('#leave-request-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const startDate = $('#leave-start').value;
     const endDate = $('#leave-end').value;
     const reason = $('#leave-reason').value.trim();
-    if (!startDate || !endDate || endDate < startDate) return showToast('تأكد إن تاريخ النهاية هو نفس تاريخ البداية أو بعده.', 'error');
+    if (!startDate || !endDate || startDate < formatDateInput(today) || startDate > formatDateInput(maxLeaveDate) || endDate < startDate || endDate > formatDateInput(maxLeaveDate)) return showToast('اختار تاريخًا صحيحًا من اليوم وحتى 5 سنوات قادمة، وتأكد إن النهاية ليست قبل البداية.', 'error');
     const button = $('button[type="submit"]', event.currentTarget);
     setButtonLoading(button, true, 'جاري إرسال الطلب...');
     try {

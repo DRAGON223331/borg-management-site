@@ -33,7 +33,7 @@ const MANAGEMENT_STAFF_ROLE_ID = process.env.MANAGEMENT_STAFF_ROLE_ID || '155962
 const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
 const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
-const LEAVE_REQUEST_CHANNEL_ID = '1558102515885678734';
+const LEAVE_REQUEST_CHANNEL_ID = process.env.LEAVE_REQUEST_CHANNEL_ID || '1556945732957765722';
 const MANAGER_IDS = new Set((process.env.MANAGER_IDS || '1286035404323164172,1525203473262706821,848304089057460254,1475483362536980552')
   .split(',').map((x) => x.trim()).filter(Boolean));
 const ATTACHMENT_LIMIT_MB = Math.max(1, Number(process.env.DISCORD_ATTACHMENT_LIMIT_MB || 8));
@@ -833,8 +833,17 @@ app.post('/api/leave-requests', requireAuth, async (req, res) => {
   const startDate = cleanText(req.body?.startDate, 10);
   const endDate = cleanText(req.body?.endDate, 10);
   const reason = cleanText(req.body?.reason, 600);
-  const validDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
-  if (!validDate(startDate) || !validDate(endDate) || endDate < startDate) return res.status(400).json({ error: 'اختار تاريخ بداية ونهاية صحيحين، وتأكد إن النهاية ليست قبل البداية.' });
+  const validDate = (value) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const [year, month, day] = value.split('-').map(Number);
+      const date = new Date(Date.UTC(year, month - 1, day));
+      const today = new Date();
+      const todayUtc = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+      const maxDate = new Date(Date.UTC(today.getFullYear() + 5, today.getMonth(), today.getDate()));
+      return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 &&
+        date.getUTCDate() === day && date >= todayUtc && date <= maxDate;
+    };
+  if (!validDate(startDate) || !validDate(endDate) || endDate < startDate) return res.status(400).json({ error: 'اختار تاريخًا صحيحًا من اليوم وحتى 5 سنوات قادمة، وتأكد إن تاريخ النهاية ليس قبل البداية.' });
   if (!reason) return res.status(400).json({ error: 'اكتب سبب طلب الإجازة.' });
   const user = req.session.user;
   const result = db.prepare(`INSERT INTO leave_requests(user_id, username, avatar_url, start_date, end_date, reason, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`).run(user.id, user.username, profileAvatar(user), startDate, endDate, reason, nowIso());
