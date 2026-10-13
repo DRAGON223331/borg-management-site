@@ -581,29 +581,36 @@ function renderRoster() {
 
 function wireLeaveRequests() {
   const formatDateInput = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-  const today = new Date();
-  const maxLeaveDate = new Date(today);
-  maxLeaveDate.setFullYear(maxLeaveDate.getFullYear() + 5);
+  const getLeaveDateBounds = () => {
+    const today = new Date();
+    const maxLeaveDate = new Date(today);
+    maxLeaveDate.setFullYear(maxLeaveDate.getFullYear() + 5);
+    return { today: formatDateInput(today), max: formatDateInput(maxLeaveDate) };
+  };
   const startInput = $('#leave-start');
   const endInput = $('#leave-end');
+  const initialBounds = getLeaveDateBounds();
   [startInput, endInput].filter(Boolean).forEach((input) => {
-    input.min = formatDateInput(today);
-    input.max = formatDateInput(maxLeaveDate);
+    input.min = initialBounds.today;
+    input.max = initialBounds.max;
   });
   startInput?.addEventListener('change', () => {
-    if (endInput) endInput.min = startInput.value || formatDateInput(today);
+    const bounds = getLeaveDateBounds();
+    if (endInput) endInput.min = startInput.value || bounds.today;
   });
   $('#leave-request-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const startDate = $('#leave-start').value;
     const endDate = $('#leave-end').value;
     const reason = $('#leave-reason').value.trim();
-    if (!startDate || !endDate || startDate < formatDateInput(today) || startDate > formatDateInput(maxLeaveDate) || endDate < startDate || endDate > formatDateInput(maxLeaveDate)) return showToast('اختار تاريخًا صحيحًا من اليوم وحتى 5 سنوات قادمة، وتأكد إن النهاية ليست قبل البداية.', 'error');
+    const bounds = getLeaveDateBounds();
+    const dateFormatIsValid = (value) => { if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false; const parsed = new Date(`${value}T00:00:00`); return !Number.isNaN(parsed.getTime()) && formatDateInput(parsed) === value; };
+    if (!dateFormatIsValid(startDate) || !dateFormatIsValid(endDate) || startDate < bounds.today || startDate > bounds.max || endDate < startDate || endDate > bounds.max) return showToast('اختار تاريخًا حقيقيًا من اليوم وحتى 5 سنوات قادمة، وتأكد إن النهاية ليست قبل البداية.', 'error');
     const button = $('button[type="submit"]', event.currentTarget);
     setButtonLoading(button, true, 'جاري إرسال الطلب...');
     try {
       const result = await api('/api/leave-requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ startDate, endDate, reason }) });
-      showToast(result.message || 'تم إرسال طلب الإجازة للإدارة.', 'success');
+      showToast(result.message || 'تم إرسال طلب الإجازة للإدارة.', result.discordPosted ? 'success' : 'error');
       event.currentTarget.reset();
       await loadLeaveRequests();
     } catch (error) { showToast(error.message, 'error'); }
@@ -627,7 +634,7 @@ function wireLeaveRequests() {
     button.disabled = true;
     try {
       const result = await api(`/api/leave-requests/${button.dataset.id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }) });
-      showToast(result.message || 'تم تحديث طلب الإجازة.', 'success');
+      showToast(result.message || 'تم تحديث طلب الإجازة.', result.discordPosted === false ? 'error' : 'success');
       await loadLeaveRequests();
     } catch (error) { showToast(error.message, 'error'); button.disabled = false; }
   });

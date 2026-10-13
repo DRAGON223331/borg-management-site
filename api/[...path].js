@@ -16,7 +16,8 @@ const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
 const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
-const LEAVE_REQUEST_CHANNEL_ID = process.env.LEAVE_REQUEST_CHANNEL_ID || '1556945732957765722';
+const LEAVE_REQUEST_CHANNEL_ID = '1556945732957765722'; // ثابت: روم طلبات الإجازة ومراجعتها
+const STAFF_REQUEST_CHANNEL_ID = process.env.STAFF_REQUEST_CHANNEL_ID || '1558102515885678734'; // روم الطلبات الإدارية الأخرى
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '1559176035432402976';
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const COOKIE_SECRET = process.env.SESSION_SECRET || '';
@@ -684,7 +685,7 @@ async function handleApi(parts, req, res) {
     const id = Number(inserted[0].id);
     let discordPosted = false;
     try {
-      await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, {
+      await postDiscordEmbed(STAFF_REQUEST_CHANNEL_ID, {
         title: `📨 طلب إداري جديد #${id}`,
         description: 'طلب جديد من الاستاف بانتظار مراجعة مسؤولي الإدارة من لوحة الموقع.',
         color: 0x8b5cf6,
@@ -701,7 +702,7 @@ async function handleApi(parts, req, res) {
       });
       discordPosted = true;
     } catch (error) { console.error('[staff request post]', cleanText(error.message, 200)); }
-    return sendJson(res, 201, { ok: true, id, discordPosted, message: discordPosted ? 'تم إرسال الطلب الإداري لروم المراجعة.' : 'تم حفظ الطلب، لكن البوت لم يستطع إرساله إلى روم ديسكورد. راجع إعدادات البوت.' });
+    return sendJson(res, 201, { ok: true, id, discordPosted, message: discordPosted ? 'تم إرسال الطلب الإداري لروم المراجعة.' : 'تم حفظ الطلب، لكن تعذر إرساله إلى روم الطلبات الإدارية. تأكد من توكن البوت وصلاحياته.' });
   }
   if (route === 'staff-requests' && parts.length === 1 && req.method === 'GET') {
     const rows = canManage(user)
@@ -720,7 +721,7 @@ async function handleApi(parts, req, res) {
     const note = cleanText(req.body?.note, 400);
     const updated = await sql`UPDATE staff_requests SET status = ${status}, review_note = ${note}, reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id`;
     if (!updated.length) return sendError(res, 409, 'تمت مراجعة الطلب من مسؤول آخر بالفعل.');
-    try { await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, { title: status === 'approved' ? `✅ تمت الموافقة على الطلب الإداري #${id}` : `❌ تم رفض الطلب الإداري #${id}`, description: `نوع الطلب: ${item.request_type}\nالعنوان: ${item.subject}\nمقدم الطلب: <@${item.user_id}>\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}`, color: status === 'approved' ? 0x22c55e : 0xef4444, timestamp: new Date().toISOString() }); } catch (error) { console.error('[staff request review log]', cleanText(error.message, 180)); }
+    try { await postDiscordEmbed(STAFF_REQUEST_CHANNEL_ID, { title: status === 'approved' ? `✅ تمت الموافقة على الطلب الإداري #${id}` : `❌ تم رفض الطلب الإداري #${id}`, description: `نوع الطلب: ${item.request_type}\nالعنوان: ${item.subject}\nمقدم الطلب: <@${item.user_id}>\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}`, color: status === 'approved' ? 0x22c55e : 0xef4444, timestamp: new Date().toISOString() }); } catch (error) { console.error('[staff request review log]', cleanText(error.message, 180)); }
     return sendJson(res, 200, { ok: true, status, message: status === 'approved' ? 'تمت الموافقة على الطلب الإداري.' : 'تم رفض الطلب الإداري.' });
   }
 
@@ -820,15 +821,24 @@ async function handleApi(parts, req, res) {
     const startDate = cleanText(req.body?.startDate, 10);
     const endDate = cleanText(req.body?.endDate, 10);
     const reason = cleanText(req.body?.reason, 600);
+    const cairoTodayString = () => {
+      const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Africa/Cairo', year: 'numeric', month: '2-digit', day: '2-digit',
+      }).formatToParts(new Date());
+      const dateParts = Object.fromEntries(parts.map(part => [part.type, part.value]));
+      return `${dateParts.year}-${dateParts.month}-${dateParts.day}`;
+    };
     const validDate = (value) => {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-      const [year, month, day] = value.split('-').map(Number);
-      const date = new Date(Date.UTC(year, month - 1, day));
-      const today = new Date();
-      const todayUtc = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
-      const maxDate = new Date(Date.UTC(today.getFullYear() + 5, today.getMonth(), today.getDate()));
-      return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 &&
-        date.getUTCDate() === day && date >= todayUtc && date <= maxDate;
+      if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const parsed = new Date(`${value}T00:00:00.000Z`);
+      // Reject non-existent dates (e.g. 2026-02-30) and unusual years by round-tripping.
+      if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) return false;
+      const today = cairoTodayString();
+      const maxDateObject = new Date(`${today}T00:00:00.000Z`);
+      maxDateObject.setUTCFullYear(maxDateObject.getUTCFullYear() + 5);
+      const maxDate = maxDateObject.toISOString().slice(0, 10);
+      // ISO calendar dates sort chronologically as strings, so past dates (including year 1111) fail.
+      return value >= today && value <= maxDate;
     };
     if (!validDate(startDate) || !validDate(endDate) || endDate < startDate) return sendError(res, 400, 'اختار تاريخًا صحيحًا من اليوم وحتى 5 سنوات قادمة، وتأكد إن تاريخ النهاية ليس قبل البداية.');
     if (!reason) return sendError(res, 400, 'اكتب سبب طلب الإجازة.');
@@ -854,7 +864,7 @@ async function handleApi(parts, req, res) {
       });
       discordPosted = true;
     } catch (error) { console.error('[leave request post]', cleanText(error.message, 200)); }
-    return sendJson(res, 201, { ok: true, id, discordPosted, message: discordPosted ? 'تم إرسال طلب الإجازة لروم الإدارة.' : 'تم حفظ الطلب، لكن البوت لم يستطع إرساله إلى روم ديسكورد. راجع إعدادات البوت.' });
+    return sendJson(res, 201, { ok: true, id, discordPosted, message: discordPosted ? 'تم إرسال طلب الإجازة لروم الإدارة.' : 'تم حفظ الطلب، لكن تعذر إرساله إلى روم الإجازات 1556945732957765722. تأكد من توكن البوت وصلاحياته.' });
   }
   if (route === 'leave-requests' && parts.length === 1 && req.method === 'GET') {
     const rows = canManage(user)
@@ -871,8 +881,10 @@ async function handleApi(parts, req, res) {
     const rows = await sql`UPDATE leave_requests SET status = ${status}, review_note = ${note}, reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id, user_id, username, start_date, end_date`;
     if (!rows.length) return sendError(res, 404, 'الطلب غير موجود أو تمت مراجعته بالفعل.');
     const item = rows[0];
-    try { await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, { title: status === 'approved' ? `✅ تمت الموافقة على طلب الإجازة #${id}` : `❌ تم رفض طلب الإجازة #${id}`, description: `العضو: <@${item.user_id}>\nالفترة: ${String(item.start_date).slice(0,10)} — ${String(item.end_date).slice(0,10)}\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}`, color: status === 'approved' ? 0x22c55e : 0xef4444, timestamp: new Date().toISOString() }); } catch (error) { console.error('[leave review log]', cleanText(error.message, 180)); }
-    return sendJson(res, 200, { ok: true, message: status === 'approved' ? 'تمت الموافقة على طلب الإجازة.' : 'تم رفض طلب الإجازة.' });
+    let discordPosted = false;
+    try { await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, { title: status === 'approved' ? `✅ تمت الموافقة على طلب الإجازة #${id}` : `❌ تم رفض طلب الإجازة #${id}`, description: `العضو: <@${item.user_id}>\nالفترة: ${String(item.start_date).slice(0,10)} — ${String(item.end_date).slice(0,10)}\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}`, color: status === 'approved' ? 0x22c55e : 0xef4444, timestamp: new Date().toISOString() }); discordPosted = true; } catch (error) { console.error('[leave review log]', cleanText(error.message, 180)); }
+    const baseMessage = status === 'approved' ? 'تمت الموافقة على طلب الإجازة.' : 'تم رفض طلب الإجازة.';
+    return sendJson(res, 200, { ok: true, discordPosted, message: discordPosted ? baseMessage : `${baseMessage} لكن فشل إرسال إشعار ديسكورد إلى روم الإجازات 1556945732957765722.` });
   }
 
   if (route === 'submissions' && parts.length === 1 && req.method === 'POST') {
