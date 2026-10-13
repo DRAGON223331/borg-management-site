@@ -388,7 +388,7 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .online-pill i { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #64748b; }
 .online-pill.online { color: #78e6b5; border-color: rgba(34,197,94,.2); background: rgba(34,197,94,.06); }
 .online-pill.online i { background: #22c55e; }
-.admin-overview-metrics { margin: 15px 0 12px; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; }
+.admin-overview-metrics { margin: 15px 0 12px; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; }
 .admin-overview-metrics > span { display: flex; flex-direction: column; gap: 5px; padding: 9px; border-radius: 10px; background: rgba(6,12,22,.38); }
 .admin-overview-metrics b { font-size: 17px; }
 .admin-overview-metrics small { color: var(--muted); font-size: 9px; }
@@ -419,7 +419,6 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .profile-history-row b { font-size: 11px; }
 .profile-history-row small { display: block; margin-top: 5px; font-size: 9px; color: var(--muted); }
 .profile-history-row p { margin: 8px 0 0; color: #bac6d8; font-size: 11px; line-height: 1.8; white-space: pre-wrap; overflow-wrap: anywhere; }
-.management-application-box { border-color: rgba(48,195,159,.17); }
 .management-app-card { border-right: 2px solid rgba(137,114,251,.55); }
 @media (max-width: 900px) { .staff-detail-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
 @media (max-width: 620px) { .staff-profile-hero { align-items: flex-start; gap: 13px; } .staff-profile-avatar { width: 64px; height: 64px; border-radius: 19px; } .staff-profile-identity h1 { font-size: 24px; } .staff-profile-toolbar { align-items: flex-start; } .admin-overview-cards { grid-template-columns: 1fr; } .profile-history-row { flex-direction: column; } .staff-detail-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }

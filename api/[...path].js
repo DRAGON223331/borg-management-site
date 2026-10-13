@@ -206,19 +206,21 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_leave_requests_user ON leave_requests(user_id, created_at DESC)`;
-    await sql`CREATE TABLE IF NOT EXISTS management_requests (
+    await sql`CREATE TABLE IF NOT EXISTS staff_requests (
       id BIGSERIAL PRIMARY KEY,
       user_id TEXT NOT NULL,
       username TEXT NOT NULL,
       avatar_url TEXT,
-      reason TEXT NOT NULL DEFAULT '',
+      request_type TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      details TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending',
       review_note TEXT NOT NULL DEFAULT '',
       reviewed_by TEXT,
       reviewed_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`;
-    await sql`CREATE INDEX IF NOT EXISTS idx_management_requests_user ON management_requests(user_id, created_at DESC)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_staff_requests_user ON staff_requests(user_id, created_at DESC)`;
   })();
   return schemaPromise;
 }
@@ -243,18 +245,19 @@ async function getDailyStaffMessageStats(sql) {
 
 
 async function getAllStaffStats(sql) {
-  const [messages, submissions, points, leaves, online, daily] = await Promise.all([
+  const [messages, submissions, points, leaves, staffRequests, online, daily] = await Promise.all([
     sql`SELECT user_id AS "userId", MAX(username) AS username, COUNT(*)::integer AS "totalMessages" FROM chat_messages WHERE room = 'staff' GROUP BY user_id`,
     sql`SELECT user_id AS "userId", COUNT(*)::integer AS "totalSubmissions", COUNT(*) FILTER (WHERE status = 'approved')::integer AS "approvedSubmissions", COUNT(*) FILTER (WHERE status IN ('submitted','pending'))::integer AS "pendingSubmissions", COUNT(*) FILTER (WHERE status = 'rejected')::integer AS "rejectedSubmissions" FROM submissions GROUP BY user_id`,
     sql`SELECT user_id AS "userId", COALESCE(SUM(amount),0)::numeric AS "totalPoints" FROM staff_points GROUP BY user_id`,
     sql`SELECT user_id AS "userId", COUNT(*)::integer AS "leaveRequests" FROM leave_requests GROUP BY user_id`,
+    sql`SELECT user_id AS "userId", COUNT(*)::integer AS "adminRequests" FROM staff_requests GROUP BY user_id`,
     sql`SELECT user_id AS "userId", last_seen AS "lastSeen" FROM site_presence WHERE last_seen > NOW() - INTERVAL '90 seconds'`,
     getDailyStaffMessageStats(sql),
   ]);
   const byId = new Map();
   const ensure = (id, username = '') => {
     const key = String(id);
-    if (!byId.has(key)) byId.set(key, { userId: key, username, dailyMessages: 0, totalMessages: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, online: false, lastSeen: null });
+    if (!byId.has(key)) byId.set(key, { userId: key, username, dailyMessages: 0, totalMessages: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, adminRequests: 0, online: false, lastSeen: null });
     const row = byId.get(key);
     if (username) row.username = username;
     return row;
@@ -263,16 +266,11 @@ async function getAllStaffStats(sql) {
   for (const row of submissions) Object.assign(ensure(row.userId), { totalSubmissions: Number(row.totalSubmissions) || 0, approvedSubmissions: Number(row.approvedSubmissions) || 0, pendingSubmissions: Number(row.pendingSubmissions) || 0, rejectedSubmissions: Number(row.rejectedSubmissions) || 0 });
   for (const row of points) ensure(row.userId).totalPoints = Number(row.totalPoints) || 0;
   for (const row of leaves) ensure(row.userId).leaveRequests = Number(row.leaveRequests) || 0;
+  for (const row of staffRequests) ensure(row.userId).adminRequests = Number(row.adminRequests) || 0;
   for (const row of online) Object.assign(ensure(row.userId), { online: true, lastSeen: row.lastSeen });
   for (const row of daily.dailyStats || []) ensure(row.userId, row.username).dailyMessages = Number(row.count) || 0;
   return [...byId.values()];
 }
-async function addManagementRoles(userId) {
-  // Role assignment is idempotent; Discord returns 204 when a role is added.
-  await discordApi(`/guilds/${MAIN_GUILD_ID}/members/${userId}/roles/${MANAGEMENT_MAIN_ROLE_ID}`, { method: 'PUT' });
-  await discordApi(`/guilds/${STAFF_GUILD_ID}/members/${userId}/roles/${MANAGEMENT_STAFF_ROLE_ID}`, { method: 'PUT' });
-}
-
 async function discordApi(route, options = {}) {
   if (!BOT_TOKEN) throw new Error('توكن البوت غير مضبوط في Environment Variables على Vercel.');
   const response = await fetch(`${DISCORD_API}${route}`, {
@@ -663,7 +661,7 @@ async function handleApi(parts, req, res) {
     const targetId = cleanText(parts[1], 24);
     if (!/^\d{15,22}$/.test(targetId)) return sendError(res, 400, 'Discord ID غير صالح.');
     const allStats = await getAllStaffStats(sql);
-    const stats = allStats.find((row) => row.userId === targetId) || { userId: targetId, dailyMessages: 0, totalMessages: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, online: false, lastSeen: null };
+    const stats = allStats.find((row) => row.userId === targetId) || { userId: targetId, dailyMessages: 0, totalMessages: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, adminRequests: 0, online: false, lastSeen: null };
     const [submissionRows, leaveRows] = await Promise.all([
       sql`SELECT id, submitted_at AS "submittedAt", status, note FROM submissions WHERE user_id = ${targetId} ORDER BY submitted_at DESC LIMIT 10`,
       sql`SELECT id, start_date AS "startDate", end_date AS "endDate", reason, status, created_at AS "createdAt", review_note AS "reviewNote" FROM leave_requests WHERE user_id = ${targetId} ORDER BY created_at DESC LIMIT 10`,
@@ -671,42 +669,58 @@ async function handleApi(parts, req, res) {
     return sendJson(res, 200, { stats, recentSubmissions: submissionRows.map((row) => ({ ...row, id: Number(row.id) })), recentLeaves: leaveRows.map((row) => ({ ...row, id: Number(row.id), startDate: String(row.startDate).slice(0,10), endDate: String(row.endDate).slice(0,10) })) });
   }
 
-  if (route === 'management-requests' && parts.length === 1 && req.method === 'POST') {
-    if (user.isAdmin || user.isManager) return sendError(res, 403, 'حسابك يحمل صلاحيات الإدارة بالفعل.');
-    const reason = cleanText(req.body?.reason, 1000);
-    if (reason.length < 30) return sendError(res, 400, 'اكتب تفاصيل أكثر عن سبب رغبتك في الانضمام للإدارة (30 حرفًا على الأقل).');
-    const pending = await sql`SELECT id FROM management_requests WHERE user_id = ${user.id} AND status = 'pending' LIMIT 1`;
-    if (pending.length) return sendError(res, 409, 'عندك طلب انضمام للإدارة لسه بانتظار المراجعة.');
-    const inserted = await sql`INSERT INTO management_requests(user_id, username, avatar_url, reason, status, created_at) VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, ${reason}, 'pending', NOW()) RETURNING id`;
+  if (route === 'staff-requests' && parts.length === 1 && req.method === 'POST') {
+    const requestType = cleanText(req.body?.requestType, 40);
+    const subject = cleanText(req.body?.subject, 140);
+    const details = cleanText(req.body?.details, 1200);
+    const allowedTypes = new Set(['permission', 'technical', 'data-change', 'complaint', 'other']);
+    if (!allowedTypes.has(requestType)) return sendError(res, 400, 'نوع الطلب غير صالح.');
+    if (!subject) return sendError(res, 400, 'اكتب عنوان الطلب.');
+    if (details.length < 5) return sendError(res, 400, 'اكتب تفاصيل أكثر عن الطلب.');
+    const typeLabels = { permission: 'طلب إذن / غياب', technical: 'مشكلة تقنية', 'data-change': 'تعديل بيانات', complaint: 'شكوى أو ملاحظة', other: 'طلب إداري آخر' };
+    const inserted = await sql`INSERT INTO staff_requests(user_id, username, avatar_url, request_type, subject, details, status, created_at)
+      VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, ${requestType}, ${subject}, ${details}, 'pending', NOW()) RETURNING id`;
     const id = Number(inserted[0].id);
     let discordPosted = false;
     try {
-      await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, { title: `🛡️ طلب انضمام للإدارة جديد #${id}`, description: 'طلب جديد بانتظار مراجعة مسؤولي الإدارة من لوحة الموقع.', color: 0x8b5cf6, fields: [ { name: '👤 المتقدم', value: `<@${user.id}>\n\`${user.id}\``, inline: true }, { name: '📝 سبب التقديم والخبرة', value: reason.slice(0,1024), inline: false }, { name: '🔎 المراجعة', value: `رقم الطلب: #${id}\nالموافقة أو الرفض من لوحة إدارة البرج.`, inline: false } ], timestamp: new Date().toISOString(), footer: { text: 'إدارة البرج • طلبات الانضمام للإدارة' }, ...(user.avatarUrl ? { thumbnail: { url: user.avatarUrl } } : {}) });
+      await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, {
+        title: `📨 طلب إداري جديد #${id}`,
+        description: 'طلب جديد من الاستاف بانتظار مراجعة مسؤولي الإدارة من لوحة الموقع.',
+        color: 0x8b5cf6,
+        fields: [
+          { name: '👤 العضو', value: `<@${user.id}>\n\`${user.id}\``, inline: true },
+          { name: '📂 نوع الطلب', value: typeLabels[requestType], inline: true },
+          { name: '📝 العنوان', value: subject.slice(0, 1024), inline: false },
+          { name: '📄 التفاصيل', value: details.slice(0, 1024), inline: false },
+          { name: '🔎 المراجعة', value: `رقم الطلب: #${id}\nالموافقة أو الرفض من لوحة إدارة البرج.`, inline: false },
+        ],
+        timestamp: new Date().toISOString(),
+        footer: { text: 'إدارة البرج • الطلبات الإدارية' },
+        ...(user.avatarUrl ? { thumbnail: { url: user.avatarUrl } } : {}),
+      });
       discordPosted = true;
-    } catch (error) { console.error('[management request post]', cleanText(error.message, 200)); }
-    return sendJson(res, 201, { ok: true, id, discordPosted, message: discordPosted ? 'تم إرسال طلبك إلى روم المراجعة.' : 'تم حفظ الطلب، لكن تعذر إرساله إلى ديسكورد. راجع صلاحيات البوت.' });
+    } catch (error) { console.error('[staff request post]', cleanText(error.message, 200)); }
+    return sendJson(res, 201, { ok: true, id, discordPosted, message: discordPosted ? 'تم إرسال الطلب الإداري لروم المراجعة.' : 'تم حفظ الطلب، لكن البوت لم يستطع إرساله إلى روم ديسكورد. راجع إعدادات البوت.' });
   }
-  if (route === 'management-requests' && parts.length === 1 && req.method === 'GET') {
-    const rows = canManage(user) ? await sql`SELECT * FROM management_requests ORDER BY id DESC LIMIT 100` : await sql`SELECT * FROM management_requests WHERE user_id = ${user.id} ORDER BY id DESC LIMIT 20`;
-    return sendJson(res, 200, { requests: rows.map((row) => ({ id: Number(row.id), userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, reason: row.reason, status: row.status, reviewNote: row.review_note, reviewedBy: row.reviewed_by, reviewedAt: row.reviewed_at, createdAt: row.created_at })) });
+  if (route === 'staff-requests' && parts.length === 1 && req.method === 'GET') {
+    const rows = canManage(user)
+      ? await sql`SELECT * FROM staff_requests ORDER BY id DESC LIMIT 100`
+      : await sql`SELECT * FROM staff_requests WHERE user_id = ${user.id} ORDER BY id DESC LIMIT 40`;
+    return sendJson(res, 200, { requests: rows.map((row) => ({ id: Number(row.id), userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, requestType: row.request_type, subject: row.subject, details: row.details, status: row.status, reviewNote: row.review_note, reviewedBy: row.reviewed_by, reviewedAt: row.reviewed_at, createdAt: row.created_at })) });
   }
-  if (route === 'management-requests' && parts.length === 3 && req.method === 'POST' && ['approve','reject'].includes(parts[2])) {
-    if (!canManage(user)) return sendError(res, 403, 'مراجعة طلبات الإدارة للمسؤولين فقط.');
+  if (route === 'staff-requests' && parts.length === 3 && req.method === 'POST' && ['approve', 'reject'].includes(parts[2])) {
+    if (!canManage(user)) return sendError(res, 403, 'مراجعة الطلبات الإدارية متاحة لمسؤولي الإدارة فقط.');
     const id = Number(parts[1]);
-    if (!Number.isSafeInteger(id) || id < 1) return sendError(res, 400, 'رقم طلب الإدارة غير صالح.');
-    const found = await sql`SELECT id, user_id, username FROM management_requests WHERE id = ${id} AND status = 'pending' LIMIT 1`;
+    if (!Number.isSafeInteger(id) || id < 1) return sendError(res, 400, 'رقم الطلب غير صالح.');
+    const found = await sql`SELECT id, user_id, request_type, subject FROM staff_requests WHERE id = ${id} AND status = 'pending' LIMIT 1`;
     if (!found.length) return sendError(res, 404, 'الطلب غير موجود أو تمت مراجعته بالفعل.');
     const item = found[0];
     const status = parts[2] === 'approve' ? 'approved' : 'rejected';
     const note = cleanText(req.body?.note, 400);
-    if (status === 'approved') {
-      try { await addManagementRoles(item.user_id); }
-      catch (error) { console.error('[management role assignment]', cleanText(error.message, 220)); return sendError(res, 502, `تعذر إضافة الرتبتين. تأكد أن العضو موجود في السيرفرين وأن البوت يستطيع إدارة الرتب. تفاصيل Discord: ${cleanText(error.message, 160)}`); }
-    }
-    const updated = await sql`UPDATE management_requests SET status = ${status}, review_note = ${note}, reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id`;
+    const updated = await sql`UPDATE staff_requests SET status = ${status}, review_note = ${note}, reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id`;
     if (!updated.length) return sendError(res, 409, 'تمت مراجعة الطلب من مسؤول آخر بالفعل.');
-    try { await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, { title: status === 'approved' ? `✅ تمت الموافقة على طلب الإدارة #${id}` : `❌ تم رفض طلب الإدارة #${id}`, description: `المتقدم: <@${item.user_id}>\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}${status === 'approved' ? `\nتمت إضافة الرتبتين <@&${MANAGEMENT_MAIN_ROLE_ID}> و<@&${MANAGEMENT_STAFF_ROLE_ID}>.` : ''}`, color: status === 'approved' ? 0x22c55e : 0xef4444, timestamp: new Date().toISOString() }); } catch (error) { console.error('[management request review log]', cleanText(error.message, 180)); }
-    return sendJson(res, 200, { ok: true, status, message: status === 'approved' ? 'تمت الموافقة وإضافة الرتب في السيرفرين.' : 'تم رفض طلب الانضمام للإدارة.' });
+    try { await postDiscordEmbed(LEAVE_REQUEST_CHANNEL_ID, { title: status === 'approved' ? `✅ تمت الموافقة على الطلب الإداري #${id}` : `❌ تم رفض الطلب الإداري #${id}`, description: `نوع الطلب: ${item.request_type}\nالعنوان: ${item.subject}\nمقدم الطلب: <@${item.user_id}>\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}`, color: status === 'approved' ? 0x22c55e : 0xef4444, timestamp: new Date().toISOString() }); } catch (error) { console.error('[staff request review log]', cleanText(error.message, 180)); }
+    return sendJson(res, 200, { ok: true, status, message: status === 'approved' ? 'تمت الموافقة على الطلب الإداري.' : 'تم رفض الطلب الإداري.' });
   }
 
   if (route === 'tasks' && parts.length === 1 && req.method === 'GET') {

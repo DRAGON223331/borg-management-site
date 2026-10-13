@@ -14,12 +14,8 @@
 
 بعد الحفظ، أعد النشر من Vercel. لن تعمل عمليات المهمات أو الشات ما لم تنشر مجلدًا يحتوي على `api/` بجانب `package.json` و`vercel.json`.
 
-The project includes explicit API wrappers for nested task, chat, and submission-review routes. Ensure this folder is deployed with its `api/` directory intact; deploying only `site-src/` or the generated `dist/` folder will cause API requests to return Vercel `NOT_FOUND` errors.
+The project includes explicit API wrappers for nested task, chat, submission-review, staff-request-review, and staff-profile routes. Ensure this folder is deployed with its `api/` directory intact; deploying only `site-src/` or the generated `dist/` folder will cause API requests to return Vercel `NOT_FOUND` errors.
 
 
-## طلبات الانضمام للإدارة
-تُرسل الطلبات إلى روم المراجعة `1558102515885678734`. عند الموافقة، يضيف البوت `MANAGEMENT_MAIN_ROLE_ID` في `MAIN_GUILD_ID` و`MANAGEMENT_STAFF_ROLE_ID` في `STAFF_GUILD_ID`. امنح البوت صلاحية Manage Roles وارفع رتبته فوق الرتبتين المستهدفتين، وتأكد أن المتقدم عضو في السيرفرين.
-
-
-## إحصائيات الإدارة وطلبات الترقية
-تعرض الصفحة الرئيسية ملخصات المسؤولين، والضغط على اسم عضو من القائمة الجانبية يفتح ملفه الكامل. طلبات الانضمام للإدارة تُرسل إلى روم المراجعة `1558102515885678734` ويمكن قبولها أو رفضها من لوحة الموقع. الموافقة تضيف الرتبتين المحددتين أعلاه، بشرط صلاحيات البوت ووجود المتقدم في السيرفرين.
+## إحصائيات الإدارة والطلبات الإدارية
+تعرض الصفحة الرئيسية ملخصات المسؤولين، والضغط على اسم عضو من القائمة الجانبية يفتح ملفه الكامل. يستطيع عضو الاستاف إرسال طلب إجازة أو طلب إداري آخر (إذن/غياب، مشكلة تقنية، تعديل بيانات، شكوى/ملاحظة، أو طلب آخر). تصل طلبات الإجازة والطلبات الإدارية إلى روم المراجعة `1558102515885678734`، ويمكن لمسؤولي الإدارة قبولها أو رفضها من لوحة الموقع. الموافقة على طلب عادي لا تغيّر رتب Discord؛ الرتبتان المعرّفتان في إعدادات الموقع تُستخدمان لتحديد صلاحيات الإدارة فقط.

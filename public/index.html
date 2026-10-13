@@ -112,19 +112,27 @@
             <div class="section-title-row"><div><span class="tiny-label">MANAGEMENT REVIEW</span><h2>مراجعة طلبات الإجازة</h2></div><button id="refresh-leaves-btn" class="text-button" type="button">تحديث ↻</button></div>
             <div id="manager-leave-list" class="leave-requests-list"><div class="loading-state">جاري تحميل الطلبات...</div></div>
           </section>
-          <section id="management-application-box" class="leave-request-box management-application-box">
-            <div class="section-title-row"><div><span class="tiny-label">JOIN MANAGEMENT</span><h2>طلب الانضمام للإدارة</h2></div><span class="manager-badge">مراجعة مسؤولي الإدارة</span></div>
-            <p class="muted small-copy">اشرح ليه شايف نفسك مناسب للإدارة وخبرتك في الاستاف. الطلب هيروح لروم المراجعة، والموافقة بتضيف رتبة الإدارة في السيرفرين.</p>
-            <form id="management-application-form" class="leave-form">
-              <label for="management-application-reason">سبب التقديم وخبرتك</label><textarea id="management-application-reason" rows="4" maxlength="1000" minlength="30" placeholder="اكتب خبرتك، نشاطك، وليه عايز تنضم للإدارة..." required></textarea>
-              <button type="submit" class="primary-button">إرسال طلب الإدارة</button>
+          <section id="staff-request-box" class="leave-request-box">
+            <div class="section-title-row"><div><span class="tiny-label">STAFF REQUESTS</span><h2>طلب إداري</h2></div><span class="manager-badge">مراجعة الإدارة</span></div>
+            <p class="muted small-copy">قدّم طلب إذن أو مشكلة تقنية أو تعديل بيانات أو أي طلب إداري آخر. كل الطلبات بتوصل لنفس روم المراجعة وبتتراجع من الموقع.</p>
+            <form id="staff-request-form" class="leave-form">
+              <label for="staff-request-type">نوع الطلب</label>
+              <select id="staff-request-type" required>
+                <option value="permission">طلب إذن / غياب</option>
+                <option value="technical">مشكلة تقنية</option>
+                <option value="data-change">تعديل بيانات</option>
+                <option value="complaint">شكوى أو ملاحظة</option>
+                <option value="other">طلب إداري آخر</option>
+              </select>
+              <label for="staff-request-subject">عنوان الطلب</label><input id="staff-request-subject" type="text" maxlength="140" placeholder="اكتب عنوانًا مختصرًا للطلب..." required>
+              <label for="staff-request-details">التفاصيل</label><textarea id="staff-request-details" rows="4" maxlength="1200" placeholder="اكتب تفاصيل الطلب بوضوح..." required></textarea>
+              <button type="submit" class="primary-button">إرسال الطلب للمراجعة</button>
             </form>
-            <div id="management-application-status-list" class="leave-requests-list"><div class="loading-state">جاري تحميل حالة طلباتك...</div></div>
+            <div id="staff-request-list" class="leave-requests-list"><div class="loading-state">جاري تحميل طلباتك...</div></div>
           </section>
-          <section id="manager-application-section" class="leave-request-box hidden">
-            <div class="section-title-row"><div><span class="tiny-label">MANAGEMENT APPLICATION REVIEW</span><h2>طلبات الانضمام للإدارة</h2></div><button id="refresh-management-requests-btn" class="text-button" type="button">تحديث ↻</button></div>
-            <p class="muted small-copy">الموافقة تضيف الرتبتين تلقائيًا: رتبة السيرفر الأساسي ورتبة سيرفر الإدارة.</p>
-            <div id="manager-management-requests-list" class="leave-requests-list"><div class="loading-state">جاري تحميل الطلبات...</div></div>
+          <section id="manager-staff-request-section" class="leave-request-box hidden">
+            <div class="section-title-row"><div><span class="tiny-label">MANAGEMENT REVIEW</span><h2>مراجعة الطلبات الإدارية</h2></div><button id="refresh-staff-requests-btn" class="text-button" type="button">تحديث ↻</button></div>
+            <div id="manager-staff-request-list" class="leave-requests-list"><div class="loading-state">جاري تحميل الطلبات...</div></div>
           </section>
         </section>
 

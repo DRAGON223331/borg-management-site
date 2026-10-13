@@ -130,18 +130,15 @@ async function initialize() {
     wireChats();
     wireRoster();
     wireLeaveRequests();
-    wireManagementApplications();
+    wireStaffRequests();
     if (state.user.canManage) {
       $('#task-manager').classList.remove('hidden');
       $$('.manager-only').forEach((element) => element.classList.remove('hidden'));
       $('#submissions-heading').textContent = 'آخر تسليمات الاستاف';
       $('#manager-leave-section').classList.remove('hidden');
-      $('#manager-application-section')?.classList.remove('hidden');
-      $('#management-application-box')?.classList.add('hidden');
-    } else if (state.user.isAdmin || state.user.isManager) {
-      $('#management-application-box')?.classList.add('hidden');
+      $('#manager-staff-request-section')?.classList.remove('hidden');
     }
-    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests(), loadManagementApplications(), loadStaffStats()]);
+    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests(), loadStaffRequests(), loadStaffStats()]);
     startChatPolling();
     startPresenceHeartbeat();
     setInterval(checkBotStatus, 30000);
@@ -672,7 +669,7 @@ function renderAdminOverview() {
   container.innerHTML = admins.map((member) => {
     const stats = statsById.get(String(member.id)) || {};
     const online = state.onlineUserIds.has(String(member.id));
-    return `<button type="button" class="admin-overview-card" data-open-staff-profile="${escapeHtml(member.id)}"><div class="admin-overview-top"><img src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="admin-overview-name"><b>${escapeHtml(member.username)}</b><small>${escapeHtml(member.roleName || 'مسؤول')}</small></div><span class="online-pill ${online ? 'online' : 'offline'}"><i></i>${online ? 'أونلاين' : 'أوفلاين'}</span></div><div class="admin-overview-metrics"><span><b>${Number(stats.dailyMessages || 0).toLocaleString('en-US')}</b><small>رسائل اليوم</small></span><span><b>${Number(stats.totalSubmissions || 0).toLocaleString('en-US')}</b><small>تسليمات</small></span><span><b>${Number(stats.totalPoints || 0).toLocaleString('en-US')}</b><small>نقاط</small></span></div><span class="admin-overview-link">فتح الملف الكامل ←</span></button>`;
+    return `<button type="button" class="admin-overview-card" data-open-staff-profile="${escapeHtml(member.id)}"><div class="admin-overview-top"><img src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="admin-overview-name"><b>${escapeHtml(member.username)}</b><small>${escapeHtml(member.roleName || 'مسؤول')}</small></div><span class="online-pill ${online ? 'online' : 'offline'}"><i></i>${online ? 'أونلاين' : 'أوفلاين'}</span></div><div class="admin-overview-metrics"><span><b>${Number(stats.dailyMessages || 0).toLocaleString('en-US')}</b><small>رسائل اليوم</small></span><span><b>${Number(stats.totalSubmissions || 0).toLocaleString('en-US')}</b><small>تسليمات</small></span><span><b>${Number(stats.totalPoints || 0).toLocaleString('en-US')}</b><small>نقاط</small></span><span><b>${Number(stats.adminRequests || 0).toLocaleString('en-US')}</b><small>طلبات إدارية</small></span></div><span class="admin-overview-link">فتح الملف الكامل ←</span></button>`;
   }).join('');
   $$('[data-open-staff-profile]', container).forEach((button) => button.addEventListener('click', () => openStaffProfile(button.dataset.openStaffProfile)));
 }
@@ -701,56 +698,62 @@ function renderStaffProfile(member, stats, submissions, leaves) {
   const statusText = { approved: 'تمت الموافقة', submitted: 'بانتظار المراجعة', pending: 'بانتظار المراجعة', rejected: 'مرفوض' };
   const submissionsHtml = submissions.length ? submissions.map((item) => `<article class="profile-history-row"><div><b>تسليم #${Number(item.id)}</b><small>${escapeHtml(formatDate(item.submittedAt, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}</small>${item.note ? `<p>${escapeHtml(item.note)}</p>` : ''}</div><span class="task-tag ${item.status === 'approved' ? 'completed' : item.status === 'rejected' ? 'required' : 'optional'}">${statusText[item.status] || escapeHtml(item.status)}</span></article>`).join('') : '<div class="task-empty">لا توجد تسليمات مسجلة لهذا العضو.</div>';
   const leavesHtml = leaves.length ? leaves.map((item) => `<article class="profile-history-row"><div><b>طلب إجازة #${Number(item.id)}</b><small>${escapeHtml(item.startDate)} — ${escapeHtml(item.endDate)}</small><p>${escapeHtml(item.reason)}</p></div><span class="task-tag ${item.status === 'approved' ? 'completed' : item.status === 'rejected' ? 'required' : 'optional'}">${statusText[item.status] || 'بانتظار المراجعة'}</span></article>`).join('') : '<div class="task-empty">لا توجد طلبات إجازة.</div>';
-  $('#staff-profile-content').innerHTML = `<div class="staff-profile-hero"><img class="staff-profile-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="staff-profile-identity"><span class="tiny-label">${member.isAdmin ? 'ADMINISTRATOR PROFILE' : 'STAFF MEMBER PROFILE'}</span><h1>${escapeHtml(member.username)}</h1><p>@${escapeHtml(member.handle || member.id)} · <code>${escapeHtml(member.id)}</code></p><div class="staff-profile-status"><span class="online-pill ${online ? 'online' : 'offline'}"><i></i>${online ? 'متصل بالموقع الآن' : 'غير متصل بالموقع'}</span><span class="manager-badge">${escapeHtml(member.roleName || 'عضو الاستاف')}</span></div></div></div><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">PERMISSIONS</span><h2>الرتب والصلاحيات</h2></div></div><div class="staff-profile-roles">${roles}</div></section><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">ACTIVITY OVERVIEW</span><h2>إحصائيات العضو</h2></div><small class="muted">تاريخ الإحصائيات: ${escapeHtml(state.dailyMessageStats.dailyDate || 'اليوم')}</small></div><div class="staff-detail-grid">${statCard('رسائل اليوم', stats.dailyMessages, 'في شات الاستاف')}${statCard('إجمالي الرسائل', stats.totalMessages, 'كل الرسائل المسجلة')}${statCard('إجمالي التسليمات', stats.totalSubmissions)}${statCard('التسليمات المقبولة', stats.approvedSubmissions)}${statCard('التسليمات المعلقة', stats.pendingSubmissions)}${statCard('النقاط المسجلة', stats.totalPoints)}${statCard('طلبات الإجازة', stats.leaveRequests)}${statCard('حالة الاتصال', online ? 'متصل' : 'أوفلاين', 'حالة الاتصال الحالية')}</div></section><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">SUBMISSION HISTORY</span><h2>آخر التسليمات</h2></div></div><div class="profile-history-list">${submissionsHtml}</div></section><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">LEAVE HISTORY</span><h2>طلبات الإجازة</h2></div></div><div class="profile-history-list">${leavesHtml}</div></section>`;
+  $('#staff-profile-content').innerHTML = `<div class="staff-profile-hero"><img class="staff-profile-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="staff-profile-identity"><span class="tiny-label">${member.isAdmin ? 'ADMINISTRATOR PROFILE' : 'STAFF MEMBER PROFILE'}</span><h1>${escapeHtml(member.username)}</h1><p>@${escapeHtml(member.handle || member.id)} · <code>${escapeHtml(member.id)}</code></p><div class="staff-profile-status"><span class="online-pill ${online ? 'online' : 'offline'}"><i></i>${online ? 'متصل بالموقع الآن' : 'غير متصل بالموقع'}</span><span class="manager-badge">${escapeHtml(member.roleName || 'عضو الاستاف')}</span></div></div></div><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">PERMISSIONS</span><h2>الرتب والصلاحيات</h2></div></div><div class="staff-profile-roles">${roles}</div></section><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">ACTIVITY OVERVIEW</span><h2>إحصائيات العضو</h2></div><small class="muted">تاريخ الإحصائيات: ${escapeHtml(state.dailyMessageStats.dailyDate || 'اليوم')}</small></div><div class="staff-detail-grid">${statCard('رسائل اليوم', stats.dailyMessages, 'في شات الاستاف')}${statCard('إجمالي الرسائل', stats.totalMessages, 'كل الرسائل المسجلة')}${statCard('إجمالي التسليمات', stats.totalSubmissions)}${statCard('التسليمات المقبولة', stats.approvedSubmissions)}${statCard('التسليمات المعلقة', stats.pendingSubmissions)}${statCard('النقاط المسجلة', stats.totalPoints)}${statCard('طلبات الإجازة', stats.leaveRequests)}${statCard('الطلبات الإدارية', stats.adminRequests)}${statCard('حالة الاتصال', online ? 'متصل' : 'أوفلاين', 'حالة الاتصال الحالية')}</div></section><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">SUBMISSION HISTORY</span><h2>آخر التسليمات</h2></div></div><div class="profile-history-list">${submissionsHtml}</div></section><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">LEAVE HISTORY</span><h2>طلبات الإجازة</h2></div></div><div class="profile-history-list">${leavesHtml}</div></section>`;
 }
 
-function wireManagementApplications() {
-  $('#management-application-form')?.addEventListener('submit', async (event) => {
+function wireStaffRequests() {
+  $('#staff-request-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const reason = $('#management-application-reason').value.trim();
-    if (reason.length < 30) return showToast('اكتب تفاصيل أكثر عن سبب رغبتك في الانضمام للإدارة (30 حرفًا على الأقل).', 'error');
+    const requestType = $('#staff-request-type').value;
+    const subject = $('#staff-request-subject').value.trim();
+    const details = $('#staff-request-details').value.trim();
+    if (!subject || !details) return showToast('اكتب عنوان الطلب وتفاصيله.', 'error');
     const button = $('button[type="submit"]', event.currentTarget);
     setButtonLoading(button, true, 'جاري إرسال الطلب...');
     try {
-      const result = await api('/api/management-requests', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }) });
-      showToast(result.message || 'تم إرسال طلب الانضمام للإدارة.', result.discordPosted ? 'success' : 'error');
+      const result = await api('/api/staff-requests', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestType, subject, details }),
+      });
+      showToast(result.message || 'تم إرسال الطلب للمراجعة.', result.discordPosted === false ? 'error' : 'success');
       event.currentTarget.reset();
-      await loadManagementApplications();
+      await loadStaffRequests();
     } catch (error) { showToast(error.message, 'error'); }
     finally { setButtonLoading(button, false); }
   });
-  $('#refresh-management-requests-btn')?.addEventListener('click', loadManagementApplications);
+  $('#refresh-staff-requests-btn')?.addEventListener('click', loadStaffRequests);
   document.addEventListener('click', async (event) => {
-    const button = event.target.closest('[data-management-request-review]');
+    const button = event.target.closest('[data-staff-request-review]');
     if (!button) return;
-    const action = button.dataset.managementRequestReview;
-    const note = action === 'reject' ? (window.prompt('سبب رفض طلب الإدارة (اختياري):') || '') : '';
+    const action = button.dataset.staffRequestReview;
+    const note = action === 'reject' ? (window.prompt('سبب رفض الطلب (اختياري):') || '') : '';
     button.disabled = true;
     try {
-      const result = await api(`/api/management-requests/${button.dataset.id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }) });
-      showToast(result.message || (action === 'approve' ? 'تمت الموافقة وإضافة الرتب.' : 'تم رفض الطلب.'), 'success');
-      await Promise.all([loadManagementApplications(), loadRoster(), loadStaffStats()]);
+      const result = await api(`/api/staff-requests/${button.dataset.id}/${action}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }),
+      });
+      showToast(result.message || 'تم تحديث حالة الطلب.', 'success');
+      await loadStaffRequests();
     } catch (error) { showToast(error.message, 'error'); button.disabled = false; }
   });
 }
-async function loadManagementApplications() {
+
+async function loadStaffRequests() {
   try {
-    const result = await api('/api/management-requests');
+    const result = await api('/api/staff-requests');
     const requests = result.requests || [];
     const statusText = { pending: 'بانتظار المراجعة', approved: 'تمت الموافقة', rejected: 'مرفوض' };
-    const render = (item, manager = false) => `<article class="leave-card management-app-card"><div class="leave-card-top"><b>${escapeHtml(item.username)}</b><span class="task-tag ${item.status === 'approved' ? 'completed' : item.status === 'rejected' ? 'required' : 'optional'}">${statusText[item.status] || item.status}</span></div><p>${escapeHtml(item.reason)}</p><small class="muted">Discord ID: <code>${escapeHtml(item.userId)}</code> · ${formatDate(item.createdAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</small>${item.reviewNote ? `<p class="muted">ملاحظة الإدارة: ${escapeHtml(item.reviewNote)}</p>` : ''}${!manager && item.userId === state.user.id && item.status === 'approved' && !state.user.canManage ? '<p class="muted">تمت الموافقة وإضافة الرتب. سجّل خروجك ثم ادخل مجددًا لتفعيل صلاحيات الإدارة في الموقع.</p>' : ''}${manager && item.status === 'pending' ? `<div class="manager-actions"><button class="primary-button" data-management-request-review="approve" data-id="${item.id}">موافقة وإضافة الرتب</button><button class="secondary-button" data-management-request-review="reject" data-id="${item.id}">رفض الطلب</button></div>` : ''}</article>`;
-    const mine = requests.filter((item) => item.userId === state.user.id);
-    const ownNode = $('#management-application-status-list');
-    if (ownNode) ownNode.innerHTML = mine.length ? mine.map((item) => render(item)).join('') : '<div class="task-empty">لسه مبعتش طلب انضمام للإدارة.</div>';
-    const applicationSubmit = $('#management-application-form button[type="submit"]');
-    const hasPendingApplication = mine.some((item) => item.status === 'pending');
-    if (applicationSubmit && !state.user.canManage) { applicationSubmit.disabled = hasPendingApplication; applicationSubmit.textContent = hasPendingApplication ? 'طلبك قيد المراجعة' : 'إرسال طلب الإدارة'; }
-    const managerNode = $('#manager-management-requests-list');
-    if (managerNode && state.user.canManage) managerNode.innerHTML = requests.length ? requests.map((item) => render(item, true)).join('') : '<div class="task-empty">مفيش طلبات إدارة حاليًا.</div>';
+    const typeText = { permission: 'طلب إذن / غياب', technical: 'مشكلة تقنية', 'data-change': 'تعديل بيانات', complaint: 'شكوى أو ملاحظة', other: 'طلب إداري آخر' };
+    const render = (item, manager = false) => `<article class="leave-card staff-request-card"><div class="leave-card-top"><b>${escapeHtml(item.username)}</b><span class="task-tag ${item.status === 'approved' ? 'completed' : item.status === 'rejected' ? 'required' : 'optional'}">${statusText[item.status] || escapeHtml(item.status)}</span></div><div class="leave-dates">${escapeHtml(typeText[item.requestType] || item.requestType)} · ${escapeHtml(item.subject)}</div><p>${escapeHtml(item.details)}</p><small class="muted">Discord ID: <code>${escapeHtml(item.userId)}</code> · ${formatDate(item.createdAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</small>${item.reviewNote ? `<p class="muted">ملاحظة الإدارة: ${escapeHtml(item.reviewNote)}</p>` : ''}${manager && item.status === 'pending' ? `<div class="manager-actions"><button class="primary-button" data-staff-request-review="approve" data-id="${item.id}">موافقة</button><button class="secondary-button" data-staff-request-review="reject" data-id="${item.id}">رفض</button></div>` : ''}</article>`;
+    const own = requests.filter((item) => item.userId === state.user.id);
+    const ownNode = $('#staff-request-list');
+    if (ownNode) ownNode.innerHTML = own.length ? own.map((item) => render(item)).join('') : '<div class="task-empty">لسه مفيش طلبات إدارية أرسلتها.</div>';
+    const managerNode = $('#manager-staff-request-list');
+    if (managerNode && state.user.canManage) managerNode.innerHTML = requests.length ? requests.map((item) => render(item, true)).join('') : '<div class="task-empty">مفيش طلبات إدارية للمراجعة حاليًا.</div>';
   } catch (error) {
-    const ownNode = $('#management-application-status-list');
+    const ownNode = $('#staff-request-list');
     if (ownNode) ownNode.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
-    const managerNode = $('#manager-management-requests-list');
+    const managerNode = $('#manager-staff-request-list');
     if (managerNode && state.user.canManage) managerNode.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
   }
 }

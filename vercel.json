@@ -21,7 +21,7 @@
     "api/staff-stats/[userId].js": {
       "maxDuration": 60
     },
-    "api/management-requests/[id]/[action].js": {
+    "api/staff-requests/[id]/[action].js": {
       "maxDuration": 60
     }
   },

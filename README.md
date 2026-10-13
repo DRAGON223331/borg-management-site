@@ -102,8 +102,8 @@
 
 ### Explicit nested API routes
 
-To improve compatibility with Vercel route resolution, the project includes dedicated wrappers for `/api/tasks/:id`, `/api/chat/:room`, and `/api/submissions/:id/:action`. They forward requests to the shared API handler and do not require a separate backend service.
+To improve compatibility with Vercel route resolution, the project includes dedicated wrappers for `/api/tasks/:id`, `/api/chat/:room`, `/api/submissions/:id/:action`, and `/api/staff-requests/:id/:action`. They forward requests to the shared API handler and do not require a separate backend service.
 
 
-## إحصائيات الإدارة وطلبات الترقية
-تعرض الصفحة الرئيسية ملخصات المسؤولين، والضغط على اسم عضو من القائمة الجانبية يفتح ملفه الكامل. طلبات الانضمام للإدارة تُرسل إلى روم المراجعة `1558102515885678734` ويمكن قبولها أو رفضها من لوحة الموقع. الموافقة تضيف الرتبتين المحددتين أعلاه، بشرط صلاحيات البوت ووجود المتقدم في السيرفرين.
+## إحصائيات الإدارة والطلبات الإدارية
+تعرض الصفحة الرئيسية ملخصات المسؤولين، والضغط على اسم عضو من القائمة الجانبية يفتح ملفه الكامل. يستطيع عضو الاستاف إرسال طلب إجازة أو طلب إداري آخر (إذن/غياب، مشكلة تقنية، تعديل بيانات، شكوى/ملاحظة، أو طلب آخر). تصل طلبات الإجازة والطلبات الإدارية إلى روم المراجعة `1558102515885678734`، ويمكن لمسؤولي الإدارة قبولها أو رفضها من لوحة الموقع. الموافقة على طلب عادي لا تغيّر رتب Discord؛ الرتبتان المعرّفتان في إعدادات الموقع تُستخدمان لتحديد صلاحيات الإدارة فقط.
