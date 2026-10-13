@@ -505,6 +505,28 @@ client.once(Events.ClientReady, () => {
   reconcileCountedMessages();
   setInterval(reconcileCountedMessages, 10 * 60 * 1000).unref?.();
 });
+
+// ───────── أمر "نقاطي" كرسالة عادية بدون بريفكس ─────────
+const POINTS_TRIGGER = /^(?:نقاطي|نقاطى|mypoints|my points)$/i;
+const pointsCooldown = new Map();
+function normalizeTrigger(text) {
+  return String(text || '').replace(/[\u064B-\u065F\u0670\u0640]/g, '').replace(/[!؟?.،,\s]+$/g, '').replace(/\s+/g, ' ').trim();
+}
+const fmtPointsMsg = (n) => (Math.round(Number(n || 0) * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 });
+client.on(Events.MessageCreate, async (message) => {
+  try {
+    if (!message.guild || !message.author || message.author.bot || message.webhookId) return;
+    if (!POINTS_TRIGGER.test(normalizeTrigger(message.content))) return;
+    const last = pointsCooldown.get(message.author.id) || 0;
+    if (Date.now() - last < 5000) return;
+    pointsCooldown.set(message.author.id, Date.now());
+    const total = db.prepare('SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ?').get(message.author.id);
+    const recent = db.prepare('SELECT amount, reason FROM staff_points WHERE user_id = ? ORDER BY id DESC LIMIT 5').all(message.author.id);
+    const embed = new EmbedBuilder().setColor(0x8b5cf6).setTitle('⭐ نقاطك').setDescription(`عندك **${fmtPointsMsg(total?.total)}** نقطة`).setFooter({ text: 'إدارة البرج' });
+    if (recent.length) embed.addFields({ name: 'آخر الحركات', value: recent.map((r) => `${Number(r.amount) >= 0 ? '➕' : '➖'} ${fmtPointsMsg(Math.abs(Number(r.amount)))} — ${cleanText(r.reason, 80) || 'بدون سبب'}`).join('\n').slice(0, 1024) });
+    await message.reply({ embeds: [embed], allowedMentions: { repliedUser: false } });
+  } catch (error) { console.error('[points message command]', error.message); }
+});
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isButton()) return;
   const match = String(interaction.customId || '').match(/^leave:(approve|reject):(\d+)$/);

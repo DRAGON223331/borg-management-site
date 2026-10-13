@@ -131,3 +131,12 @@ To improve compatibility with Vercel route resolution, the project includes dedi
 `vercel.json` uses explicit `builds` so only `api/handler.js` and `api/discord-interactions.js` become Functions (2 total, far under the Hobby limit of 12) no matter what other files exist in the repo.
 
 - إشعار القبول/الرفض يُرسل إلى الروم `1558102515885678734` (أو `LEAVE_NOTICE_CHANNEL_ID`) مع السبب إن وُجد. زر الرفض في ديسكورد يفتح نافذة لكتابة السبب.
+
+## أمر «نقاطي» بدون بريفكس
+
+العضو يكتب `نقاطي` (أو `mypoints`) كرسالة عادية والبوت يرد عليه بنقاطه.
+
+- **لو بتشغّل `server.js`** (اتصال Gateway دائم): الأمر شغال تلقائيًا.
+- **لو على Vercel**: Vercel Functions مش بتقدر تسمع رسائل عادية، فشغّل مجلد `bot-worker/` على استضافة Node دائمة (Railway / Render / VPS) بالمتغيرين `DISCORD_BOT_TOKEN` و`DATABASE_URL` (نفس قاعدة بيانات الموقع)، بالأمر `npm install && npm start`.
+- في الحالتين لازم تفعّل **Message Content Intent** من Discord Developer Portal ← Bot ← Privileged Gateway Intents.
+- الرد بيكون في نفس الروم (رسائل ديسكورد العادية مفيش فيها رد خاص زي الـslash). الأمر `/نقاطي` القديم لسه شغال.

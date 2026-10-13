@@ -1,0 +1,12 @@
+{
+  "name": "borg-points-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "بوت صغير يرد على رسالة «نقاطي» بدون بريفكس — يشتغل على أي استضافة Node دائمة (مش Vercel)",
+  "scripts": { "start": "node index.js" },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.2",
+    "discord.js": "^14.16.3"
+  }
+}
