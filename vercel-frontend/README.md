@@ -1,7 +1,15 @@
-# Vercel frontend — إدارة البرج
+# إدارة البرج — نشر مستقل على Vercel
 
-داخل إعدادات مشروع Vercel اختر `vercel-frontend` كـ **Root Directory**.
+هذا المجلد أصبح نسخة مستقلة كاملة، تشمل الواجهة وواجهات API. لم يعد يحتاج إلى خادم Backend خارجي أو رابط تجريبي.
 
-قبل النشر، افتح `vercel.json` واستبدل `https://replace-with-your-backend.onrender.com` بعنوان خادم الـAPI الفعلي. هذا المشروع ينشر الواجهة فقط؛ يجب نشر خادم `server.js` بشكل منفصل على خدمة Node.js دائمة، ثم ضبط `SITE_URL` و`DISCORD_REDIRECT_URI` في إعدادات الخادم على رابط Vercel.
+## إعدادات Vercel
 
-راجع `../README.md` لخطوات النشر وإعدادات Discord كاملة.
+- **Root Directory:** `vercel-frontend` إذا اخترت هذا المجلد كجذر، أو `./` إذا اخترت جذر المستودع الأساسي.
+- **Framework Preset:** Other
+- **Build Command:** `npm run build`
+- **Output Directory:** `dist`
+- **Install Command:** `npm install`
+
+أضف متغيرات البيئة المطلوبة كما هو موضح في `../README.md`، خصوصًا متغيرات PostgreSQL وDiscord و`SESSION_SECRET` و`SITE_URL` و`DISCORD_REDIRECT_URI`. يجب أن يكون `SITE_URL` هو رابط الموقع المنشور نفسه، ويجب إضافة رابط `/auth/callback` إلى Discord Developer Portal.
+
+بعد الحفظ، أعد النشر من Vercel. لن تعمل عمليات المهمات أو الشات ما لم تنشر مجلدًا يحتوي على `api/` بجانب `package.json` و`vercel.json`.
