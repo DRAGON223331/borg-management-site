@@ -21,6 +21,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  Partials,
 } = require('discord.js');
 
 const PORT = Number(process.env.PORT || 3000);
@@ -34,6 +35,8 @@ const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
 const MANAGEMENT_MAIN_ROLE_ID = process.env.MANAGEMENT_MAIN_ROLE_ID || '1538623033806168135';
 const MANAGEMENT_STAFF_ROLE_ID = process.env.MANAGEMENT_STAFF_ROLE_ID || '1559628523809804288';
 const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
+// الروم الوحيد الذي تُحسب منه رسائل الاستاف.
+const MESSAGE_COUNT_CHANNEL_ID = (process.env.MESSAGE_COUNT_CHANNEL_ID || '1552049641913065552').trim();
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
 const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
 const LEAVE_REQUEST_CHANNEL_ID = '1556945732957765722'; // ثابت: روم طلبات الإجازة ومراجعتها
@@ -113,6 +116,15 @@ db.exec(`
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_chat_room_id ON chat_messages(room, id DESC);
+  CREATE TABLE IF NOT EXISTS discord_message_log (
+    message_id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_dml_channel_user ON discord_message_log(channel_id, user_id);
+  CREATE INDEX IF NOT EXISTS idx_dml_channel_created ON discord_message_log(channel_id, created_at);
   CREATE TABLE IF NOT EXISTS site_presence (
     user_id TEXT PRIMARY KEY,
     username TEXT NOT NULL,
@@ -239,6 +251,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
+  partials: [Partials.Message, Partials.Channel],
 });
 let botReady = false;
 let botLastError = '';
@@ -274,10 +287,10 @@ function cairoDayRange(now = new Date()) {
 function getDailyStaffMessageStats() {
   const range = cairoDayRange();
   const rows = db.prepare(`SELECT user_id AS userId, MAX(username) AS username, COUNT(*) AS count
-    FROM chat_messages
-    WHERE room = ? AND created_at >= ? AND created_at < ?
+    FROM discord_message_log
+    WHERE channel_id = ? AND created_at >= ? AND created_at < ?
     GROUP BY user_id
-    ORDER BY COUNT(*) DESC, MAX(username) ASC`).all('staff', range.start, range.end);
+    ORDER BY COUNT(*) DESC, MAX(username) ASC`).all(MESSAGE_COUNT_CHANNEL_ID, range.start, range.end);
   const dailyStats = rows.map((row) => ({ userId: row.userId, username: row.username, count: Number(row.count) || 0 }));
   return { dailyStats, dailyTotal: dailyStats.reduce((total, row) => total + row.count, 0), dailyDate: range.date };
 }
@@ -290,7 +303,7 @@ function getAllStaffStats() {
     const row = byId.get(key); if (username) row.username = username; return row;
   };
   const daily = getDailyStaffMessageStats();
-  for (const row of db.prepare("SELECT user_id AS userId, MAX(username) AS username, COUNT(*) AS totalMessages FROM chat_messages WHERE room = 'staff' GROUP BY user_id").all()) Object.assign(ensure(row.userId, row.username), { totalMessages: Number(row.totalMessages) || 0 });
+  for (const row of db.prepare("SELECT user_id AS userId, MAX(username) AS username, COUNT(*) AS totalMessages FROM discord_message_log WHERE channel_id = ? GROUP BY user_id").all(MESSAGE_COUNT_CHANNEL_ID)) Object.assign(ensure(row.userId, row.username), { totalMessages: Number(row.totalMessages) || 0 });
   for (const row of db.prepare("SELECT user_id AS userId, COUNT(*) AS totalSubmissions, SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approvedSubmissions, SUM(CASE WHEN status IN ('submitted','pending') THEN 1 ELSE 0 END) AS pendingSubmissions, SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejectedSubmissions FROM submissions GROUP BY user_id").all()) Object.assign(ensure(row.userId), { totalSubmissions: Number(row.totalSubmissions) || 0, approvedSubmissions: Number(row.approvedSubmissions) || 0, pendingSubmissions: Number(row.pendingSubmissions) || 0, rejectedSubmissions: Number(row.rejectedSubmissions) || 0 });
   for (const row of db.prepare('SELECT user_id AS userId, COALESCE(SUM(amount),0) AS totalPoints FROM staff_points GROUP BY user_id').all()) ensure(row.userId).totalPoints = Number(row.totalPoints) || 0;
   for (const row of db.prepare('SELECT user_id AS userId, COUNT(*) AS leaveRequests FROM leave_requests GROUP BY user_id').all()) ensure(row.userId).leaveRequests = Number(row.leaveRequests) || 0;
@@ -427,6 +440,70 @@ client.once(Events.ClientReady, async () => {
 client.on(Events.MessageCreate, async (message) => {
   try { await importDiscordTaskMessage(message); }
   catch (error) { console.error('[discord] Task import failed:', error.message); }
+});
+
+// ───────── عدّ رسائل الروم (يزيد مع كل رسالة جديدة وينقص عند الحذف) ─────────
+const COUNTED_MESSAGE_TYPES = new Set([0, 19]); // رسالة عادية + رد
+const upsertMessageLog = db.prepare(`INSERT INTO discord_message_log(message_id, channel_id, user_id, username, created_at)
+  VALUES (?, ?, ?, ?, ?) ON CONFLICT(message_id) DO UPDATE SET username = excluded.username`);
+const deleteMessageLog = db.prepare('DELETE FROM discord_message_log WHERE channel_id = ? AND message_id = ?');
+function isCountableMessage(message) {
+  return Boolean(message && message.channelId === MESSAGE_COUNT_CHANNEL_ID && message.author && !message.author.bot && !message.webhookId
+    && COUNTED_MESSAGE_TYPES.has(Number(message.type) || 0));
+}
+function logCountedMessage(message) {
+  if (!isCountableMessage(message)) return false;
+  upsertMessageLog.run(String(message.id), MESSAGE_COUNT_CHANNEL_ID, String(message.author.id),
+    cleanText(message.author.globalName || message.author.username || message.author.id, 80),
+    (message.createdAt || new Date()).toISOString());
+  return true;
+}
+client.on(Events.MessageCreate, (message) => {
+  try { logCountedMessage(message); } catch (error) { console.error('[message count create]', error.message); }
+});
+client.on(Events.MessageUpdate, (_old, message) => {
+  try { if (message?.channelId === MESSAGE_COUNT_CHANNEL_ID && message.author) logCountedMessage(message); } catch { /* ignore */ }
+});
+// الأحداث الخام تشتغل حتى لو الرسالة مش في الكاش (رسائل قديمة أو قبل ما البوت يشتغل).
+client.on(Events.Raw, (packet) => {
+  try {
+    if (!packet || !packet.t || !packet.d || packet.d.channel_id !== MESSAGE_COUNT_CHANNEL_ID) return;
+    if (packet.t === 'MESSAGE_DELETE') deleteMessageLog.run(MESSAGE_COUNT_CHANNEL_ID, String(packet.d.id));
+    else if (packet.t === 'MESSAGE_DELETE_BULK') {
+      const tx = db.transaction((ids) => { for (const id of ids) deleteMessageLog.run(MESSAGE_COUNT_CHANNEL_ID, String(id)); });
+      tx(packet.d.ids || []);
+    }
+  } catch (error) { console.error('[message count delete]', error.message); }
+});
+let messageScanRunning = false;
+async function reconcileCountedMessages() {
+  if (messageScanRunning || !MESSAGE_COUNT_CHANNEL_ID) return;
+  messageScanRunning = true;
+  const startedAt = new Date().toISOString();
+  try {
+    const channel = await client.channels.fetch(MESSAGE_COUNT_CHANNEL_ID);
+    if (!channel || typeof channel.messages?.fetch !== 'function') return;
+    const present = new Set();
+    let before;
+    for (;;) {
+      const page = await channel.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
+      if (!page.size) break;
+      for (const message of page.values()) if (logCountedMessage(message)) present.add(String(message.id));
+      before = page.last().id;
+      if (page.size < 100) break;
+    }
+    // احذف أي رسالة مسجلة لم تعد موجودة في الروم (ما عدا اللي وصلت بعد بداية المسح).
+    const known = db.prepare('SELECT message_id FROM discord_message_log WHERE channel_id = ? AND created_at < ?').all(MESSAGE_COUNT_CHANNEL_ID, startedAt);
+    const tx = db.transaction((rows) => { for (const row of rows) if (!present.has(row.message_id)) deleteMessageLog.run(MESSAGE_COUNT_CHANNEL_ID, row.message_id); });
+    tx(known);
+    console.log(`[discord] Message count synced for channel ${MESSAGE_COUNT_CHANNEL_ID}: ${present.size} messages.`);
+  } catch (error) {
+    console.warn('[discord] Could not sync message counts:', error.message);
+  } finally { messageScanRunning = false; }
+}
+client.once(Events.ClientReady, () => {
+  reconcileCountedMessages();
+  setInterval(reconcileCountedMessages, 10 * 60 * 1000).unref?.();
 });
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isButton()) return;

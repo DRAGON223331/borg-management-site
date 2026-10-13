@@ -22,6 +22,9 @@ const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '1559176035432402976'
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const COOKIE_SECRET = process.env.SESSION_SECRET || '';
 const MAX_UPLOAD_MB = Math.max(1, Number(process.env.MAX_UPLOAD_MB || 100));
+// الروم الوحيد الذي تُحسب منه رسائل الاستاف (رسائل ديسكورد الحقيقية، وليس شات الموقع).
+const MESSAGE_COUNT_CHANNEL_ID = (process.env.MESSAGE_COUNT_CHANNEL_ID || '1552049641913065552').trim();
+const MESSAGE_FULL_SCAN_MINUTES = Math.max(1, Number(process.env.MESSAGE_FULL_SCAN_MINUTES || 10));
 
 let sqlClient;
 let schemaPromise;
@@ -30,6 +33,8 @@ let blobClientSdkPromise;
 let neonSdkPromise;
 let lastTaskSyncAt = 0;
 let taskSyncPromise;
+let lastMessageSyncAt = 0;
+let messageSyncPromise;
 
 function siteUrl(req) {
   if (process.env.SITE_URL) return process.env.SITE_URL.replace(/\/$/, '');
@@ -189,6 +194,25 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_chat_room_id ON chat_messages(room, id DESC)`;
+    await sql`CREATE TABLE IF NOT EXISTS discord_message_log (
+      message_id BIGINT PRIMARY KEY,
+      channel_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      username TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_dml_channel_user ON discord_message_log(channel_id, user_id)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_dml_channel_created ON discord_message_log(channel_id, created_at)`;
+    await sql`CREATE TABLE IF NOT EXISTS discord_message_sync (
+      channel_id TEXT PRIMARY KEY,
+      head_id BIGINT,
+      scan_active BOOLEAN NOT NULL DEFAULT FALSE,
+      scan_before BIGINT,
+      scan_prev_min BIGINT,
+      last_full_at TIMESTAMPTZ,
+      last_sync_at TIMESTAMPTZ,
+      locked_until TIMESTAMPTZ
+    )`;
     await sql`CREATE TABLE IF NOT EXISTS site_presence (user_id TEXT PRIMARY KEY, username TEXT NOT NULL, avatar_url TEXT, last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
     await sql`CREATE INDEX IF NOT EXISTS idx_site_presence_last_seen ON site_presence(last_seen DESC)`;
     await sql`CREATE TABLE IF NOT EXISTS notification_state (notification_key TEXT PRIMARY KEY, last_sent_at TIMESTAMPTZ NOT NULL DEFAULT '1970-01-01T00:00:00Z')`;
@@ -230,11 +254,111 @@ async function ensureSchema() {
   })();
   return schemaPromise;
 }
+
+// ───────── عدّ رسائل روم ديسكورد (REST فقط، بدون Gateway) ─────────
+// الفكرة: جدول discord_message_log يحتفظ بكل رسالة موجودة حاليًا في الروم. كل مزامنة:
+//  1) تجلب أحدث الرسائل (200 على الأقل) وتضيف الجديد وتحذف أي رسالة اتمسحت من هذا النطاق.
+//  2) كل MESSAGE_FULL_SCAN_MINUTES دقائق تمسح الروم كله صفحة صفحة (على مراحل) لحذف أي رسالة قديمة اتمسحت.
+// لذلك عند حذف رسالة من ديسكورد ينقص عدّاد صاحبها تلقائيًا.
+const COUNTED_MESSAGE_TYPES = new Set([0, 19]); // رسالة عادية + رد
+function messageLogRows(page) {
+  return (page || [])
+    .filter((m) => m?.id && m.author?.id && !m.author.bot && !m.webhook_id && COUNTED_MESSAGE_TYPES.has(Number(m.type) || 0))
+    .map((m) => ({ id: String(m.id), user_id: String(m.author.id), username: cleanText(m.author.global_name || m.author.username || m.author.id, 80), created_at: m.timestamp }));
+}
+async function applyMessagePage(sql, channelId, page, upper, isLast) {
+  const rows = messageLogRows(page);
+  if (rows.length) {
+    await sql`INSERT INTO discord_message_log(message_id, channel_id, user_id, username, created_at)
+      SELECT r.id::bigint, ${channelId}, r.user_id, r.username, r.created_at::timestamptz
+      FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS r(id text, user_id text, username text, created_at text)
+      ON CONFLICT (message_id) DO UPDATE SET username = EXCLUDED.username`;
+  }
+  let lower = '0';
+  if (!isLast && page.length) lower = page.map((m) => BigInt(m.id)).reduce((a, b) => (b < a ? b : a)).toString();
+  const ids = JSON.stringify(rows.map((r) => r.id));
+  // أي رسالة مسجلة داخل نطاق الصفحة وليست موجودة فعليًا في ديسكورد = اتمسحت.
+  await sql`DELETE FROM discord_message_log
+    WHERE channel_id = ${channelId}
+      AND message_id >= ${lower}::bigint
+      AND (${upper}::bigint IS NULL OR message_id < ${upper}::bigint)
+      AND message_id NOT IN (SELECT value::bigint FROM jsonb_array_elements_text(${ids}::jsonb))`;
+  return lower;
+}
+async function syncChannelMessageCounts(sql, { force = false, budgetMs = 9000 } = {}) {
+  if (!BOT_TOKEN || !MESSAGE_COUNT_CHANNEL_ID) return;
+  if (messageSyncPromise) return messageSyncPromise;
+  if (!force && Date.now() - lastMessageSyncAt < 15_000) return;
+  messageSyncPromise = (async () => {
+    const channelId = MESSAGE_COUNT_CHANNEL_ID;
+    const deadline = Date.now() + budgetMs;
+    let locked = false;
+    const st = { head: null, scanActive: false, scanBefore: null, scanPrevMin: null, fullDone: false };
+    try {
+      await sql`INSERT INTO discord_message_sync(channel_id) VALUES (${channelId}) ON CONFLICT (channel_id) DO NOTHING`;
+      const got = await sql`UPDATE discord_message_sync SET locked_until = NOW() + INTERVAL '55 seconds'
+        WHERE channel_id = ${channelId} AND (locked_until IS NULL OR locked_until < NOW())
+        RETURNING head_id::text AS head_id, scan_before::text AS scan_before, scan_prev_min::text AS scan_prev_min, scan_active,
+          (last_full_at IS NULL OR last_full_at < NOW() - make_interval(mins => ${MESSAGE_FULL_SCAN_MINUTES}::int)) AS full_due`;
+      if (!got.length) return; // مزامنة تانية شغالة دلوقتي
+      locked = true;
+      const state = got[0];
+      const oldHead = state.head_id ? BigInt(state.head_id) : null;
+      st.head = state.head_id;
+      st.scanActive = Boolean(state.scan_active);
+      st.scanBefore = state.scan_before;
+      st.scanPrevMin = state.scan_prev_min;
+      const fetchPage = (before) => discordApi(`/channels/${channelId}/messages?limit=100${before ? `&before=${before}` : ''}`);
+
+      // (1) مزامنة الرأس: أحدث الرسائل + اكتشاف المحذوف منها
+      let before = null; let upper = null; let pages = 0; let reachedStart = false; let reachedOldHead = false;
+      while (pages < 30 && Date.now() < deadline) {
+        const page = await fetchPage(before);
+        pages += 1;
+        if (pages === 1 && page.length) st.head = page.map((m) => BigInt(m.id)).reduce((a, b) => (b > a ? b : a)).toString();
+        const isLast = page.length < 100;
+        const lower = await applyMessagePage(sql, channelId, page, upper, isLast);
+        if (isLast) { reachedStart = true; break; }
+        if (pages >= 2 && oldHead !== null && BigInt(lower) <= oldHead) { reachedOldHead = true; break; }
+        before = lower; upper = lower;
+      }
+      if (reachedStart) { st.fullDone = true; st.scanActive = false; st.scanBefore = null; st.scanPrevMin = null; }
+      else if (!reachedOldHead && oldHead !== null) { st.scanActive = true; st.scanBefore = null; st.scanPrevMin = null; } // فجوة كبيرة → امسح كل الروم
+      else if (oldHead === null) { st.scanActive = true; st.scanBefore = null; st.scanPrevMin = null; } // أول مرة → backfill كامل
+      else if (!st.scanActive && state.full_due) { st.scanActive = true; st.scanBefore = null; st.scanPrevMin = null; }
+
+      // (2) المسح الكامل على مراحل
+      let scanPages = 0;
+      while (st.scanActive && scanPages < 60 && Date.now() < deadline) {
+        const page = await fetchPage(st.scanBefore);
+        scanPages += 1;
+        const isLast = page.length < 100;
+        const lower = await applyMessagePage(sql, channelId, page, st.scanPrevMin, isLast);
+        if (isLast) { st.scanActive = false; st.scanBefore = null; st.scanPrevMin = null; st.fullDone = true; break; }
+        st.scanBefore = lower; st.scanPrevMin = lower;
+        await sql`UPDATE discord_message_sync SET scan_before = ${st.scanBefore}::bigint, scan_prev_min = ${st.scanPrevMin}::bigint WHERE channel_id = ${channelId}`;
+      }
+    } catch (error) {
+      console.error('[message count sync]', cleanText(error?.message || error, 240));
+    } finally {
+      if (locked) {
+        try {
+          await sql`UPDATE discord_message_sync SET head_id = ${st.head}::bigint, scan_active = ${st.scanActive}, scan_before = ${st.scanBefore}::bigint,
+            scan_prev_min = ${st.scanPrevMin}::bigint, last_full_at = CASE WHEN ${st.fullDone} THEN NOW() ELSE last_full_at END,
+            last_sync_at = NOW(), locked_until = NULL WHERE channel_id = ${channelId}`;
+        } catch (error) { console.error('[message count sync save]', cleanText(error?.message || error, 200)); }
+      }
+      lastMessageSyncAt = Date.now();
+      messageSyncPromise = null;
+    }
+  })();
+  return messageSyncPromise;
+}
 async function getDailyStaffMessageStats(sql) {
   const [rows, todayRows] = await Promise.all([
     sql`SELECT user_id AS "userId", MAX(username) AS username, COUNT(*)::integer AS count
-      FROM chat_messages
-      WHERE room = 'staff'
+      FROM discord_message_log
+      WHERE channel_id = ${MESSAGE_COUNT_CHANNEL_ID}
         AND created_at >= ((NOW() AT TIME ZONE 'Africa/Cairo')::date::timestamp AT TIME ZONE 'Africa/Cairo')
         AND created_at < (((NOW() AT TIME ZONE 'Africa/Cairo')::date + 1)::timestamp AT TIME ZONE 'Africa/Cairo')
       GROUP BY user_id
@@ -252,7 +376,7 @@ async function getDailyStaffMessageStats(sql) {
 
 async function getAllStaffStats(sql) {
   const [messages, submissions, points, leaves, staffRequests, online, daily] = await Promise.all([
-    sql`SELECT user_id AS "userId", MAX(username) AS username, COUNT(*)::integer AS "totalMessages" FROM chat_messages WHERE room = 'staff' GROUP BY user_id`,
+    sql`SELECT user_id AS "userId", MAX(username) AS username, COUNT(*)::integer AS "totalMessages" FROM discord_message_log WHERE channel_id = ${MESSAGE_COUNT_CHANNEL_ID} GROUP BY user_id`,
     sql`SELECT user_id AS "userId", COUNT(*)::integer AS "totalSubmissions", COUNT(*) FILTER (WHERE status = 'approved')::integer AS "approvedSubmissions", COUNT(*) FILTER (WHERE status IN ('submitted','pending'))::integer AS "pendingSubmissions", COUNT(*) FILTER (WHERE status = 'rejected')::integer AS "rejectedSubmissions" FROM submissions GROUP BY user_id`,
     sql`SELECT user_id AS "userId", COALESCE(SUM(amount),0)::numeric AS "totalPoints" FROM staff_points GROUP BY user_id`,
     sql`SELECT user_id AS "userId", COUNT(*)::integer AS "leaveRequests" FROM leave_requests GROUP BY user_id`,
@@ -698,6 +822,7 @@ async function handleApi(parts, req, res) {
     await ensureSchema();
     const { syncLeaveRoles } = require('./_lib/leave-roles.js');
     const result = await syncLeaveRoles({ sql: await getSql(), token: BOT_TOKEN, report: true });
+    try { await syncChannelMessageCounts(await getSql(), { force: true, budgetMs: 40000 }); } catch (error) { console.error('[cron message sync]', cleanText(error?.message || error, 200)); }
     return sendJson(res, 200, { ok: true, ...result });
   }
   if (route === 'evidence') return sendPrivateEvidence(req, res);
@@ -723,12 +848,14 @@ async function handleApi(parts, req, res) {
 
 
   if (route === 'staff-stats' && parts.length === 1 && req.method === 'GET') {
+    await syncChannelMessageCounts(sql);
     const stats = await getAllStaffStats(sql);
     return sendJson(res, 200, { stats, dailyDate: (await getDailyStaffMessageStats(sql)).dailyDate });
   }
   if (route === 'staff-stats' && parts.length === 2 && req.method === 'GET') {
     const targetId = cleanText(parts[1], 24);
     if (!/^\d{15,22}$/.test(targetId)) return sendError(res, 400, 'Discord ID غير صالح.');
+    await syncChannelMessageCounts(sql);
     const allStats = await getAllStaffStats(sql);
     const stats = allStats.find((row) => row.userId === targetId) || { userId: targetId, dailyMessages: 0, totalMessages: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, adminRequests: 0, online: false, lastSeen: null };
     const [submissionRows, leaveRows] = await Promise.all([
@@ -1162,6 +1289,7 @@ async function handleApi(parts, req, res) {
     if (!['staff', 'management'].includes(room)) return sendError(res, 404, 'غرفة الشات مش موجودة.');
     if (!canReadRoom(user, room)) return sendError(res, 403, 'الشات ده مخصص للمسؤولين.');
     const rows = await sql`SELECT * FROM (SELECT * FROM chat_messages WHERE room = ${room} ORDER BY id DESC LIMIT 100) AS recent ORDER BY id ASC`;
+    if (room === 'staff') await syncChannelMessageCounts(sql);
     const dailyStats = room === 'staff' ? await getDailyStaffMessageStats(sql) : {};
     return sendJson(res, 200, { messages: rows.map((row) => ({ id: Number(row.id), room: row.room, userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, content: row.content, createdAt: row.created_at })), ...dailyStats });
   }
