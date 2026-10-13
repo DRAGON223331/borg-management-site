@@ -19,11 +19,24 @@ function cleanText(value, max = 240) {
   return String(value ?? '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim().slice(0, max);
 }
 async function readRawBody(req) {
-  if (Buffer.isBuffer(req.body)) return req.body;
-  if (typeof req.body === 'string') return Buffer.from(req.body);
-  const chunks = [];
-  for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  return Buffer.concat(chunks);
+  // Read the raw stream FIRST: touching req.body on Vercel can parse (and consume) it, which made
+  // the old code hang and Discord report "didn't respond in time".
+  if (!req.readableEnded && !req.destroyed && req.readable !== false) {
+    const chunks = [];
+    const read = new Promise((resolve, reject) => {
+      req.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      req.on('end', resolve);
+      req.on('error', reject);
+      req.on('close', resolve);
+    });
+    await Promise.race([read, new Promise((resolve) => setTimeout(resolve, 1500))]);
+    if (chunks.length) return Buffer.concat(chunks);
+  }
+  const body = req.body;
+  if (Buffer.isBuffer(body)) return body;
+  if (typeof body === 'string') return Buffer.from(body);
+  if (body && typeof body === 'object') return Buffer.from(JSON.stringify(body));
+  return Buffer.alloc(0);
 }
 function verifySignature(rawBody, timestamp, signature) {
   if (!PUBLIC_KEY || !/^[a-f0-9]{64}$/i.test(PUBLIC_KEY) || !/^[a-f0-9]{128}$/i.test(signature || '') || !timestamp) return false;
@@ -125,6 +138,10 @@ async function handleCommand(interaction, res) {
   } catch (error) { console.error('[points command followup]', cleanText(error?.message || error, 160)); }
 }
 async function handler(req, res) {
+  if (req.method === 'GET') {
+    // Open /api/discord-interactions in a browser to check the configuration (no secrets are shown).
+    return send(res, { ok: true, endpoint: 'discord-interactions', publicKeySet: /^[a-f0-9]{64}$/i.test(PUBLIC_KEY), botTokenSet: Boolean(BOT_TOKEN), databaseSet: Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || process.env.DATABASE_URL_UNPOOLED || process.env.POSTGRES_PRISMA_URL) });
+  }
   if (req.method !== 'POST') return send(res, { error: 'Method Not Allowed' }, 405);
   let rawBody;
   try { rawBody = await readRawBody(req); } catch { return send(res, { error: 'Invalid body' }, 400); }
@@ -133,6 +150,7 @@ async function handler(req, res) {
   if (!verifySignature(rawBody, timestamp, signature)) { console.error('[interactions] signature check failed; public key set:', Boolean(PUBLIC_KEY), 'body bytes:', rawBody.length); return send(res, { error: 'Invalid Discord signature' }, 401); }
   let interaction;
   try { interaction = JSON.parse(rawBody.toString('utf8')); } catch { return send(res, { error: 'Invalid JSON' }, 400); }
+  console.log('[interactions] received type', interaction.type, interaction.data?.custom_id || interaction.data?.name || '');
   if (interaction.type === 1) return send(res, { type: 1 }); // Discord PING verification
   if (interaction.type === 2) return handleCommand(interaction, res);
   if (interaction.type !== 3) return send(res, { type: 4, data: { content: 'نوع التفاعل غير مدعوم.', flags: 64 } });
