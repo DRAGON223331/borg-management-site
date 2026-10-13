@@ -158,6 +158,14 @@
 
         <section id="page-staff-chat" class="page chat-page">
           <div class="page-heading"><div><div class="eyebrow">TEAM CHAT</div><h1>شات الاستاف</h1><p>تنسيق سريع بين أعضاء الفريق. حافظ على الرسائل واضحة ومحترمة.</p></div><div class="chat-page-icon">☷</div></div>
+          <section class="daily-message-stats" aria-labelledby="daily-message-stats-title">
+            <div class="daily-message-stats-header">
+              <div><span class="tiny-label">DAILY ACTIVITY</span><h2 id="daily-message-stats-title">إحصائيات رسائل اليوم</h2><p class="muted small-copy">عدد الرسائل التي أرسلها كل عضو في شات الاستاف اليوم.</p></div>
+              <div class="daily-message-total-wrap"><strong id="daily-message-total">0</strong><span>إجمالي الرسائل</span><small id="daily-message-date">—</small></div>
+            </div>
+            <div id="daily-message-stats" class="daily-message-stats-list"><div class="loading-state">جاري حساب رسائل اليوم...</div></div>
+            <div class="daily-message-stats-note">يبدأ العد من جديد تلقائيًا كل يوم الساعة 12:00 منتصف الليل بتوقيت القاهرة.</div>
+          </section>
           <div class="chat-shell"><div class="chat-header"><div class="chat-header-avatar">ب</div><div><b>غرفة الاستاف</b><small><span class="status-dot"></span> متاحة لأعضاء الموقع</small></div><span class="chat-encrypted-label">STAFF ROOM</span></div><div id="staff-chat-feed" class="chat-feed"><div class="loading-state">جاري تحميل الرسائل...</div></div><form class="chat-composer" id="staff-chat-form"><textarea id="staff-chat-input" maxlength="1500" rows="1" placeholder="اكتب رسالة للاستاف..." aria-label="رسالة للاستاف"></textarea><button type="submit" aria-label="إرسال الرسالة">➤</button></form></div>
         </section>
 

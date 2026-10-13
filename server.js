@@ -107,6 +107,13 @@ db.exec(`
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_chat_room_id ON chat_messages(room, id DESC);
+  CREATE TABLE IF NOT EXISTS site_presence (
+    user_id TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    avatar_url TEXT,
+    last_seen TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_site_presence_last_seen ON site_presence(last_seen DESC);
 
   CREATE TABLE IF NOT EXISTS leave_requests (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -208,6 +215,43 @@ let botReady = false;
 let botLastError = '';
 
 function nowIso() { return new Date().toISOString(); }
+function cairoDateParts(date) {
+  const values = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Africa/Cairo', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  }).formatToParts(date).filter((part) => part.type !== 'literal').map((part) => [part.type, Number(part.value)]));
+  return { year: values.year, month: values.month, day: values.day, hour: values.hour, minute: values.minute, second: values.second };
+}
+function cairoMidnightUtcIso(year, month, day) {
+  const targetWallClock = Date.UTC(year, month - 1, day, 0, 0, 0);
+  let guess = targetWallClock;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const local = cairoDateParts(new Date(guess));
+    const representedAsUtc = Date.UTC(local.year, local.month - 1, local.day, local.hour, local.minute, local.second);
+    guess += targetWallClock - representedAsUtc;
+  }
+  return new Date(guess).toISOString();
+}
+function cairoDayRange(now = new Date()) {
+  const current = cairoDateParts(now);
+  const next = new Date(Date.UTC(current.year, current.month - 1, current.day + 1));
+  const date = `${current.year}-${String(current.month).padStart(2, '0')}-${String(current.day).padStart(2, '0')}`;
+  return {
+    start: cairoMidnightUtcIso(current.year, current.month, current.day),
+    end: cairoMidnightUtcIso(next.getUTCFullYear(), next.getUTCMonth() + 1, next.getUTCDate()),
+    date,
+  };
+}
+function getDailyStaffMessageStats() {
+  const range = cairoDayRange();
+  const rows = db.prepare(`SELECT user_id AS userId, MAX(username) AS username, COUNT(*) AS count
+    FROM chat_messages
+    WHERE room = ? AND created_at >= ? AND created_at < ?
+    GROUP BY user_id
+    ORDER BY COUNT(*) DESC, MAX(username) ASC`).all('staff', range.start, range.end);
+  const dailyStats = rows.map((row) => ({ userId: row.userId, username: row.username, count: Number(row.count) || 0 }));
+  return { dailyStats, dailyTotal: dailyStats.reduce((total, row) => total + row.count, 0), dailyDate: range.date };
+}
 function avatarUrl(user) {
   if (!user) return null;
   if (user.avatar) return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=128`;
@@ -768,12 +812,30 @@ app.post('/api/leave-requests/:id/:action', requireAuth, async (req, res) => {
   res.json({ ok: true, message: status === 'approved' ? 'تمت الموافقة على طلب الإجازة.' : 'تم رفض طلب الإجازة.' });
 });
 
+app.post('/api/presence', requireAuth, (req, res) => {
+  const user = req.session.user;
+  const seenAt = nowIso();
+  db.prepare(`INSERT INTO site_presence(user_id, username, avatar_url, last_seen)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, avatar_url = excluded.avatar_url, last_seen = excluded.last_seen`)
+    .run(user.id, user.username, profileAvatar(user), seenAt);
+  res.json({ ok: true });
+});
+
+app.get('/api/presence', requireAuth, (req, res) => {
+  const cutoff = new Date(Date.now() - 90 * 1000).toISOString();
+  const rows = db.prepare('SELECT user_id AS userId, username, avatar_url AS avatarUrl, last_seen AS lastSeen FROM site_presence WHERE last_seen > ? ORDER BY username').all(cutoff);
+  res.set('Cache-Control', 'no-store');
+  res.json({ online: rows });
+});
+
 app.get('/api/chat/:room', requireAuth, (req, res) => {
   const room = req.params.room;
   if (!['staff', 'management'].includes(room)) return res.status(404).json({ error: 'غرفة الشات مش موجودة.' });
   if (!canReadRoom(req.session.user, room)) return res.status(403).json({ error: 'الشات ده مخصص للمسؤولين.' });
   const rows = db.prepare('SELECT * FROM (SELECT * FROM chat_messages WHERE room = ? ORDER BY id DESC LIMIT 100) ORDER BY id ASC').all(room);
-  res.json({ messages: rows.map((row) => ({ id: row.id, room: row.room, userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, content: row.content, createdAt: row.created_at })) });
+  const dailyStats = room === 'staff' ? getDailyStaffMessageStats() : {};
+  res.json({ messages: rows.map((row) => ({ id: row.id, room: row.room, userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, content: row.content, createdAt: row.created_at })), ...dailyStats });
 });
 
 app.post('/api/chat/:room', requireAuth, (req, res) => {
@@ -785,8 +847,9 @@ app.post('/api/chat/:room', requireAuth, (req, res) => {
   const info = db.prepare('INSERT INTO chat_messages(room, user_id, username, avatar_url, content, created_at) VALUES (?, ?, ?, ?, ?, ?)')
     .run(room, req.session.user.id, req.session.user.username, profileAvatar(req.session.user), content, nowIso());
   const message = { id: Number(info.lastInsertRowid), room, userId: req.session.user.id, username: req.session.user.username, avatarUrl: profileAvatar(req.session.user), content, createdAt: nowIso() };
+  const dailyStats = room === 'staff' ? getDailyStaffMessageStats() : {};
   io.to(`chat:${room}`).emit('chat:new', message);
-  res.status(201).json({ message });
+  res.status(201).json({ message, ...dailyStats });
 });
 
 // Evidence stays behind authentication because it may contain internal staff material.

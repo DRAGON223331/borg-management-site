@@ -207,6 +207,25 @@ async function ensureSchema() {
   })();
   return schemaPromise;
 }
+async function getDailyStaffMessageStats(sql) {
+  const [rows, todayRows] = await Promise.all([
+    sql`SELECT user_id AS "userId", MAX(username) AS username, COUNT(*)::integer AS count
+      FROM chat_messages
+      WHERE room = 'staff'
+        AND created_at >= ((NOW() AT TIME ZONE 'Africa/Cairo')::date::timestamp AT TIME ZONE 'Africa/Cairo')
+        AND created_at < (((NOW() AT TIME ZONE 'Africa/Cairo')::date + 1)::timestamp AT TIME ZONE 'Africa/Cairo')
+      GROUP BY user_id
+      ORDER BY COUNT(*) DESC, MAX(username) ASC`,
+    sql`SELECT TO_CHAR(NOW() AT TIME ZONE 'Africa/Cairo', 'YYYY-MM-DD') AS "dailyDate"`,
+  ]);
+  const dailyStats = rows.map((row) => ({ userId: row.userId, username: row.username, count: Number(row.count) || 0 }));
+  return {
+    dailyStats,
+    dailyTotal: dailyStats.reduce((total, row) => total + row.count, 0),
+    dailyDate: todayRows[0]?.dailyDate || null,
+  };
+}
+
 async function discordApi(route, options = {}) {
   if (!BOT_TOKEN) throw new Error('توكن البوت غير مضبوط في Environment Variables على Vercel.');
   const response = await fetch(`${DISCORD_API}${route}`, {
@@ -906,7 +925,8 @@ async function handleApi(parts, req, res) {
     if (!['staff', 'management'].includes(room)) return sendError(res, 404, 'غرفة الشات مش موجودة.');
     if (!canReadRoom(user, room)) return sendError(res, 403, 'الشات ده مخصص للمسؤولين.');
     const rows = await sql`SELECT * FROM (SELECT * FROM chat_messages WHERE room = ${room} ORDER BY id DESC LIMIT 100) AS recent ORDER BY id ASC`;
-    return sendJson(res, 200, { messages: rows.map((row) => ({ id: Number(row.id), room: row.room, userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, content: row.content, createdAt: row.created_at })) });
+    const dailyStats = room === 'staff' ? await getDailyStaffMessageStats(sql) : {};
+    return sendJson(res, 200, { messages: rows.map((row) => ({ id: Number(row.id), room: row.room, userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, content: row.content, createdAt: row.created_at })), ...dailyStats });
   }
   if (route === 'presence' && parts.length === 1 && req.method === 'POST') {
     await sql`INSERT INTO site_presence(user_id, username, avatar_url, last_seen) VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, NOW()) ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, avatar_url = EXCLUDED.avatar_url, last_seen = NOW()`;
@@ -923,6 +943,7 @@ async function handleApi(parts, req, res) {
     const content = cleanText(req.body?.content, 1500);
     if (!content) return sendError(res, 400, 'اكتب رسالة قبل الإرسال.');
     const rows = await sql`INSERT INTO chat_messages(room, user_id, username, avatar_url, content, created_at) VALUES (${room}, ${user.id}, ${user.username}, ${user.avatarUrl || null}, ${content}, NOW()) RETURNING id, created_at`;
+    const dailyStats = room === 'staff' ? await getDailyStaffMessageStats(sql) : {};
     let notified = false;
     if (room === 'staff' && BOT_TOKEN && MANAGER_IDS.size) {
       try {
@@ -935,7 +956,7 @@ async function handleApi(parts, req, res) {
         }
       } catch (error) { console.error('[staff chat notification]', cleanText(error.message, 180)); }
     }
-    return sendJson(res, 201, { message: { id: Number(rows[0].id), room, userId: user.id, username: user.username, avatarUrl: user.avatarUrl, content, createdAt: rows[0].created_at }, notificationSent: notified });
+    return sendJson(res, 201, { message: { id: Number(rows[0].id), room, userId: user.id, username: user.username, avatarUrl: user.avatarUrl, content, createdAt: rows[0].created_at }, notificationSent: notified, ...dailyStats });
   }
   sendError(res, 404, 'المسار غير موجود.');
 }

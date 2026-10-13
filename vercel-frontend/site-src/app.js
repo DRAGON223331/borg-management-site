@@ -514,6 +514,7 @@ async function loadRoster() {
     state.roster = await api('/api/roster');
     $('#staff-count').textContent = state.roster.memberCount ?? '—';
     renderRoster();
+    renderDailyMessageStats();
     await refreshPresence();
   } catch (error) {
     $('#roster-content').innerHTML = `<div class="loading-state">${escapeHtml(error.message)}<br><small>راجع صلاحيات البوت وإعدادات Server Members Intent.</small></div>`;
@@ -612,6 +613,53 @@ async function loadLeaveRequests() {
   }
 }
 
+function updateDailyMessageStats(data = {}) {
+  state.dailyMessageStats = {
+    dailyStats: Array.isArray(data.dailyStats) ? data.dailyStats : state.dailyMessageStats.dailyStats,
+    dailyTotal: Number.isFinite(Number(data.dailyTotal)) ? Number(data.dailyTotal) : state.dailyMessageStats.dailyTotal,
+    dailyDate: data.dailyDate || state.dailyMessageStats.dailyDate,
+  };
+  renderDailyMessageStats();
+}
+function renderDailyMessageStats() {
+  const data = state.dailyMessageStats;
+  const counts = new Map((data.dailyStats || []).map((row) => [String(row.userId), { ...row, count: Number(row.count) || 0 }]));
+  const membersById = new Map();
+  for (const group of (state.roster.groups || [])) {
+    for (const member of (group.members || [])) {
+      if (!membersById.has(String(member.id))) membersById.set(String(member.id), { ...member, count: counts.get(String(member.id))?.count || 0 });
+    }
+  }
+  for (const [id, row] of counts) {
+    const existing = membersById.get(id);
+    if (existing) {
+      existing.count = row.count;
+      if (row.username) existing.username = row.username;
+    } else {
+      membersById.set(id, { id, username: row.username || id, handle: id, avatarUrl: avatarFallback(id), count: row.count });
+    }
+  }
+  const members = [...membersById.values()].sort((a, b) => b.count - a.count || String(a.username).localeCompare(String(b.username), 'ar'));
+  const totalNode = $('#daily-message-total');
+  const dateNode = $('#daily-message-date');
+  const listNode = $('#daily-message-stats');
+  if (!totalNode || !dateNode || !listNode) return;
+  totalNode.textContent = (Number(data.dailyTotal) || 0).toLocaleString('en-US');
+  dateNode.textContent = data.dailyDate ? data.dailyDate.split('-').reverse().join('/') : '—';
+  if (!members.length) {
+    listNode.innerHTML = '<div class="task-empty">لم يتم تحميل أعضاء الاستاف بعد، أو لا توجد رسائل اليوم.</div>';
+    return;
+  }
+  listNode.innerHTML = members.map((member, index) => `
+    <div class="daily-message-row">
+      <span class="daily-message-rank">${index + 1}</span>
+      <img class="daily-message-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt="">
+      <div class="daily-message-member"><b>${escapeHtml(member.username || member.handle || member.id)}</b><small>${escapeHtml(member.handle ? `@${member.handle}` : `ID: ${member.id}`)}</small></div>
+      <span class="daily-message-count">${Number(member.count || 0).toLocaleString('en-US')} <small>رسالة</small></span>
+    </div>
+  `).join('');
+}
+
 function startChatPolling() {
   // Vercel serves the UI statically while the API runs on a persistent backend.
   // Poll only the currently visible chat so the interface works without a WebSocket proxy.
@@ -623,6 +671,7 @@ function startChatPolling() {
     if (!room) return;
     try {
       const result = await api(`/api/chat/${room}`);
+      if (room === 'staff') updateDailyMessageStats(result);
       let added = false;
       for (const message of (result.messages || [])) {
         if (!state.chatMessageIds[room].has(message.id)) {
@@ -647,6 +696,7 @@ async function loadChat(room) {
   if (room === 'management' && !state.user?.canManage) return;
   try {
     const result = await api(`/api/chat/${room}`);
+    if (room === 'staff') updateDailyMessageStats(result);
     state.chatMessages[room] = [];
     state.chatMessageIds[room] = new Set();
     (result.messages || []).forEach((message) => addChatMessage(room, message, false));
@@ -695,6 +745,7 @@ async function sendChat(event, room) {
   try {
     const result = await api(`/api/chat/${room}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }) });
     addChatMessage(room, result.message);
+    if (room === 'staff') updateDailyMessageStats(result);
     input.value = '';
     input.style.height = 'auto';
   } catch (error) { showToast(error.message, 'error'); }
