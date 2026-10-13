@@ -209,6 +209,9 @@ async function ensureSchema() {
     await sql`CREATE INDEX IF NOT EXISTS idx_leave_requests_user ON leave_requests(user_id, created_at DESC)`;
     await sql`ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS discord_message_id TEXT`;
     await sql`ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS discord_channel_id TEXT`;
+    await sql`ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS roles_granted TEXT`;
+    await sql`ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS roles_synced BOOLEAN NOT NULL DEFAULT FALSE`;
+    await sql`ALTER TABLE leave_requests ADD COLUMN IF NOT EXISTS roles_removed_at TIMESTAMPTZ`;
     await sql`CREATE TABLE IF NOT EXISTS staff_requests (
       id BIGSERIAL PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -680,6 +683,16 @@ async function handleApi(parts, req, res) {
     if (!user) return sendJson(res, 200, { authenticated: false });
     return sendJson(res, 200, { authenticated: true, user: { ...user, canManage: canManage(user) } });
   }
+  if (route === 'cron' && parts[1] === 'leave-sync' && req.method === 'GET') {
+    const secret = process.env.CRON_SECRET || '';
+    const bearer = String(req.headers?.authorization || '');
+    const authorizedCron = Boolean(secret) && bearer === `Bearer ${secret}`;
+    if (!authorizedCron && !canManage(user)) return sendError(res, 401, 'غير مصرح. اضبط CRON_SECRET على Vercel.');
+    await ensureSchema();
+    const { syncLeaveRoles } = require('./_lib/leave-roles.js');
+    const result = await syncLeaveRoles({ sql: await getSql(), token: BOT_TOKEN, report: true });
+    return sendJson(res, 200, { ok: true, ...result });
+  }
   if (route === 'evidence') return sendPrivateEvidence(req, res);
   if (route === 'uploads' && parts[1] === 'token') return handleUploadToken(req, res);
   if (!user) return sendError(res, 401, 'سجل دخولك بديسكورد أولًا.');
@@ -901,6 +914,7 @@ async function handleApi(parts, req, res) {
     return sendJson(res, 201, { ok: true, id, discordPosted, message: discordPosted ? 'تم إرسال طلب الإجازة لروم الإدارة.' : 'تم حفظ الطلب، لكن تعذر إرساله إلى روم الإجازات 1556945732957765722. تأكد من توكن البوت وصلاحياته.' });
   }
   if (route === 'leave-requests' && parts.length === 1 && req.method === 'GET') {
+    if (Date.now() - (globalThis.__leaveSyncAt || 0) > 5 * 60 * 1000) { globalThis.__leaveSyncAt = Date.now(); try { await require('./_lib/leave-roles.js').syncLeaveRoles({ sql, token: BOT_TOKEN }); } catch (error) { console.error('[leave roles lazy sync]', cleanText(error.message, 200)); } }
     const rows = canManage(user)
       ? await sql`SELECT * FROM leave_requests ORDER BY id DESC LIMIT 100`
       : await sql`SELECT * FROM leave_requests WHERE user_id = ${user.id} ORDER BY id DESC LIMIT 40`;
@@ -915,6 +929,7 @@ async function handleApi(parts, req, res) {
     const rows = await sql`UPDATE leave_requests SET status = ${status}, review_note = ${note}, reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id, user_id, username, avatar_url, start_date, end_date, reason, discord_message_id, discord_channel_id`;
     if (!rows.length) return sendError(res, 409, 'الطلب غير موجود أو تمت مراجعته بالفعل. حدّث القائمة للتأكد من حالته.');
     const item = rows[0];
+    if (status === 'approved') { try { await require('./_lib/leave-roles.js').syncLeaveRoles({ sql, token: BOT_TOKEN }); } catch (error) { console.error('[leave roles sync]', cleanText(error.message, 200)); } }
     const hasOriginalMessage = Boolean(item.discord_message_id);
     let originalMessageUpdated = !hasOriginalMessage;
     let reviewLogPosted = false;

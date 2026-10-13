@@ -29,6 +29,9 @@
     },
     "api/leave-requests/[id]/[action].js": {
       "maxDuration": 60
+    },
+    "api/cron/leave-sync.js": {
+      "maxDuration": 60
     }
   },
   "headers": [
@@ -58,6 +61,12 @@
     {
       "source": "/auth/:path*",
       "destination": "/api/auth/:path*"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/leave-sync",
+      "schedule": "0 23 * * *"
     }
   ]
 }

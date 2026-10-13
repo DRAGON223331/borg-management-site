@@ -157,6 +157,10 @@ async function handler(req, res) {
       }
     }
     const finalStatus = item.status === 'pending' ? requestedStatus : item.status;
+    if (finalStatus === 'approved') {
+      // Give the roles now, but never let it eat the 3s window; the daily job / site retries unfinished ones.
+      try { await Promise.race([require('./_lib/leave-roles.js').syncLeaveRoles({ sql, token: BOT_TOKEN }), new Promise((resolve) => setTimeout(resolve, 1200))]); } catch (error) { console.error('[leave roles sync]', cleanText(error?.message || error, 200)); }
+    }
     const finalReviewer = item.reviewed_by || reviewerId;
     const data = { embeds: [buildLeaveEmbed(item, finalStatus, finalReviewer, item.review_note || '')], components: [], allowed_mentions: { parse: [] } };
     if (!responded) { reply({ type: 7, data }); return; }
