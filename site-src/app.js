@@ -42,19 +42,43 @@ function showToast(message, type = 'info') {
   $('#toast-region').appendChild(toast);
   setTimeout(() => toast.remove(), 4300);
 }
+
 async function api(url, options = {}) {
-  const response = await fetch(url, { credentials: 'same-origin', ...options });
+  const response = await fetch(url, {
+    credentials: 'same-origin',
+    ...options
+  });
+
   const contentType = response.headers.get('content-type') || '';
-  const data = contentType.includes('application/json') ? await response.json() : { error: await response.text() };
+  let data;
+
+  if (contentType.includes('application/json')) {
+    data = await response.json();
+  } else {
+    const text = await response.text();
+    data = { error: text };
+  }
+
+  // عدم وجود جلسة عند فتح الموقع لأول مرة أمر طبيعي.
+  if (
+    url.split('?')[0] === '/api/me' &&
+    response.status === 401
+  ) {
+    return { authenticated: false };
+  }
+
   if (!response.ok) {
     if (response.status === 401 && state.user) {
       state.user = null;
       showLogin();
     }
+
     throw new Error(data.error || 'حصل خطأ في الطلب.');
   }
+
   return data;
 }
+
 function setButtonLoading(button, loading, text = 'جاري التنفيذ...') {
   if (!button) return;
   if (loading) {
