@@ -16,6 +16,7 @@ const state = {
   onlineUserIds: new Set(),
   dailyMessageStats: { dailyStats: [], dailyTotal: 0, dailyDate: null },
   staffStats: [],
+  notif: { items: [], unread: 0, maxId: null, open: false },
   lbMetric: 'points',
   audit: { entries: [], nextBefore: null, hasMore: false, loading: false },
   activeStaffProfileId: null,
@@ -139,15 +140,19 @@ async function initialize() {
       $('#submissions-heading').textContent = 'آخر تسليمات الاستاف';
       $('#manager-leave-section').classList.remove('hidden');
       $('#manager-staff-request-section')?.classList.remove('hidden');
+      wireNotifications();
     }
-    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests(), loadStaffRequests(), loadStaffStats()]);
+    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests(), loadStaffRequests(), loadStaffStats(), loadNotifications()]);
     startChatPolling();
     startPresenceHeartbeat();
-    setInterval(checkBotStatus, 30000);
-    setInterval(() => { if (state.user) loadStaffStats(); }, 45000);
+    // تخفيف الضغط على السيرفر: التحديثات الدورية بتقف لما التبويب يتخبى وبتتأخر شوية.
+    setInterval(() => { if (!document.hidden) checkBotStatus(); }, 120000);
+    setInterval(() => { if (state.user && !document.hidden) loadStaffStats(); }, 90000);
     setInterval(() => {
-      if ($('.page.active-page')?.id === 'page-tasks') loadTasks();
+      if (!document.hidden && $('.page.active-page')?.id === 'page-tasks') loadTasks();
     }, 60000);
+    setInterval(() => { if (!document.hidden) loadNotifications(); }, 60000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) loadNotifications(); });
   } catch (error) {
     showFatal(error.message || 'حصل خطأ أثناء تحميل الموقع.');
   }
@@ -517,7 +522,7 @@ async function loadSubmissions() {
       const tasks = (submission.tasks || []).map((task) => `<span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? 'إجباري' : 'اختياري'} · ${escapeHtml(task.title)}</span>`).join('');
       return `<article class="submission-card"><div class="submission-top"><div class="submission-user"><img src="${escapeHtml(submission.avatarUrl || avatarFallback(submission.userId))}" alt=""><span>${escapeHtml(submission.username)}</span><span class="task-id">#${submission.id}</span><span class="task-tag ${submission.status === 'approved' ? 'completed' : submission.status === 'rejected' ? 'required' : 'optional'}">${submission.status === 'approved' ? 'تمت الموافقة' : submission.status === 'rejected' ? 'مرفوض' : 'بانتظار الموافقة'}</span></div><time class="submission-date">${formatDate(submission.submittedAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</time></div><div class="submission-task-list">${tasks}</div>${submission.note ? `<div class="submission-note">${escapeHtml(submission.note)}</div>` : ''}${files || links ? `<div class="submission-evidence">${files}${links}</div>` : ''}${state.user.canManage && submission.status === 'pending' ? `<div class="manager-actions"><button class="primary-button" data-review-submission="approve" data-id="${submission.id}">موافقة وإضافة النقاط</button><button class="secondary-button" data-review-submission="reject" data-id="${submission.id}">رفض التسليم</button></div>` : ''}</article>`;
     }).join('');
-    $$('[data-review-submission]').forEach(button => button.addEventListener('click', async () => { const action = button.dataset.reviewSubmission; const id = button.dataset.id; let reason = ''; if (action === 'reject') { reason = window.prompt('سبب رفض التسليم (اختياري):') || ''; } button.disabled = true; try { const result = await api(`/api/submissions/${id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }) }); showToast(action === 'approve' ? `تمت الموافقة وإضافة ${result.awarded} نقطة.` : 'تم رفض التسليم.', 'success'); await Promise.all([loadSubmissions(), loadMyPoints()]); } catch (error) { showToast(error.message, 'error'); button.disabled = false; } }));
+    $$('[data-review-submission]').forEach(button => button.addEventListener('click', async () => { const action = button.dataset.reviewSubmission; const id = button.dataset.id; let reason = ''; if (action === 'reject') { reason = window.prompt('سبب رفض التسليم (اختياري):') || ''; } button.disabled = true; try { const result = await api(`/api/submissions/${id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }) }); showToast(result.message || (action === 'approve' ? `تمت الموافقة وإضافة ${result.awarded} نقطة.` : 'تم رفض التسليم.'), result.dmSent === false ? 'info' : 'success'); await Promise.all([loadSubmissions(), loadMyPoints()]); } catch (error) { showToast(error.message, 'error'); button.disabled = false; } }));
   } catch (error) {
     $('#submissions-list').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
   }
@@ -576,10 +581,10 @@ function startPresenceHeartbeat() {
   const beat = async () => {
     if (!state.user) return;
     try { await api('/api/presence', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch { /* Retry on the next heartbeat. */ }
-    await refreshPresence();
+    if (!document.hidden) await refreshPresence();
   };
   beat();
-  setInterval(beat, 30000);
+  setInterval(beat, 60000);
 }
 function renderRoster() {
   const query = $('#roster-search').value.trim().toLocaleLowerCase('ar');
@@ -851,6 +856,7 @@ function renderStaffProfile(member, response = {}, target = '#staff-profile-cont
   const leaves = response.recentLeaves || [];
   const points = response.recentPoints || [];
   const requests = response.recentRequests || [];
+  const restricted = Boolean(response.restricted);
   const online = state.onlineUserIds.has(String(member.id));
   const num = (value) => Number(value || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
   const dateOnly = (value) => (value ? escapeHtml(formatDate(value, { day: 'numeric', month: 'long', year: 'numeric' })) : '—');
@@ -896,8 +902,8 @@ function renderStaffProfile(member, response = {}, target = '#staff-profile-cont
         <div class="pf-ranks">${rankBadge('💬', 'ترتيب الرسائل', ranks.messages)}${rankBadge('⭐', 'ترتيب النقاط', ranks.points)}</div>
       </div>
       <div class="pf-facts">
-        <div><small>دخل سيرفر الاستاف</small><b>${dateOnly(member.joinedAt)}</b></div>
-        <div><small>دخل السيرفر الأساسي</small><b>${dateOnly(member.mainJoinedAt)}</b></div>
+        ${member.joinedAt ? `<div><small>دخل سيرفر الاستاف</small><b>${dateOnly(member.joinedAt)}</b></div>` : ''}
+        ${member.mainJoinedAt ? `<div><small>دخل السيرفر الأساسي</small><b>${dateOnly(member.mainJoinedAt)}</b></div>` : ''}
         <div><small>تاريخ إنشاء الحساب</small><b>${dateOnly(created)}</b></div>
         <div><small>أعلى رتبة</small><b>${escapeHtml(member.roleName || 'عضو الاستاف')}</b></div>
       </div>
@@ -922,20 +928,20 @@ function renderStaffProfile(member, response = {}, target = '#staff-profile-cont
     <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">PERFORMANCE</span><h2>الأداء والمهمات</h2></div></div>
       <div class="pf-kpis">
         ${kpi('النقاط المسجلة', stats.totalPoints, '', true)}
-        ${kpi('إجمالي التسليمات', totalSub)}
+        ${restricted ? '' : kpi('إجمالي التسليمات', totalSub)}
         ${kpi('التسليمات المقبولة', approvedSub)}
-        ${kpi('بانتظار المراجعة', stats.pendingSubmissions)}
-        ${kpi('المرفوضة', stats.rejectedSubmissions)}
-        ${kpi('طلبات الإجازة', stats.leaveRequests, `${num(stats.adminRequests)} طلب إداري`)}
+        ${restricted ? '' : kpi('بانتظار المراجعة', stats.pendingSubmissions)}
+        ${restricted ? '' : kpi('المرفوضة', stats.rejectedSubmissions)}
+        ${restricted ? '' : kpi('طلبات الإجازة', stats.leaveRequests, `${num(stats.adminRequests)} طلب إداري`)}
       </div>
-      <div class="pf-rate"><div class="pf-rate-top"><b>نسبة قبول التسليمات</b><span>${totalSub ? `${approvalRate}%` : '—'}</span></div><div class="pf-rate-track"><i style="width:${approvalRate}%"></i></div></div>
+      <div class="pf-rate${restricted ? ' hidden' : ''}"><div class="pf-rate-top"><b>نسبة قبول التسليمات</b><span>${totalSub ? `${approvalRate}%` : '—'}</span></div><div class="pf-rate-track"><i style="width:${approvalRate}%"></i></div></div>
     </section>
 
     <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">PERMISSIONS</span><h2>الرتب والصلاحيات</h2></div></div><div class="staff-profile-roles">${roles}</div></section>
-    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">POINTS HISTORY</span><h2>آخر حركات النقاط</h2></div></div><div class="profile-history-list">${pointsHtml}</div></section>
+    ${restricted ? '<section class="staff-profile-section"><p class="muted small-copy">🔒 السجل التفصيلي (حركات النقاط، التسليمات، الإجازات، الطلبات الإدارية) متاح لصاحب الحساب والمسؤولين فقط.</p></section>' : `<section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">POINTS HISTORY</span><h2>آخر حركات النقاط</h2></div></div><div class="profile-history-list">${pointsHtml}</div></section>
     <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">SUBMISSION HISTORY</span><h2>آخر التسليمات</h2></div></div><div class="profile-history-list">${submissionsHtml}</div></section>
     <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">LEAVE HISTORY</span><h2>طلبات الإجازة</h2></div></div><div class="profile-history-list">${leavesHtml}</div></section>
-    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">ADMIN REQUESTS</span><h2>الطلبات الإدارية</h2></div></div><div class="profile-history-list">${requestsHtml}</div></section>`;
+    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">ADMIN REQUESTS</span><h2>الطلبات الإدارية</h2></div></div><div class="profile-history-list">${requestsHtml}</div></section>`}`;
   $('[data-copy-id]', root)?.addEventListener('click', async (event) => {
     const id = event.currentTarget.dataset.copyId;
     try { await navigator.clipboard.writeText(id); showToast(`تم نسخ Discord ID: ${id}`, 'success'); } catch { showToast(id, 'info'); }
@@ -1051,14 +1057,17 @@ function startChatPolling() {
   // Vercel serves the UI statically while the API runs on a persistent backend.
   // Poll only the currently visible chat so the interface works without a WebSocket proxy.
   setInterval(async () => {
+    if (document.hidden) return;
     const activePage = $('.page.active-page')?.id;
     const room = activePage === 'page-staff-chat' ? 'staff'
       : activePage === 'page-management-chat' && state.user?.canManage ? 'management'
       : null;
-    if (!room) return;
+    if (!room || !state.chatLoaded[room]) return;
     try {
-      const result = await api(`/api/chat/${room}`);
-      if (room === 'staff') updateDailyMessageStats(result);
+      // نطلب الرسائل الأحدث من آخر رسالة معروفة فقط (بدل آخر 100 رسالة كل مرة).
+      const lastId = state.chatMessages[room].reduce((max, message) => Math.max(max, Number(message.id) || 0), 0);
+      const result = await api(`/api/chat/${room}?after=${lastId}`);
+      if (room === 'staff' && !result.incremental) updateDailyMessageStats(result);
       let added = false;
       for (const message of (result.messages || [])) {
         if (!state.chatMessageIds[room].has(message.id)) {
@@ -1068,7 +1077,7 @@ function startChatPolling() {
       }
       if (added) renderChat(room);
     } catch { /* Keep the current chat visible during brief network errors. */ }
-  }, 4000);
+  }, 6000);
 }
 function wireChats() {
   $('#staff-chat-form').addEventListener('submit', (event) => sendChat(event, 'staff'));
@@ -1144,5 +1153,81 @@ $$('.chat-composer textarea').forEach((textarea) => textarea.addEventListener('i
   textarea.style.height = 'auto';
   textarea.style.height = `${Math.min(textarea.scrollHeight, 130)}px`;
 }));
+
+// ───────── إشعارات داخل الموقع للمسؤولين ─────────
+const NOTIF_TARGETS = {
+  submission: { page: 'tasks', selector: '#submissions-list', reload: () => loadSubmissions() },
+  leave: { page: 'overview', selector: '#manager-leave-section', reload: () => loadLeaveRequests() },
+  'staff-request': { page: 'overview', selector: '#manager-staff-request-section', reload: () => loadStaffRequests() },
+};
+const BASE_TITLE = document.title;
+function wireNotifications() {
+  const button = $('#notif-btn');
+  const panel = $('#notif-panel');
+  if (!button || !panel) return;
+  const close = () => { state.notif.open = false; panel.classList.add('hidden'); button.setAttribute('aria-expanded', 'false'); };
+  button.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    if (state.notif.open) return close();
+    state.notif.open = true;
+    panel.classList.remove('hidden');
+    button.setAttribute('aria-expanded', 'true');
+    await loadNotifications();
+    renderNotifications();
+    markNotificationsRead();
+  });
+  $('#notif-mark-read')?.addEventListener('click', (event) => { event.stopPropagation(); markNotificationsRead(); });
+  document.addEventListener('click', (event) => { if (state.notif.open && !event.target.closest('.notif-wrap')) close(); });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && state.notif.open) close(); });
+  $('#notif-list')?.addEventListener('click', (event) => {
+    const row = event.target.closest('[data-notif-type]');
+    if (!row) return;
+    const target = NOTIF_TARGETS[row.dataset.notifType];
+    close();
+    if (!target) return;
+    openPage(target.page);
+    target.reload();
+    setTimeout(() => $(target.selector)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 120);
+  });
+}
+function renderNotificationBadge() {
+  const badge = $('#notif-badge');
+  const unread = state.notif.unread;
+  if (badge) { badge.textContent = unread > 99 ? '99+' : String(unread); badge.classList.toggle('hidden', unread < 1); }
+  document.title = unread > 0 ? `(${unread > 99 ? '99+' : unread}) ${BASE_TITLE}` : BASE_TITLE;
+}
+function renderNotifications() {
+  const list = $('#notif-list');
+  if (!list) return;
+  if (!state.notif.items.length) { list.innerHTML = '<div class="task-empty">لا توجد إشعارات حتى الآن.</div>'; return; }
+  list.innerHTML = state.notif.items.map((item) => `<button type="button" class="notif-item${item.unread ? ' unread' : ''}" data-notif-type="${escapeHtml(item.type)}"><b>${escapeHtml(item.title)}</b>${item.body ? `<span>${escapeHtml(item.body)}</span>` : ''}<time>${escapeHtml(formatDate(item.createdAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</time></button>`).join('');
+}
+async function loadNotifications() {
+  if (!state.user?.canManage) return;
+  try {
+    const result = await api('/api/notifications');
+    const items = Array.isArray(result.items) ? result.items : [];
+    const previousMax = state.notif.maxId;
+    const fresh = previousMax === null ? [] : items.filter((item) => item.unread && item.id > previousMax);
+    state.notif.items = items;
+    state.notif.unread = Number(result.unread) || 0;
+    state.notif.maxId = items.reduce((max, item) => Math.max(max, item.id), previousMax ?? 0);
+    renderNotificationBadge();
+    if (state.notif.open) renderNotifications();
+    // إشعار جديد وصل أثناء فتح الموقع: نعرضه ونحدّث القائمة المرتبطة بيه تلقائيًا.
+    for (const item of fresh.slice(0, 3).reverse()) showToast(`${item.title}${item.body ? ` — ${item.body}` : ''}`, 'info');
+    for (const type of new Set(fresh.map((item) => item.type))) NOTIF_TARGETS[type]?.reload();
+  } catch { /* الإشعارات مش حرجة؛ نحاول تاني في الدورة الجاية */ }
+}
+async function markNotificationsRead() {
+  if (!state.notif.unread && !state.notif.items.some((item) => item.unread)) return;
+  try {
+    await api('/api/notifications/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    state.notif.unread = 0;
+    renderNotificationBadge();
+    // نسيب علامة "جديد" ظاهرة جوه اللوحة لحد ما تتقفل، بعدها تختفي.
+    if (!state.notif.open) { state.notif.items = state.notif.items.map((item) => ({ ...item, unread: false })); }
+  } catch (error) { showToast(error.message, 'error'); }
+}
 
 initialize();

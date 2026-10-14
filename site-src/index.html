@@ -54,6 +54,13 @@
         <button class="nav-tab manager-only hidden" data-page="audit-log"><span>≣</span> سجل السيرفر</button>
       </nav>
       <div class="user-tools">
+        <div class="notif-wrap manager-only hidden">
+          <button type="button" id="notif-btn" class="icon-button notif-btn" title="الإشعارات" aria-label="الإشعارات" aria-haspopup="true" aria-expanded="false">🔔<span id="notif-badge" class="notif-badge hidden">0</span></button>
+          <div id="notif-panel" class="notif-panel hidden" role="dialog" aria-label="الإشعارات">
+            <div class="notif-head"><b>الإشعارات</b><button type="button" id="notif-mark-read" class="text-button">تحديد الكل كمقروء</button></div>
+            <div id="notif-list" class="notif-list"><div class="loading-state">جاري التحميل...</div></div>
+          </div>
+        </div>
         <div class="connection-pill" id="bot-status"><span class="status-dot"></span><span>جاري فحص البوت</span></div>
         <div class="profile-chip">
           <img id="top-avatar" alt="صورة الحساب" src="">
@@ -93,7 +100,7 @@
             <article class="stat-card"><div class="stat-icon blue">↗</div><div><span>إنجازاتك المسجلة</span><strong id="stat-done">0</strong></div><div class="stat-foot">مهمات عليها تسليم منك</div></article>
           </div>
 
-          <section id="admin-overview-section" class="admin-overview-section">
+          <section id="admin-overview-section" class="admin-overview-section manager-only hidden">
             <div class="section-title-row"><div><span class="tiny-label">MANAGEMENT ANALYTICS</span><h2>إحصائيات المسؤولين</h2><p class="muted small-copy">اضغط على أي مسؤول لفتح ملفه الكامل وإحصائياته.</p></div></div>
             <div id="admin-overview-cards" class="admin-overview-cards"><div class="loading-state">جاري تحميل إحصائيات الإدارة...</div></div>
           </section>

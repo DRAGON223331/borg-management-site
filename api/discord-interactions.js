@@ -7,6 +7,9 @@ const LEAVE_NOTICE_CHANNEL_ID = process.env.LEAVE_NOTICE_CHANNEL_ID || '15581025
 const MANAGER_IDS = new Set((process.env.MANAGER_IDS || '1286035404323164172,1525203473262706821,848304089057460254,1475483362536980552').split(',').map((x) => x.trim()).filter(Boolean));
 const MANAGEMENT_MAIN_ROLE_ID = process.env.MANAGEMENT_MAIN_ROLE_ID || '1538623033806168135';
 const MANAGEMENT_STAFF_ROLE_ID = process.env.MANAGEMENT_STAFF_ROLE_ID || '1559628523809804288';
+const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID || '883871561474539630';
+const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
+const MESSAGE_COUNT_CHANNEL_ID = (process.env.MESSAGE_COUNT_CHANNEL_ID || '1552049641913065552').trim();
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY || '';
 
@@ -116,9 +119,46 @@ function buildNoticeEmbed(item, status, reviewerId, note) {
 function isAdministrator(permissionBits) {
   try { return (BigInt(permissionBits || '0') & 8n) === 8n; } catch { return false; }
 }
+// صلاحية /csv: مسؤول معرّف في MANAGER_IDS، أو Administrator / رتبة الإدارة — ومن داخل السيرفر الأساسي أو سيرفر الاستاف فقط.
+async function isCsvAuthorized(interaction) {
+  const userId = String(interaction.member?.user?.id || interaction.user?.id || '');
+  if (!userId) return false;
+  if (MANAGER_IDS.has(userId)) return true;
+  const guildId = String(interaction.guild_id || '');
+  if (guildId !== MAIN_GUILD_ID && guildId !== STAFF_GUILD_ID) return false;
+  const roles = Array.isArray(interaction.member?.roles) ? interaction.member.roles.map(String) : [];
+  if (isAdministrator(interaction.member?.permissions) || roles.includes(MANAGEMENT_MAIN_ROLE_ID) || roles.includes(MANAGEMENT_STAFF_ROLE_ID)) return true;
+  if (!BOT_TOKEN) return false;
+  const lookups = await Promise.allSettled([MAIN_GUILD_ID, STAFF_GUILD_ID].map((id) => discordApi(`/guilds/${id}/members/${userId}`)));
+  return lookups.some((result) => result.status === 'fulfilled' && (result.value?.roles || []).some((roleId) => roleId === MANAGEMENT_MAIN_ROLE_ID || roleId === MANAGEMENT_STAFF_ROLE_ID));
+}
+async function handleCsvCommand(interaction, res) {
+  if (!(await isCsvAuthorized(interaction))) return send(res, { type: 4, data: { content: 'أمر /csv متاح لمسؤولي الإدارة فقط.', flags: 64 } });
+  const type = String(interaction.data?.options?.find((option) => option.name === 'type')?.value || 'stats');
+  // رد فوري (مخفي) عشان نلحق نافذة الـ3 ثواني، وبعدها نعدّل الرد ونرفق الملف.
+  send(res, { type: 5, data: { flags: 64 } });
+  const followup = `${DISCORD_API}/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`;
+  const work = (async () => {
+    try {
+      const sql = await getSql();
+      const out = await require('./_lib/csv-export.js').buildCsv(sql, type, { messageChannelId: MESSAGE_COUNT_CHANNEL_ID });
+      const form = new FormData();
+      form.append('payload_json', JSON.stringify({ content: `📊 **${out.label}** — ${out.rowCount.toLocaleString('en-US')} صف.\nالملف بصيغة UTF-8 ويفتح مباشرة في Excel.`, attachments: [{ id: 0, filename: out.filename }], allowed_mentions: { parse: [] } }));
+      form.append('files[0]', new Blob([out.csv], { type: 'text/csv; charset=utf-8' }), out.filename);
+      const response = await fetch(followup, { method: 'PATCH', body: form });
+      if (!response.ok) throw new Error(`Discord HTTP ${response.status}`);
+    } catch (error) {
+      console.error('[csv command]', cleanText(error?.message || error, 200));
+      try { await fetch(followup, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: `تعذر تجهيز ملف CSV: ${cleanText(error?.message || error, 140)}` }) }); } catch { /* nothing else to do */ }
+    }
+  })();
+  try { require('@vercel/functions').waitUntil(work); } catch { /* غير متاحة محليًا؛ بننتظر الشغل تحت */ }
+  await work;
+}
 const fmtPoints = (n) => (Math.round(Number(n || 0) * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 });
 async function handleCommand(interaction, res) {
   const name = String(interaction.data?.name || '');
+  if (name === 'csv') return handleCsvCommand(interaction, res);
   if (name !== 'نقاطي' && name !== 'mypoints') return send(res, { type: 4, data: { content: 'الأمر ده مش مدعوم.', flags: 64 } });
   const userId = String(interaction.member?.user?.id || interaction.user?.id || '');
   let responded = false;
@@ -233,6 +273,7 @@ async function handler(req, res) {
     // Side jobs (never allowed to eat the 3s window): notice in the review room + roles for approved leaves.
     const side = [];
     if (changed) side.push(discordApi(`/channels/${LEAVE_NOTICE_CHANNEL_ID}/messages`, { method: 'POST', body: JSON.stringify({ embeds: [buildNoticeEmbed(item, finalStatus, finalReviewer, finalNote)], allowed_mentions: { parse: [] } }) }));
+    if (changed) side.push(require('./_lib/notify.js').notifyReview({ token: BOT_TOKEN, userId: item.user_id, kind: 'leave', status: finalStatus, id: requestId, reviewerId: finalReviewer, note: finalNote, fields: [{ name: '📅 الفترة', value: `${String(item.start_date).slice(0, 10)} ← ${String(item.end_date).slice(0, 10)}`, inline: false }] }));
     if (finalStatus === 'approved') side.push(require('./_lib/leave-roles.js').syncLeaveRoles({ sql, token: BOT_TOKEN }));
     if (side.length) {
       await Promise.race([Promise.allSettled(side).then((results) => results.forEach((r) => { if (r.status === 'rejected') console.error('[leave side job]', cleanText(r.reason?.message || r.reason, 200)); })), new Promise((resolve) => setTimeout(resolve, 1300))]);

@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const { Readable } = require('node:stream');
+const { notifyReview } = require('./_lib/notify.js');
 
 const DISCORD_API = 'https://discord.com/api/v10';
 const COOKIE_NAME = 'borg.sid';
@@ -36,6 +37,48 @@ let lastTaskSyncAt = 0;
 let taskSyncPromise;
 let lastMessageSyncAt = 0;
 let messageSyncPromise;
+
+// ───────── تخفيف الضغط: كاش في الذاكرة + حد للطلبات ─────────
+const SCHEMA_VERSION = 3; // ارفعه كل ما تضيف جدول/عمود جديد في ensureSchema
+const PRESENCE_WINDOW_SECONDS = 150; // مدة اعتبار العضو "متصل" بعد آخر نبضة (النبضة كل 60 ثانية)
+const MESSAGE_SYNC_MIN_MS = Math.max(15, Number(process.env.MESSAGE_SYNC_MIN_SECONDS || 45)) * 1000;
+const memCache = new Map();
+// بيشارك نفس الطلب الجاري بين كل المستخدمين، وبيرجّع آخر نسخة قديمة لو Discord/DB فشلوا مؤقتًا.
+function cached(key, ttlMs, loader) {
+  const now = Date.now();
+  const entry = memCache.get(key);
+  if (entry && 'value' in entry && entry.expires > now) return Promise.resolve(entry.value);
+  if (entry?.inflight) return entry.inflight;
+  const inflight = Promise.resolve().then(loader).then(
+    (value) => { memCache.set(key, { value, expires: Date.now() + ttlMs }); return value; },
+    (error) => {
+      if (entry && 'value' in entry) { memCache.set(key, { value: entry.value, expires: Date.now() + 5000 }); return entry.value; }
+      memCache.delete(key);
+      throw error;
+    },
+  );
+  memCache.set(key, { ...(entry || {}), inflight });
+  return inflight;
+}
+const rateBuckets = new Map();
+function rateLimited(req, res, user, bucket, max, windowMs = 60_000) {
+  const who = user?.id || String(req.headers?.['x-forwarded-for'] || req.socket?.remoteAddress || 'anon').split(',')[0].trim();
+  const key = `${bucket}:${who}`;
+  const now = Date.now();
+  let entry = rateBuckets.get(key);
+  if (!entry || entry.reset <= now) { entry = { count: 0, reset: now + windowMs }; rateBuckets.set(key, entry); }
+  entry.count += 1;
+  if (rateBuckets.size > 4000) for (const [k, v] of rateBuckets) if (v.reset <= now) rateBuckets.delete(k);
+  if (entry.count <= max) return false;
+  res.setHeader('Retry-After', String(Math.max(1, Math.ceil((entry.reset - now) / 1000))));
+  sendError(res, 429, 'طلبات كتير في وقت قصير. استنى شوية وجرّب تاني.');
+  return true;
+}
+function queryParam(req, name) {
+  const direct = req.query?.[name];
+  if (direct !== undefined && direct !== null) return Array.isArray(direct) ? String(direct[0]) : String(direct);
+  try { return new URL(req.url || '/', 'http://localhost').searchParams.get(name); } catch { return null; }
+}
 
 function siteUrl(req) {
   if (process.env.SITE_URL) return process.env.SITE_URL.replace(/\/$/, '');
@@ -148,6 +191,8 @@ async function getSql() {
 async function ensureSchema() {
   if (!schemaPromise) schemaPromise = (async () => {
     const sql = await getSql();
+    // استعلام واحد بدل ~40 استعلام DDL في كل cold start.
+    try { const meta = await sql`SELECT value FROM app_meta WHERE key = 'schema_version'`; if (Number(meta[0]?.value) >= SCHEMA_VERSION) return; } catch { /* الجدول لسه مش موجود → نكمّل التهيئة */ }
     await sql`CREATE TABLE IF NOT EXISTS tasks (
       id BIGSERIAL PRIMARY KEY,
       title TEXT NOT NULL,
@@ -252,7 +297,22 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_staff_requests_user ON staff_requests(user_id, created_at DESC)`;
-  })();
+    await sql`CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status, id DESC)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_leave_requests_status ON leave_requests(status, id DESC)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_submissions_files ON submissions USING GIN (files_json jsonb_path_ops)`; // فتح الأدلة بالـtoken
+    await sql`CREATE TABLE IF NOT EXISTS admin_notifications (
+      id BIGSERIAL PRIMARY KEY,
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT '',
+      ref_id BIGINT,
+      actor_id TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`;
+    await sql`CREATE TABLE IF NOT EXISTS admin_notification_reads (user_id TEXT PRIMARY KEY, last_read_id BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
+    await sql`CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`;
+    await sql`INSERT INTO app_meta(key, value) VALUES ('schema_version', ${String(SCHEMA_VERSION)}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+  })().catch((error) => { schemaPromise = null; throw error; });
   return schemaPromise;
 }
 
@@ -289,7 +349,7 @@ async function applyMessagePage(sql, channelId, page, upper, isLast) {
 async function syncChannelMessageCounts(sql, { force = false, budgetMs = 9000 } = {}) {
   if (!BOT_TOKEN || !MESSAGE_COUNT_CHANNEL_ID) return;
   if (messageSyncPromise) return messageSyncPromise;
-  if (!force && Date.now() - lastMessageSyncAt < 15_000) return;
+  if (!force && Date.now() - lastMessageSyncAt < MESSAGE_SYNC_MIN_MS) return;
   messageSyncPromise = (async () => {
     const channelId = MESSAGE_COUNT_CHANNEL_ID;
     const deadline = Date.now() + budgetMs;
@@ -359,6 +419,23 @@ async function syncChannelMessageCounts(sql, { force = false, budgetMs = 9000 } 
 // ───────── تسجيل أمر السلاش (mypoints فقط) ─────────
 const SLASH_COMMANDS = [
   { name: 'mypoints', type: 1, description: 'Show how many points you have', description_localizations: { ar: 'اعرف عندك كام نقطة' } },
+  {
+    name: 'csv', type: 1, dm_permission: false,
+    description: 'Export staff data as a CSV file (managers only)',
+    description_localizations: { ar: 'تصدير بيانات الاستاف كملف CSV (للمسؤولين فقط)' },
+    options: [{
+      type: 3, name: 'type', required: false,
+      description: 'What to export (default: staff summary)',
+      description_localizations: { ar: 'نوع البيانات المطلوب تصديرها (الافتراضي: ملخص الاستاف)' },
+      choices: [
+        { name: 'Staff summary', name_localizations: { ar: 'ملخص الاستاف' }, value: 'stats' },
+        { name: 'Submissions', name_localizations: { ar: 'التسليمات' }, value: 'submissions' },
+        { name: 'Leave requests', name_localizations: { ar: 'طلبات الإجازة' }, value: 'leaves' },
+        { name: 'Points ledger', name_localizations: { ar: 'سجل النقاط' }, value: 'points' },
+        { name: 'Admin requests', name_localizations: { ar: 'الطلبات الإدارية' }, value: 'requests' },
+      ],
+    }],
+  },
 ];
 let commandsRegisteredAt = 0;
 async function registerSlashCommands() {
@@ -402,7 +479,7 @@ function rankOf(allStats, userId, field) {
   return { rank: index >= 0 ? index + 1 : null, of: rows.length };
 }
 
-async function getDailyStaffMessageStats(sql) {
+async function loadDailyStaffMessageStats(sql) {
   const [rows, todayRows] = await Promise.all([
     sql`SELECT user_id AS "userId", MAX(username) AS username, COUNT(*)::integer AS count
       FROM discord_message_log
@@ -422,15 +499,17 @@ async function getDailyStaffMessageStats(sql) {
 }
 
 
-async function getAllStaffStats(sql) {
+const getDailyStaffMessageStats = (sql) => cached('daily-message-stats', 20_000, () => loadDailyStaffMessageStats(sql));
+
+async function loadAllStaffStats(sql) {
   const [messages, submissions, points, leaves, staffRequests, online, daily] = await Promise.all([
     sql`SELECT user_id AS "userId", MAX(username) AS username, COUNT(*)::integer AS "totalMessages" FROM discord_message_log WHERE channel_id = ${MESSAGE_COUNT_CHANNEL_ID} GROUP BY user_id`,
     sql`SELECT user_id AS "userId", COUNT(*)::integer AS "totalSubmissions", COUNT(*) FILTER (WHERE status = 'approved')::integer AS "approvedSubmissions", COUNT(*) FILTER (WHERE status IN ('submitted','pending'))::integer AS "pendingSubmissions", COUNT(*) FILTER (WHERE status = 'rejected')::integer AS "rejectedSubmissions" FROM submissions GROUP BY user_id`,
     sql`SELECT user_id AS "userId", COALESCE(SUM(amount),0)::numeric AS "totalPoints" FROM staff_points GROUP BY user_id`,
     sql`SELECT user_id AS "userId", COUNT(*)::integer AS "leaveRequests" FROM leave_requests GROUP BY user_id`,
     sql`SELECT user_id AS "userId", COUNT(*)::integer AS "adminRequests" FROM staff_requests GROUP BY user_id`,
-    sql`SELECT user_id AS "userId", last_seen AS "lastSeen" FROM site_presence WHERE last_seen > NOW() - INTERVAL '90 seconds'`,
-    getDailyStaffMessageStats(sql),
+    sql`SELECT user_id AS "userId", last_seen AS "lastSeen" FROM site_presence WHERE last_seen > NOW() - make_interval(secs => ${PRESENCE_WINDOW_SECONDS}::int)`,
+    loadDailyStaffMessageStats(sql),
   ]);
   const byId = new Map();
   const ensure = (id, username = '') => {
@@ -447,7 +526,22 @@ async function getAllStaffStats(sql) {
   for (const row of staffRequests) ensure(row.userId).adminRequests = Number(row.adminRequests) || 0;
   for (const row of online) Object.assign(ensure(row.userId), { online: true, lastSeen: row.lastSeen });
   for (const row of daily.dailyStats || []) ensure(row.userId, row.username).dailyMessages = Number(row.count) || 0;
-  return [...byId.values()];
+  return { stats: [...byId.values()], dailyDate: daily.dailyDate || null };
+}
+const getAllStaffStats = (sql) => cached('all-staff-stats', 15_000, () => loadAllStaffStats(sql));
+
+// ───────── خصوصية بيانات الأعضاء ─────────
+// أي عضو عادي يشوف فقط الحقول العامة اللازمة للّيدر بورد. باقي الأرقام (تسليمات مرفوضة/معلقة، إجازات، طلبات إدارية، آخر ظهور) للمسؤولين وصاحب الحساب فقط.
+const PUBLIC_STAT_FIELDS = ['userId', 'username', 'dailyMessages', 'totalMessages', 'totalPoints', 'approvedSubmissions', 'online'];
+function publicStats(row) {
+  const out = {};
+  for (const key of PUBLIC_STAT_FIELDS) out[key] = row[key];
+  return out;
+}
+function rosterForViewer(data, viewer) {
+  if (canManage(viewer)) return data;
+  // تواريخ دخول السيرفرات بيانات إدارية؛ مش بنبعتها لغير المسؤولين.
+  return { ...data, groups: data.groups.map((group) => ({ ...group, members: group.members.map(({ joinedAt, mainJoinedAt, ...rest }) => rest) })) };
 }
 async function discordApi(route, options = {}) {
   if (!BOT_TOKEN) throw new Error('توكن البوت غير مضبوط في Environment Variables على Vercel.');
@@ -659,6 +753,18 @@ function leaveReviewComponents(id) {
     { type: 2, style: 3, label: 'قبول الإجازة', custom_id: `leave:approve:${id}` },
     { type: 2, style: 4, label: 'رفض الإجازة', custom_id: `leave:reject:${id}` },
   ] }];
+}
+
+// إشعار داخل الموقع لكل المسؤولين (جدول واحد + علامة "آخر ما اتقرا" لكل مسؤول).
+async function pushAdminNotification(sql, { type, title, body = '', refId = null, actorId = null }) {
+  try {
+    await sql`INSERT INTO admin_notifications(type, title, body, ref_id, actor_id) VALUES (${type}, ${cleanText(title, 160)}, ${cleanText(body, 400)}, ${refId}, ${actorId})`;
+    if (Math.random() < 0.03) await sql`DELETE FROM admin_notifications WHERE created_at < NOW() - INTERVAL '30 days'`;
+  } catch (error) { console.error('[admin notification]', cleanText(error?.message || error, 180)); }
+}
+function dmNote(dm) {
+  if (!dm || dm.ok) return '';
+  return dm.reason === 'dm-closed' ? ' (تعذر إرسال إشعار خاص للعضو لأن الرسائل الخاصة مقفولة عنده)' : ' (تعذر إرسال إشعار خاص للعضو)';
 }
 
 function parseRequestUrl(req) {
@@ -924,17 +1030,18 @@ async function handleApi(parts, req, res) {
   const user = getSessionUser(req);
   if (req.method !== 'GET' && !ensureSameOrigin(req, res)) return;
   if (route === 'health' && req.method === 'GET') {
-    let botReady = Boolean(BOT_TOKEN);
-    let botLastError = botReady ? '' : 'توكن البوت غير مضبوط.';
-    if (botReady) {
-      try { await discordApi('/users/@me'); }
-      catch (error) { botReady = false; botLastError = cleanText(error.message, 200); }
-    }
+    // فحص البوت مرة كل دقيقة بس مهما كان عدد المستخدمين (كان بيعمل طلب Discord مع كل نبضة من كل مستخدم).
+    const bot = await cached('bot-health', 60_000, async () => {
+      if (!BOT_TOKEN) return { ready: false, error: 'توكن البوت غير مضبوط.' };
+      try { await discordApi('/users/@me'); return { ready: true, error: '' }; }
+      catch (error) { return { ready: false, error: cleanText(error.message, 200) }; }
+    });
+    let botReady = bot.ready;
     if (botReady && Date.now() - commandsRegisteredAt > 6 * 60 * 60 * 1000) {
       commandsRegisteredAt = Date.now() - 5 * 60 * 60 * 1000; // لو فشل التسجيل يعيد المحاولة بعد ساعة
       try { await registerSlashCommands(); } catch (error) { console.error('[register commands]', cleanText(error?.message || error, 200)); }
     }
-    return sendJson(res, 200, { ok: true, botReady, botLastError, storageReady: Boolean(process.env.BLOB_READ_WRITE_TOKEN), databaseReady: Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || process.env.DATABASE_URL_UNPOOLED || process.env.POSTGRES_PRISMA_URL) });
+    return sendJson(res, 200, { ok: true, botReady, ...(canManage(user) ? { botLastError: bot.error } : {}), storageReady: Boolean(process.env.BLOB_READ_WRITE_TOKEN), databaseReady: Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || process.env.DATABASE_URL_UNPOOLED || process.env.POSTGRES_PRISMA_URL) });
   }
   if (route === 'me' && req.method === 'GET') {
     if (!user) return sendJson(res, 200, { authenticated: false });
@@ -960,7 +1067,8 @@ async function handleApi(parts, req, res) {
     return sendJson(res, 200, { ok: true, commands: await registerSlashCommands() });
   }
   if (route === 'roster' && req.method === 'GET') {
-    try { return sendJson(res, 200, await getRoster()); }
+    if (rateLimited(req, res, user, 'roster', 20)) return;
+    try { return sendJson(res, 200, rosterForViewer(await cached('roster', 120_000, getRoster), user)); }
     catch (error) { console.error('[roster]', cleanText(error.message, 200)); return sendError(res, 503, `تعذر تحميل قائمة الاستاف: ${cleanText(error.message, 200)}`); }
   }
 
@@ -980,29 +1088,60 @@ async function handleApi(parts, req, res) {
   const sql = await getSql();
 
 
+  if (route === 'notifications' && parts.length === 1 && req.method === 'GET') {
+    if (!canManage(user)) return sendError(res, 403, 'الإشعارات متاحة لمسؤولي الإدارة فقط.');
+    if (rateLimited(req, res, user, 'notifications', 30)) return;
+    const readRows = await sql`SELECT last_read_id::text AS last_read FROM admin_notification_reads WHERE user_id = ${user.id}`;
+    let lastRead;
+    if (readRows.length) lastRead = Number(readRows[0].last_read) || 0;
+    else {
+      // أول مرة يفتح فيها المسؤول الإشعارات: نبدأ من آخر إشعار موجود بدل ما نغرقه بتاريخ قديم.
+      const top = await sql`INSERT INTO admin_notification_reads(user_id, last_read_id) VALUES (${user.id}, (SELECT COALESCE(MAX(id), 0) FROM admin_notifications)) ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id RETURNING last_read_id::text AS last_read`;
+      lastRead = Number(top[0]?.last_read) || 0;
+    }
+    const [items, unread] = await Promise.all([
+      sql`SELECT id, type, title, body, ref_id AS "refId", created_at AS "createdAt" FROM admin_notifications WHERE actor_id IS DISTINCT FROM ${user.id} ORDER BY id DESC LIMIT 30`,
+      sql`SELECT COUNT(*)::int AS count FROM admin_notifications WHERE id > ${lastRead} AND actor_id IS DISTINCT FROM ${user.id}`,
+    ]);
+    return sendJson(res, 200, { unread: unread[0]?.count || 0, lastRead, items: items.map((row) => ({ id: Number(row.id), type: row.type, title: row.title, body: row.body, refId: row.refId === null ? null : Number(row.refId), createdAt: row.createdAt, unread: Number(row.id) > lastRead })) });
+  }
+  if (route === 'notifications' && parts[1] === 'read' && parts.length === 2 && req.method === 'POST') {
+    if (!canManage(user)) return sendError(res, 403, 'الإشعارات متاحة لمسؤولي الإدارة فقط.');
+    if (rateLimited(req, res, user, 'notifications', 30)) return;
+    await sql`INSERT INTO admin_notification_reads(user_id, last_read_id, updated_at) VALUES (${user.id}, (SELECT COALESCE(MAX(id), 0) FROM admin_notifications), NOW())
+      ON CONFLICT (user_id) DO UPDATE SET last_read_id = GREATEST(admin_notification_reads.last_read_id, EXCLUDED.last_read_id), updated_at = NOW()`;
+    return sendJson(res, 200, { ok: true });
+  }
+
   if (route === 'staff-stats' && parts.length === 1 && req.method === 'GET') {
-    await syncChannelMessageCounts(sql);
-    const stats = await getAllStaffStats(sql);
-    return sendJson(res, 200, { stats, dailyDate: (await getDailyStaffMessageStats(sql)).dailyDate });
+    if (rateLimited(req, res, user, 'staff-stats', 40)) return;
+    await syncChannelMessageCounts(sql, { budgetMs: 4000 });
+    const { stats, dailyDate } = await getAllStaffStats(sql);
+    return sendJson(res, 200, { stats: canManage(user) ? stats : stats.map(publicStats), dailyDate, restricted: !canManage(user) });
   }
   if (route === 'staff-stats' && parts.length === 2 && req.method === 'GET') {
     const targetId = cleanText(parts[1], 24);
     if (!/^\d{15,22}$/.test(targetId)) return sendError(res, 400, 'Discord ID غير صالح.');
-    await syncChannelMessageCounts(sql);
-    const allStats = await getAllStaffStats(sql);
+    if (rateLimited(req, res, user, 'staff-profile', 40)) return;
+    // الملف الكامل (إجازات، طلبات إدارية، سجل نقاط، تسليمات) لصاحب الحساب والمسؤولين فقط.
+    const fullAccess = canManage(user) || targetId === String(user.id);
+    await syncChannelMessageCounts(sql, { budgetMs: 4000 });
+    const { stats: allStats } = await getAllStaffStats(sql);
     const stats = allStats.find((row) => row.userId === targetId) || { userId: targetId, dailyMessages: 0, totalMessages: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, adminRequests: 0, online: false, lastSeen: null };
+    const noRows = Promise.resolve([]);
     const [submissionRows, leaveRows, dayRows, hourRows, spanRows, pointRows, requestRows] = await Promise.all([
-      sql`SELECT id, submitted_at AS "submittedAt", status, note FROM submissions WHERE user_id = ${targetId} ORDER BY submitted_at DESC LIMIT 10`,
-      sql`SELECT id, start_date AS "startDate", end_date AS "endDate", reason, status, created_at AS "createdAt", review_note AS "reviewNote" FROM leave_requests WHERE user_id = ${targetId} ORDER BY created_at DESC LIMIT 10`,
+      fullAccess ? sql`SELECT id, submitted_at AS "submittedAt", status, note FROM submissions WHERE user_id = ${targetId} ORDER BY submitted_at DESC LIMIT 10` : noRows,
+      fullAccess ? sql`SELECT id, start_date AS "startDate", end_date AS "endDate", reason, status, created_at AS "createdAt", review_note AS "reviewNote" FROM leave_requests WHERE user_id = ${targetId} ORDER BY created_at DESC LIMIT 10` : noRows,
       sql`SELECT to_char((created_at AT TIME ZONE 'Africa/Cairo')::date, 'YYYY-MM-DD') AS day, COUNT(*)::int AS count FROM discord_message_log WHERE channel_id = ${MESSAGE_COUNT_CHANNEL_ID} AND user_id = ${targetId} GROUP BY 1`,
       sql`SELECT EXTRACT(HOUR FROM created_at AT TIME ZONE 'Africa/Cairo')::int AS hour, COUNT(*)::int AS count FROM discord_message_log WHERE channel_id = ${MESSAGE_COUNT_CHANNEL_ID} AND user_id = ${targetId} GROUP BY 1`,
       sql`SELECT MIN(created_at) AS "firstAt", MAX(created_at) AS "lastAt" FROM discord_message_log WHERE channel_id = ${MESSAGE_COUNT_CHANNEL_ID} AND user_id = ${targetId}`,
-      sql`SELECT id, amount, reason, source, created_at AS "createdAt" FROM staff_points WHERE user_id = ${targetId} ORDER BY id DESC LIMIT 10`,
-      sql`SELECT id, request_type AS "requestType", subject, status, created_at AS "createdAt" FROM staff_requests WHERE user_id = ${targetId} ORDER BY created_at DESC LIMIT 5`,
+      fullAccess ? sql`SELECT id, amount, reason, source, created_at AS "createdAt" FROM staff_points WHERE user_id = ${targetId} ORDER BY id DESC LIMIT 10` : noRows,
+      fullAccess ? sql`SELECT id, request_type AS "requestType", subject, status, created_at AS "createdAt" FROM staff_requests WHERE user_id = ${targetId} ORDER BY created_at DESC LIMIT 5` : noRows,
     ]);
     const messageProfile = buildMessageProfile({ firstAt: spanRows[0]?.firstAt || null, lastAt: spanRows[0]?.lastAt || null, dayCounts: dayRows, hourCounts: hourRows });
     return sendJson(res, 200, {
-      stats,
+      stats: fullAccess ? stats : publicStats(stats),
+      restricted: !fullAccess,
       messageProfile,
       ranks: { messages: rankOf(allStats, targetId, 'totalMessages'), points: rankOf(allStats, targetId, 'totalPoints') },
       recentPoints: pointRows.map((row) => ({ ...row, id: Number(row.id), amount: Number(row.amount) || 0 })),
@@ -1024,6 +1163,7 @@ async function handleApi(parts, req, res) {
     const inserted = await sql`INSERT INTO staff_requests(user_id, username, avatar_url, request_type, subject, details, status, created_at)
       VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, ${requestType}, ${subject}, ${details}, 'pending', NOW()) RETURNING id`;
     const id = Number(inserted[0].id);
+    await pushAdminNotification(sql, { type: 'staff-request', title: `📨 طلب إداري جديد #${id}`, body: `${user.username} — ${subject}`, refId: id, actorId: user.id });
     let discordPosted = false;
     try {
       await postDiscordEmbed(STAFF_REQUEST_CHANNEL_ID, {
@@ -1062,8 +1202,9 @@ async function handleApi(parts, req, res) {
     const note = cleanText(req.body?.note, 400);
     const updated = await sql`UPDATE staff_requests SET status = ${status}, review_note = ${note}, reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id`;
     if (!updated.length) return sendError(res, 409, 'تمت مراجعة الطلب من مسؤول آخر بالفعل.');
+    const dm = await notifyReview({ token: BOT_TOKEN, userId: item.user_id, kind: 'request', status, id, reviewerId: user.id, note, fields: [{ name: '📝 عنوان الطلب', value: cleanText(item.subject, 200) || '—', inline: false }] });
     try { await postDiscordEmbed(STAFF_REQUEST_CHANNEL_ID, { title: status === 'approved' ? `✅ تمت الموافقة على الطلب الإداري #${id}` : `❌ تم رفض الطلب الإداري #${id}`, description: `نوع الطلب: ${item.request_type}\nالعنوان: ${item.subject}\nمقدم الطلب: <@${item.user_id}>\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}`, color: status === 'approved' ? 0x22c55e : 0xef4444, timestamp: new Date().toISOString() }); } catch (error) { console.error('[staff request review log]', cleanText(error.message, 180)); }
-    return sendJson(res, 200, { ok: true, status, message: status === 'approved' ? 'تمت الموافقة على الطلب الإداري.' : 'تم رفض الطلب الإداري.' });
+    return sendJson(res, 200, { ok: true, status, dmSent: dm.ok, message: `${status === 'approved' ? 'تمت الموافقة على الطلب الإداري.' : 'تم رفض الطلب الإداري.'}${dmNote(dm)}` });
   }
 
   if (route === 'tasks' && parts.length === 1 && req.method === 'GET') {
@@ -1191,6 +1332,7 @@ async function handleApi(parts, req, res) {
     const inserted = await sql`INSERT INTO leave_requests(user_id, username, avatar_url, start_date, end_date, reason, status, created_at)
       VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, ${startDate}, ${endDate}, ${reason}, 'pending', NOW()) RETURNING id, created_at`;
     const id = Number(inserted[0].id);
+    await pushAdminNotification(sql, { type: 'leave', title: `🗓️ طلب إجازة جديد #${id}`, body: `${user.username} — من ${startDate} إلى ${endDate}`, refId: id, actorId: user.id });
     let discordPosted = false;
     try {
       const posted = await discordApi(`/channels/${LEAVE_REQUEST_CHANNEL_ID}/messages`, {
@@ -1224,6 +1366,7 @@ async function handleApi(parts, req, res) {
     const rows = await sql`UPDATE leave_requests SET status = ${status}, review_note = ${note}, reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id, user_id, username, avatar_url, start_date, end_date, reason, discord_message_id, discord_channel_id`;
     if (!rows.length) return sendError(res, 409, 'الطلب غير موجود أو تمت مراجعته بالفعل. حدّث القائمة للتأكد من حالته.');
     const item = rows[0];
+    const dmPromise = notifyReview({ token: BOT_TOKEN, userId: item.user_id, kind: 'leave', status, id, reviewerId: user.id, note, fields: [{ name: '📅 الفترة', value: `${String(item.start_date).slice(0, 10)} ← ${String(item.end_date).slice(0, 10)}`, inline: false }] });
     if (status === 'approved') { try { await require('./_lib/leave-roles.js').syncLeaveRoles({ sql, token: BOT_TOKEN }); } catch (error) { console.error('[leave roles sync]', cleanText(error.message, 200)); } }
     const hasOriginalMessage = Boolean(item.discord_message_id);
     let originalMessageUpdated = !hasOriginalMessage;
@@ -1254,8 +1397,9 @@ async function handleApi(parts, req, res) {
       reviewLogPosted = true;
     } catch (error) { console.error('[leave review log]', cleanText(error.message, 180)); }
     const discordPosted = hasOriginalMessage ? originalMessageUpdated : reviewLogPosted;
+    const dm = await dmPromise;
     const baseMessage = status === 'approved' ? 'تمت الموافقة على طلب الإجازة.' : 'تم رفض طلب الإجازة.';
-    return sendJson(res, 200, { ok: true, discordPosted, message: discordPosted ? baseMessage : `${baseMessage} لكن تعذر تحديث رسالة الطلب في ديسكورد. راجع صلاحيات البوت.` });
+    return sendJson(res, 200, { ok: true, discordPosted, dmSent: dm.ok, message: `${discordPosted ? baseMessage : `${baseMessage} لكن تعذر تحديث رسالة الطلب في ديسكورد. راجع صلاحيات البوت.`}${dmNote(dm)}` });
   }
 
   if (route === 'submissions' && parts.length === 1 && req.method === 'POST') {
@@ -1292,6 +1436,7 @@ async function handleApi(parts, req, res) {
       VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, ${note}, ${JSON.stringify(links)}::jsonb, ${JSON.stringify(files)}::jsonb, NOW(), 'pending') RETURNING id, submitted_at`;
     const submissionId = Number(inserted[0].id);
     for (const taskId of taskIds) await sql`INSERT INTO submission_tasks(submission_id, task_id) VALUES (${submissionId}, ${taskId}) ON CONFLICT DO NOTHING`;
+    await pushAdminNotification(sql, { type: 'submission', title: `📨 تسليم جديد #${submissionId}`, body: `${user.username} — ${foundTasks.length} مهمة${files.length ? ` · ${files.length} ملف` : ''}`, refId: submissionId, actorId: user.id });
     const base = siteUrl(req);
     const taskText = foundTasks.map((task) => `• ${task.required ? '🔴 إجباري' : '⚪ اختياري'} — **${cleanText(task.title, 140)}** — ${formatPoints(task.points)} نقطة`).join('\n').slice(0, 1024) || 'لم يتم تحديد مهمة.';
     const fileText = files.map((file) => `• [${cleanText(file.originalName, 120)}](${base}/api/evidence?token=${encodeURIComponent(file.token)})`).join('\n').slice(0, 1024) || 'لا توجد ملفات مرفوعة.';
@@ -1393,7 +1538,9 @@ async function handleApi(parts, req, res) {
     if (sub.status !== 'pending') return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
     if (parts[2] === 'reject') {
       const reason = cleanText(req.body?.reason, 300);
-      await sql`UPDATE submissions SET status = 'rejected', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending'`;
+      const rejected = await sql`UPDATE submissions SET status = 'rejected', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id`;
+      if (!rejected.length) return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
+      const dmPromise = notifyReview({ token: BOT_TOKEN, userId: sub.user_id, kind: 'submission', status: 'rejected', id, reviewerId: user.id, note: reason });
       try {
         await postDiscordEmbed(POINTS_LOG_CHANNEL_ID, {
           title: '❌ تم رفض تسليم مهمة',
@@ -1408,7 +1555,8 @@ async function handleApi(parts, req, res) {
           timestamp: new Date().toISOString(),
         });
       } catch (e) { console.error('[submission reject log]', cleanText(e.message, 180)); }
-      return sendJson(res, 200, { ok: true, status: 'rejected' });
+      const dm = await dmPromise;
+      return sendJson(res, 200, { ok: true, status: 'rejected', dmSent: dm.ok, message: `تم رفض التسليم.${dmNote(dm)}` });
     }
     const taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${id}`;
     const amount = Math.round(taskRows.reduce((sum, t) => sum + Number(t.points || 0), 0) * 100) / 100;
@@ -1434,29 +1582,52 @@ async function handleApi(parts, req, res) {
         timestamp: new Date().toISOString(),
       });
     } catch (e) { console.error('[submission approve log]', cleanText(e.message, 180)); }
-    return sendJson(res, 200, { ok: true, status: 'approved', awarded: amount });
+    const dm = await notifyReview({ token: BOT_TOKEN, userId: sub.user_id, kind: 'submission', status: 'approved', id, reviewerId: user.id, fields: [
+      { name: '💎 النقاط المضافة', value: `**+${formatPoints(amount)} نقطة**`, inline: true },
+      { name: '📊 رصيدك الحالي', value: `**${formatPoints(totalAfter)} نقطة**`, inline: true },
+      { name: '📋 المهمات', value: taskSummary, inline: false },
+    ] });
+    return sendJson(res, 200, { ok: true, status: 'approved', awarded: amount, dmSent: dm.ok, message: `تم اعتماد التسليم وإضافة ${formatPoints(amount)} نقطة.${dmNote(dm)}` });
   }
   if (route === 'chat' && parts.length === 2 && req.method === 'GET') {
     const room = parts[1];
     if (!['staff', 'management'].includes(room)) return sendError(res, 404, 'غرفة الشات مش موجودة.');
     if (!canReadRoom(user, room)) return sendError(res, 403, 'الشات ده مخصص للمسؤولين.');
+    if (rateLimited(req, res, user, 'chat-get', 40)) return;
+    // الاستعلام الدوري (after=<آخر id>) بيجيب الجديد فقط، من غير مزامنة Discord ولا إحصائيات — ده كان أكبر مصدر ضغط.
+    const afterRaw = queryParam(req, 'after');
+    const after = afterRaw !== null && /^\d{1,15}$/.test(afterRaw) ? Number(afterRaw) : null;
+    const mapMessage = (row) => ({ id: Number(row.id), room: row.room, userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, content: row.content, createdAt: row.created_at });
+    if (after !== null) {
+      const fresh = await sql`SELECT * FROM chat_messages WHERE room = ${room} AND id > ${after} ORDER BY id ASC LIMIT 100`;
+      return sendJson(res, 200, { messages: fresh.map(mapMessage), incremental: true });
+    }
     const rows = await sql`SELECT * FROM (SELECT * FROM chat_messages WHERE room = ${room} ORDER BY id DESC LIMIT 100) AS recent ORDER BY id ASC`;
-    if (room === 'staff') await syncChannelMessageCounts(sql);
+    if (room === 'staff') await syncChannelMessageCounts(sql, { budgetMs: 4000 });
     const dailyStats = room === 'staff' ? await getDailyStaffMessageStats(sql) : {};
-    return sendJson(res, 200, { messages: rows.map((row) => ({ id: Number(row.id), room: row.room, userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, content: row.content, createdAt: row.created_at })), ...dailyStats });
+    return sendJson(res, 200, { messages: rows.map(mapMessage), ...dailyStats });
   }
   if (route === 'presence' && parts.length === 1 && req.method === 'POST') {
-    await sql`INSERT INTO site_presence(user_id, username, avatar_url, last_seen) VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, NOW()) ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, avatar_url = EXCLUDED.avatar_url, last_seen = NOW()`;
+    if (rateLimited(req, res, user, 'presence-post', 20)) return;
+    // نكتب في الداتابيز بس لو آخر نبضة أقدم من 40 ثانية (بدل كتابة مع كل طلب).
+    await sql`INSERT INTO site_presence(user_id, username, avatar_url, last_seen) VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, NOW())
+      ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, avatar_url = EXCLUDED.avatar_url, last_seen = NOW()
+      WHERE site_presence.last_seen < NOW() - INTERVAL '40 seconds' OR site_presence.username IS DISTINCT FROM EXCLUDED.username`;
     return sendJson(res, 200, { ok: true });
   }
   if (route === 'presence' && parts.length === 1 && req.method === 'GET') {
-    const rows = await sql`SELECT user_id AS "userId", username, avatar_url AS "avatarUrl", last_seen AS "lastSeen" FROM site_presence WHERE last_seen > NOW() - INTERVAL '90 seconds' ORDER BY username`;
-    return sendJson(res, 200, { online: rows.map(row => ({ userId: row.userId, username: row.username, avatarUrl: row.avatarUrl, lastSeen: row.lastSeen })) });
+    if (rateLimited(req, res, user, 'presence-get', 20)) return;
+    const online = await cached('presence', 10_000, async () => {
+      const rows = await sql`SELECT user_id AS "userId", username, avatar_url AS "avatarUrl", last_seen AS "lastSeen" FROM site_presence WHERE last_seen > NOW() - make_interval(secs => ${PRESENCE_WINDOW_SECONDS}::int) ORDER BY username`;
+      return rows.map((row) => ({ userId: row.userId, username: row.username, avatarUrl: row.avatarUrl, lastSeen: row.lastSeen }));
+    });
+    return sendJson(res, 200, { online });
   }
   if (route === 'chat' && parts.length === 2 && req.method === 'POST') {
     const room = parts[1];
     if (!['staff', 'management'].includes(room)) return sendError(res, 404, 'غرفة الشات مش موجودة.');
     if (!canReadRoom(user, room)) return sendError(res, 403, 'الشات ده مخصص للمسؤولين.');
+    if (rateLimited(req, res, user, 'chat-post', 20)) return;
     const content = cleanText(req.body?.content, 1500);
     if (!content) return sendError(res, 400, 'اكتب رسالة قبل الإرسال.');
     const rows = await sql`INSERT INTO chat_messages(room, user_id, username, avatar_url, content, created_at) VALUES (${room}, ${user.id}, ${user.username}, ${user.avatarUrl || null}, ${content}, NOW()) RETURNING id, created_at`;
