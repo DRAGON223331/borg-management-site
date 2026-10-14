@@ -476,7 +476,9 @@ async function submitTasks(event) {
       const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-100) || 'evidence-file';
       const pathname = `evidence/${state.user.id}/${Date.now()}-${index}-${safeName}`;
       button.textContent = `جاري رفع الملف ${index + 1} من ${files.length}...`;
-      const blob = await uploadToBlob(pathname, file, {
+      let blob;
+      try {
+      blob = await uploadToBlob(pathname, file, {
         access: 'private',
         handleUploadUrl: '/api/uploads/token',
         multipart: file.size > 5 * 1024 * 1024,
@@ -486,6 +488,7 @@ async function submitTasks(event) {
           button.textContent = `رفع الملف ${index + 1}/${files.length} · ${percentage}%`;
         },
       });
+      } catch (uploadError) { throw new Error(await explainUploadError(uploadError, pathname)); }
       uploadedFiles.push({ pathname: blob.pathname, originalName: file.name, mimeType: file.type, size: file.size });
     }
     button.textContent = 'جاري تسجيل التسليم...';
@@ -507,6 +510,27 @@ async function submitTasks(event) {
     await Promise.all([loadTasks(), loadSubmissions()]);
   } catch (error) { showToast(error.message, 'error'); }
   finally { setButtonLoading(button, false); }
+}
+async function explainUploadError(error, pathname) {
+  const message = String(error?.message || '');
+  if (!/client token|upload/i.test(message)) return message || 'فشل رفع الملف.';
+  try {
+    const response = await fetch('/api/uploads/token', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'blob.generate-client-token', payload: { pathname, clientPayload: null, multipart: false } }),
+    });
+    const text = await response.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch { /* not json */ }
+    if (data?.error) return `فشل رفع الملف: ${data.error}`;
+    if (!response.ok) return `فشل رفع الملف: السيرفر رد بحالة ${response.status}. راجع Vercel → Logs.`;
+    if (!data?.clientToken) return 'فشل رفع الملف: رد السيرفر مش JSON صالح (غالبًا مسار /api/uploads/token مش واصل للـ API). أعد النشر وتأكد إن فولدر api/ مرفوع.';
+    return 'فشل رفع الملف مؤقتًا، جرّب تاني.';
+  } catch (probeError) {
+    return `فشل رفع الملف: تعذر الاتصال بالسيرفر (${probeError.message}).`;
+  }
 }
 async function loadSubmissions() {
   try {

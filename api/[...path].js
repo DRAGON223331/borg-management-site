@@ -881,13 +881,36 @@ async function handleAuth(parts, req, res) {
   sendError(res, 404, 'المسار غير موجود.');
 }
 
+// يدور على توكن Blob حتى لو الـ Store اتربط باسم متغير مختلف (مثلاً بـ Prefix مخصص).
+function blobToken() {
+  if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN.trim();
+  for (const [name, value] of Object.entries(process.env)) {
+    if (/BLOB_READ_WRITE_TOKEN$/.test(name) && String(value || '').startsWith('vercel_blob_rw_')) return String(value).trim();
+  }
+  return '';
+}
+async function readJsonBody(req) {
+  if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) return req.body;
+  if (typeof req.body === 'string' && req.body) { try { return JSON.parse(req.body); } catch { return {}; } }
+  if (Buffer.isBuffer(req.body) && req.body.length) { try { return JSON.parse(req.body.toString('utf8')); } catch { return {}; } }
+  try {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const raw = Buffer.concat(chunks).toString('utf8');
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
 async function handleUploadToken(req, res) {
   if (req.method !== 'POST') return sendError(res, 405, 'الطريقة غير مدعومة.');
   if (!blobClientSdkPromise) blobClientSdkPromise = import('@vercel/blob/client');
   const { handleUpload } = await blobClientSdkPromise;
-  const body = req.body || {};
+  const token = blobToken();
+  if (!token) return sendError(res, 503, 'تخزين الملفات (Vercel Blob) مش مربوط بالمشروع: أنشئ Blob Store واربطه بالمشروع ثم أعد النشر (Redeploy).');
+  const body = await readJsonBody(req);
   try {
     const result = await handleUpload({
+      token,
       body,
       request: req,
       onBeforeGenerateToken: async (pathname) => {
@@ -906,10 +929,6 @@ async function handleUploadToken(req, res) {
           maximumSizeInBytes: MAX_UPLOAD_MB * 1024 * 1024,
           tokenPayload: JSON.stringify({ userId: user.id }),
         };
-      },
-      onUploadCompleted: async ({ blob, tokenPayload }) => {
-        // Files are attached to a submission in /api/submissions; abandoned uploads can be removed from Blob storage later.
-        if (!blob?.pathname || !tokenPayload) throw new Error('تعذر تأكيد رفع الملف.');
       },
     });
     return sendJson(res, 200, result);
@@ -933,7 +952,7 @@ async function sendPrivateEvidence(req, res) {
   if (!file?.pathname) return sendError(res, 404, 'الملف غير موجود.');
   if (!blobSdkPromise) blobSdkPromise = import('@vercel/blob');
   const { get } = await blobSdkPromise;
-  const result = await get(file.pathname, { access: 'private' });
+  const result = await get(file.pathname, { access: 'private', token: blobToken() || undefined });
   if (!result || result.statusCode !== 200 || !result.stream) return sendError(res, 404, 'الملف غير موجود في التخزين.');
   res.statusCode = 200;
   res.setHeader('Content-Type', file.mimeType || result.blob.contentType || 'application/octet-stream');
@@ -1041,7 +1060,7 @@ async function handleApi(parts, req, res) {
       commandsRegisteredAt = Date.now() - 5 * 60 * 60 * 1000; // لو فشل التسجيل يعيد المحاولة بعد ساعة
       try { await registerSlashCommands(); } catch (error) { console.error('[register commands]', cleanText(error?.message || error, 200)); }
     }
-    return sendJson(res, 200, { ok: true, botReady, ...(canManage(user) ? { botLastError: bot.error } : {}), storageReady: Boolean(process.env.BLOB_READ_WRITE_TOKEN), databaseReady: Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || process.env.DATABASE_URL_UNPOOLED || process.env.POSTGRES_PRISMA_URL) });
+    return sendJson(res, 200, { ok: true, botReady, ...(canManage(user) ? { botLastError: bot.error } : {}), storageReady: Boolean(blobToken()), databaseReady: Boolean(process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || process.env.DATABASE_URL_UNPOOLED || process.env.POSTGRES_PRISMA_URL) });
   }
   if (route === 'me' && req.method === 'GET') {
     if (!user) return sendJson(res, 200, { authenticated: false });
