@@ -47,6 +47,7 @@
       <nav class="top-nav" aria-label="التنقل الرئيسي">
         <button class="nav-tab active" data-page="overview"><span>⌂</span> الرئيسية</button>
         <button class="nav-tab" data-page="tasks"><span>✓</span> المهمات</button>
+        <button class="nav-tab" data-page="personal"><span>☺</span> شخصي</button>
         <button class="nav-tab" data-page="staff-chat"><span>☷</span> شات الاستاف</button>
         <button class="nav-tab manager-only hidden" data-page="management-chat"><span>♧</span> شات المسؤولين</button>
       </nav>
@@ -196,6 +197,11 @@
         <section id="page-staff-profile" class="page staff-profile-page">
           <div class="staff-profile-toolbar"><button id="staff-profile-back" type="button" class="secondary-button">→ الرجوع للرئيسية</button><span class="tiny-label">FULL STAFF PROFILE</span></div>
           <div id="staff-profile-content"><div class="loading-state">اختار عضوًا من قائمة الاستاف لفتح ملفه.</div></div>
+        </section>
+
+        <section id="page-personal" class="page staff-profile-page">
+          <div class="staff-profile-toolbar"><span class="tiny-label">MY PERSONAL STATS</span><button id="personal-refresh-btn" type="button" class="text-button">تحديث ↻</button></div>
+          <div id="personal-content"><div class="loading-state">جاري تحميل إحصائياتك...</div></div>
         </section>
 
         <section id="page-staff-chat" class="page chat-page">

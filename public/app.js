@@ -165,6 +165,7 @@ function wireNavigation() {
   const chip = $('.profile-chip');
   if (chip) { chip.style.cursor = 'pointer'; chip.title = 'افتح ملفي الكامل'; chip.addEventListener('click', () => state.user?.id && openStaffProfile(state.user.id)); }
   $$('.nav-tab').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.page)));
+  $('#personal-refresh-btn')?.addEventListener('click', () => loadPersonal(true));
   $$('[data-go]').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.go)));
   $('#logout-btn').addEventListener('click', async () => {
     try { await api('/api/auth/logout', { method: 'POST' }); }
@@ -181,6 +182,7 @@ function openPage(page) {
   if (page === 'staff-chat') loadChat('staff');
   if (page === 'management-chat') loadChat('management');
   if (page === 'staff-profile') loadStaffProfile(state.activeStaffProfileId);
+  if (page === 'personal') loadPersonal();
   if (page === 'tasks') {
     loadTasks();
     loadSubmissions();
@@ -714,6 +716,20 @@ async function loadStaffProfile(userId, providedMember = null) {
     $('#staff-profile-content').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
   }
 }
+async function loadPersonal(force = false) {
+  const me = state.user;
+  const box = $('#personal-content');
+  if (!me?.id || !box) return;
+  if (force || !box.querySelector('.pf-hero')) box.innerHTML = '<div class="loading-state">جاري تحميل إحصائياتك...</div>';
+  try {
+    const response = await api(`/api/staff-stats/${encodeURIComponent(me.id)}`);
+    if (!$('#page-personal')?.classList.contains('active-page')) return;
+    const member = findStaffProfileMember(me.id) || { id: String(me.id), username: me.username || String(me.id), handle: me.handle || String(me.id), avatarUrl: me.avatarUrl || avatarFallback(me.id), roleName: 'عضو الاستاف', roles: [], isAdmin: Boolean(me.isAdmin) };
+    renderStaffProfile(member, response, '#personal-content');
+  } catch (error) {
+    box.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
+  }
+}
 function snowflakeDate(id) {
   try { return new Date(Number((BigInt(id) >> 22n) + 1420070400000n)); } catch { return null; }
 }
@@ -721,7 +737,9 @@ function hourLabel(hour) {
   if (hour === null || hour === undefined) return '—';
   return hour === 0 ? '12 ص' : hour < 12 ? `${hour} ص` : hour === 12 ? '12 م' : `${hour - 12} م`;
 }
-function renderStaffProfile(member, response = {}) {
+function renderStaffProfile(member, response = {}, target = '#staff-profile-content') {
+  const root = $(target);
+  if (!root) return;
   const stats = response.stats || {};
   const mp = response.messageProfile || { total: 0, today: 0, week: 0, month: 0, avgPerDay: 0, activeDays: 0, activity: [], hours: [] };
   const ranks = response.ranks || {};
@@ -760,7 +778,7 @@ function renderStaffProfile(member, response = {}) {
   const leavesHtml = leaves.length ? leaves.map((item) => `<article class="profile-history-row"><div><b>طلب إجازة #${Number(item.id)}</b><small>${escapeHtml(item.startDate)} — ${escapeHtml(item.endDate)}</small><p>${escapeHtml(item.reason)}</p></div><span class="task-tag ${statusClass(item.status)}">${statusText[item.status] || 'بانتظار المراجعة'}</span></article>`).join('') : '<div class="task-empty">لا توجد طلبات إجازة.</div>';
   const requestsHtml = requests.length ? requests.map((item) => `<article class="profile-history-row"><div><b>${escapeHtml(item.subject)}</b><small>${escapeHtml(typeText[item.requestType] || item.requestType)} · ${dateTime(item.createdAt)}</small></div><span class="task-tag ${statusClass(item.status)}">${statusText[item.status] || 'بانتظار المراجعة'}</span></article>`).join('') : '<div class="task-empty">لا توجد طلبات إدارية.</div>';
 
-  $('#staff-profile-content').innerHTML = `
+  root.innerHTML = `
     <div class="pf-hero" style="--pf-accent:${color}">
       <div class="pf-cover"></div>
       <div class="pf-hero-body">
@@ -814,7 +832,7 @@ function renderStaffProfile(member, response = {}) {
     <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">SUBMISSION HISTORY</span><h2>آخر التسليمات</h2></div></div><div class="profile-history-list">${submissionsHtml}</div></section>
     <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">LEAVE HISTORY</span><h2>طلبات الإجازة</h2></div></div><div class="profile-history-list">${leavesHtml}</div></section>
     <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">ADMIN REQUESTS</span><h2>الطلبات الإدارية</h2></div></div><div class="profile-history-list">${requestsHtml}</div></section>`;
-  $('[data-copy-id]', $('#staff-profile-content'))?.addEventListener('click', async (event) => {
+  $('[data-copy-id]', root)?.addEventListener('click', async (event) => {
     const id = event.currentTarget.dataset.copyId;
     try { await navigator.clipboard.writeText(id); showToast(`تم نسخ Discord ID: ${id}`, 'success'); } catch { showToast(id, 'info'); }
   });
