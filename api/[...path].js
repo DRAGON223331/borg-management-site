@@ -16,6 +16,7 @@ const MANAGEMENT_STAFF_ROLE_ID = process.env.MANAGEMENT_STAFF_ROLE_ID || '155962
 const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 const TASK_PING_ROLE_ID = (process.env.TASK_PING_ROLE_ID || '1556647362062188544').trim(); // رتبة بتتمنشن مع كل مهمات جديدة
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
+const TASK_APPROVED_CHANNEL_ID = (process.env.TASK_APPROVED_CHANNEL_ID || process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504').trim(); // روم رسالة "المهمة اتقبلت" العادية
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
 const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
 const LEAVE_REQUEST_CHANNEL_ID = '1556945732957765722'; // ثابت: روم طلبات الإجازة ومراجعتها
@@ -549,7 +550,7 @@ async function discordApi(route, options = {}) {
     ...options,
     headers: {
       Authorization: `Bot ${BOT_TOKEN}`,
-      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(options.body && !(options.body instanceof FormData) ? { 'Content-Type': 'application/json' } : {}),
       ...(options.headers || {}),
     },
   });
@@ -715,6 +716,47 @@ async function postDiscordEmbed(channelId, embed) {
     method: 'POST',
     body: JSON.stringify({ embeds: [embed], allowed_mentions: { parse: [] } }),
   });
+}
+// رسالة عادية (مش Embed) بعد قبول التسليم: مين عمل المهمة + مين قبلها + الصور/الفيديوهات المرفقة.
+async function postApprovedSubmissionMessage({ req, submissionId, sub, reviewer, taskRows }) {
+  const MAX_TOTAL = 9 * 1024 * 1024; // حد آمن لحجم المرفقات في رسالة ديسكورد الواحدة
+  const files = parseJson(sub.files_json, []);
+  const attachments = [];
+  const linkOnly = [];
+  let total = 0;
+  if (files.length) {
+    if (!blobSdkPromise) blobSdkPromise = import('@vercel/blob');
+    const { get } = await blobSdkPromise;
+    for (const file of files) {
+      const size = Number(file.size || 0);
+      const link = `${siteUrl(req)}/api/evidence?token=${encodeURIComponent(file.token)}`;
+      if (attachments.length >= 10 || total + size > MAX_TOTAL) { linkOnly.push(`• ${cleanText(file.originalName, 100)}: ${link}`); continue; }
+      try {
+        const result = await get(file.pathname, { access: 'private', token: blobToken() || undefined });
+        if (!result || result.statusCode !== 200 || !result.stream) throw new Error('missing blob');
+        const data = Buffer.from(await new Response(result.stream).arrayBuffer());
+        if (total + data.length > MAX_TOTAL) { linkOnly.push(`• ${cleanText(file.originalName, 100)}: ${link}`); continue; }
+        total += data.length;
+        attachments.push({ name: cleanText(file.originalName, 100).replace(/[^\w.\-]/g, '_') || `evidence-${attachments.length + 1}`, type: file.mimeType || 'application/octet-stream', data });
+      } catch (error) {
+        console.error('[approved msg attachment]', cleanText(error.message, 160));
+        linkOnly.push(`• ${cleanText(file.originalName, 100)}: ${link}`);
+      }
+    }
+  }
+  const tasksLine = taskRows.map((t) => `**${cleanText(t.title, 120)}**`).join('، ').slice(0, 600) || 'مهمة';
+  let content = `✅ **تم قبول مهمة**\n📋 **المهمة:** ${tasksLine}\n👤 **اللي عملها:** <@${sub.user_id}>\n🛡️ **اللي قبلها:** <@${reviewer.id}>`;
+  if (linkOnly.length) content += `\n\n📎 **مرفقات كبيرة:**\n${linkOnly.join('\n')}`;
+  content = content.slice(0, 1990);
+  const payload = { content, allowed_mentions: { parse: [] } };
+  if (!attachments.length) {
+    return discordApi(`/channels/${TASK_APPROVED_CHANNEL_ID}/messages`, { method: 'POST', body: JSON.stringify(payload) });
+  }
+  const form = new FormData();
+  payload.attachments = attachments.map((file, index) => ({ id: index, filename: file.name }));
+  form.append('payload_json', JSON.stringify(payload));
+  attachments.forEach((file, index) => form.append(`files[${index}]`, new Blob([file.data], { type: file.type }), file.name));
+  return discordApi(`/channels/${TASK_APPROVED_CHANNEL_ID}/messages`, { method: 'POST', body: form });
 }
 function buildLeaveEmbed(item, status = 'pending', reviewerId = '', note = '') {
   const id = Number(item.id);
@@ -1601,6 +1643,7 @@ async function handleApi(parts, req, res) {
         timestamp: new Date().toISOString(),
       });
     } catch (e) { console.error('[submission approve log]', cleanText(e.message, 180)); }
+    try { await postApprovedSubmissionMessage({ req, submissionId: id, sub, reviewer: user, taskRows }); } catch (e) { console.error('[submission approved message]', cleanText(e.message, 200)); }
     const dm = await notifyReview({ token: BOT_TOKEN, userId: sub.user_id, kind: 'submission', status: 'approved', id, reviewerId: user.id, fields: [
       { name: '💎 النقاط المضافة', value: `**+${formatPoints(amount)} نقطة**`, inline: true },
       { name: '📊 رصيدك الحالي', value: `**${formatPoints(totalAfter)} نقطة**`, inline: true },
