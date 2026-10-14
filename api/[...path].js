@@ -366,6 +366,42 @@ async function registerSlashCommands() {
   commandsRegisteredAt = Date.now();
   return (registered || []).map((c) => c.name);
 }
+
+// ───────── بيانات صفحة بروفايل العضو ─────────
+function cairoTodayString() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+}
+function shiftDayString(day, delta) {
+  const date = new Date(`${day}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + delta);
+  return date.toISOString().slice(0, 10);
+}
+// dayCounts: [{day:'YYYY-MM-DD' (بتوقيت القاهرة), count}] — hourCounts: [{hour:0-23 (بتوقيت القاهرة), count}]
+function buildMessageProfile({ firstAt = null, lastAt = null, dayCounts = [], hourCounts = [] } = {}) {
+  const byDay = new Map(dayCounts.map((row) => [String(row.day).slice(0, 10), Number(row.count) || 0]));
+  const today = cairoTodayString();
+  const sumDays = (n) => { let sum = 0; for (let i = 0; i < n; i += 1) sum += byDay.get(shiftDayString(today, -i)) || 0; return sum; };
+  const total = [...byDay.values()].reduce((a, b) => a + b, 0);
+  const activity = Array.from({ length: 14 }, (_, i) => { const date = shiftDayString(today, -(13 - i)); return { date, count: byDay.get(date) || 0 }; });
+  const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, count: 0 }));
+  for (const row of hourCounts) { const hour = Number(row.hour); if (Number.isInteger(hour) && hour >= 0 && hour < 24) hours[hour].count = Number(row.count) || 0; }
+  const topHour = hours.reduce((best, cur) => (cur.count > best.count ? cur : best), { hour: null, count: 0 });
+  let busiestDay = null;
+  for (const [date, count] of byDay) if (!busiestDay || count > busiestDay.count) busiestDay = { date, count };
+  let avgPerDay = 0;
+  if (total && byDay.size) {
+    const firstDay = [...byDay.keys()].sort()[0];
+    const spanDays = Math.max(1, Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${firstDay}T00:00:00Z`)) / 86400000) + 1);
+    avgPerDay = Math.round((total / spanDays) * 10) / 10;
+  }
+  return { total, today: byDay.get(today) || 0, week: sumDays(7), month: sumDays(30), avgPerDay, activeDays: byDay.size, firstAt, lastAt, busiestHour: topHour.count ? topHour.hour : null, busiestDay, activity, hours };
+}
+function rankOf(allStats, userId, field) {
+  const rows = allStats.filter((row) => Number(row[field]) > 0).sort((a, b) => Number(b[field]) - Number(a[field]));
+  const index = rows.findIndex((row) => String(row.userId) === String(userId));
+  return { rank: index >= 0 ? index + 1 : null, of: rows.length };
+}
+
 async function getDailyStaffMessageStats(sql) {
   const [rows, todayRows] = await Promise.all([
     sql`SELECT user_id AS "userId", MAX(username) AS username, COUNT(*)::integer AS count
@@ -781,6 +817,8 @@ async function getRoster() {
       id: member.user.id,
       username: mainMember?.nick || member.nick || member.user.global_name || member.user.username,
       handle: member.user.username,
+      joinedAt: member.joined_at || null,
+      mainJoinedAt: mainMember?.joined_at || null,
       avatarUrl: avatar,
       roleName: highest?.name || (mainMember ? 'بدون رتبة في السيرفر الأساسي' : 'مش موجود في السيرفر الأساسي'),
       roleId: highest?.id || (mainMember ? 'none' : 'not-in-main'),
@@ -869,11 +907,25 @@ async function handleApi(parts, req, res) {
     await syncChannelMessageCounts(sql);
     const allStats = await getAllStaffStats(sql);
     const stats = allStats.find((row) => row.userId === targetId) || { userId: targetId, dailyMessages: 0, totalMessages: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, adminRequests: 0, online: false, lastSeen: null };
-    const [submissionRows, leaveRows] = await Promise.all([
+    const [submissionRows, leaveRows, dayRows, hourRows, spanRows, pointRows, requestRows] = await Promise.all([
       sql`SELECT id, submitted_at AS "submittedAt", status, note FROM submissions WHERE user_id = ${targetId} ORDER BY submitted_at DESC LIMIT 10`,
       sql`SELECT id, start_date AS "startDate", end_date AS "endDate", reason, status, created_at AS "createdAt", review_note AS "reviewNote" FROM leave_requests WHERE user_id = ${targetId} ORDER BY created_at DESC LIMIT 10`,
+      sql`SELECT to_char((created_at AT TIME ZONE 'Africa/Cairo')::date, 'YYYY-MM-DD') AS day, COUNT(*)::int AS count FROM discord_message_log WHERE channel_id = ${MESSAGE_COUNT_CHANNEL_ID} AND user_id = ${targetId} GROUP BY 1`,
+      sql`SELECT EXTRACT(HOUR FROM created_at AT TIME ZONE 'Africa/Cairo')::int AS hour, COUNT(*)::int AS count FROM discord_message_log WHERE channel_id = ${MESSAGE_COUNT_CHANNEL_ID} AND user_id = ${targetId} GROUP BY 1`,
+      sql`SELECT MIN(created_at) AS "firstAt", MAX(created_at) AS "lastAt" FROM discord_message_log WHERE channel_id = ${MESSAGE_COUNT_CHANNEL_ID} AND user_id = ${targetId}`,
+      sql`SELECT id, amount, reason, source, created_at AS "createdAt" FROM staff_points WHERE user_id = ${targetId} ORDER BY id DESC LIMIT 10`,
+      sql`SELECT id, request_type AS "requestType", subject, status, created_at AS "createdAt" FROM staff_requests WHERE user_id = ${targetId} ORDER BY created_at DESC LIMIT 5`,
     ]);
-    return sendJson(res, 200, { stats, recentSubmissions: submissionRows.map((row) => ({ ...row, id: Number(row.id) })), recentLeaves: leaveRows.map((row) => ({ ...row, id: Number(row.id), startDate: String(row.startDate).slice(0,10), endDate: String(row.endDate).slice(0,10) })) });
+    const messageProfile = buildMessageProfile({ firstAt: spanRows[0]?.firstAt || null, lastAt: spanRows[0]?.lastAt || null, dayCounts: dayRows, hourCounts: hourRows });
+    return sendJson(res, 200, {
+      stats,
+      messageProfile,
+      ranks: { messages: rankOf(allStats, targetId, 'totalMessages'), points: rankOf(allStats, targetId, 'totalPoints') },
+      recentPoints: pointRows.map((row) => ({ ...row, id: Number(row.id), amount: Number(row.amount) || 0 })),
+      recentRequests: requestRows.map((row) => ({ ...row, id: Number(row.id) })),
+      recentSubmissions: submissionRows.map((row) => ({ ...row, id: Number(row.id) })),
+      recentLeaves: leaveRows.map((row) => ({ ...row, id: Number(row.id), startDate: String(row.startDate).slice(0, 10), endDate: String(row.endDate).slice(0, 10) })),
+    });
   }
 
   if (route === 'staff-requests' && parts.length === 1 && req.method === 'POST') {

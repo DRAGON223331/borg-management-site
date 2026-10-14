@@ -162,6 +162,8 @@ function renderProfile() {
 
 function wireNavigation() {
   $('#staff-profile-back')?.addEventListener('click', () => { state.activeStaffProfileId = null; openPage('overview'); });
+  const chip = $('.profile-chip');
+  if (chip) { chip.style.cursor = 'pointer'; chip.title = 'افتح ملفي الكامل'; chip.addEventListener('click', () => state.user?.id && openStaffProfile(state.user.id)); }
   $$('.nav-tab').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.page)));
   $$('[data-go]').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.go)));
   $('#logout-btn').addEventListener('click', async () => {
@@ -674,6 +676,7 @@ async function loadStaffStats() {
 function findStaffProfileMember(userId) {
   return flattenRoster().find((item) => String(item.id) === String(userId)) || (() => {
     const stats = (state.staffStats || []).find((item) => String(item.userId) === String(userId));
+    if (state.user && String(state.user.id) === String(userId)) return { id: String(userId), username: state.user.username || String(userId), handle: state.user.handle || String(userId), avatarUrl: state.user.avatarUrl || avatarFallback(userId), roleName: 'عضو الاستاف', roles: [], isAdmin: Boolean(state.user.isAdmin) };
     return stats ? { id: String(userId), username: stats.username || String(userId), handle: String(userId), avatarUrl: avatarFallback(userId), roleName: 'عضو غير موجود حاليًا في قائمة الاستاف', roles: [], isAdmin: false } : null;
   })();
 }
@@ -706,19 +709,115 @@ async function loadStaffProfile(userId, providedMember = null) {
   try {
     const response = await api(`/api/staff-stats/${encodeURIComponent(userId)}`);
     if (String(state.activeStaffProfileId) !== String(userId)) return;
-    renderStaffProfile(member, response.stats || {}, response.recentSubmissions || [], response.recentLeaves || []);
+    renderStaffProfile(member, response);
   } catch (error) {
     $('#staff-profile-content').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
   }
 }
-function renderStaffProfile(member, stats, submissions, leaves) {
-  const roles = (member.roles || []).map((role) => `<span class="profile-role-chip">${escapeHtml(role.name)}</span>`).join('') || '<span class="muted">لا توجد رتب إضافية</span>';
+function snowflakeDate(id) {
+  try { return new Date(Number((BigInt(id) >> 22n) + 1420070400000n)); } catch { return null; }
+}
+function hourLabel(hour) {
+  if (hour === null || hour === undefined) return '—';
+  return hour === 0 ? '12 ص' : hour < 12 ? `${hour} ص` : hour === 12 ? '12 م' : `${hour - 12} م`;
+}
+function renderStaffProfile(member, response = {}) {
+  const stats = response.stats || {};
+  const mp = response.messageProfile || { total: 0, today: 0, week: 0, month: 0, avgPerDay: 0, activeDays: 0, activity: [], hours: [] };
+  const ranks = response.ranks || {};
+  const submissions = response.recentSubmissions || [];
+  const leaves = response.recentLeaves || [];
+  const points = response.recentPoints || [];
+  const requests = response.recentRequests || [];
   const online = state.onlineUserIds.has(String(member.id));
-  const statCard = (label, value, note = '') => { const displayValue = typeof value === 'string' && !/^\d+(?:\.\d+)?$/.test(value) ? escapeHtml(value) : Number(value || 0).toLocaleString('en-US'); return `<article class="staff-detail-stat"><small>${label}</small><strong>${displayValue}</strong>${note ? `<span>${note}</span>` : ''}</article>`; };
+  const num = (value) => Number(value || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
+  const dateOnly = (value) => (value ? escapeHtml(formatDate(value, { day: 'numeric', month: 'long', year: 'numeric' })) : '—');
+  const dateTime = (value) => (value ? escapeHtml(formatDate(value, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })) : '—');
+  const color = /^#[0-9a-f]{6}$/i.test(member.roleColor || '') ? member.roleColor : '#8972fb';
+  const roles = (member.roles || []).map((role) => `<span class="profile-role-chip" style="${/^#[0-9a-f]{6}$/i.test(role.color) ? `border-color:${role.color}66;color:${role.color}` : ''}">${escapeHtml(role.name)}</span>`).join('') || '<span class="muted">لا توجد رتب إضافية</span>';
+  const created = snowflakeDate(member.id);
   const statusText = { approved: 'تمت الموافقة', submitted: 'بانتظار المراجعة', pending: 'بانتظار المراجعة', rejected: 'مرفوض' };
-  const submissionsHtml = submissions.length ? submissions.map((item) => `<article class="profile-history-row"><div><b>تسليم #${Number(item.id)}</b><small>${escapeHtml(formatDate(item.submittedAt, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}</small>${item.note ? `<p>${escapeHtml(item.note)}</p>` : ''}</div><span class="task-tag ${item.status === 'approved' ? 'completed' : item.status === 'rejected' ? 'required' : 'optional'}">${statusText[item.status] || escapeHtml(item.status)}</span></article>`).join('') : '<div class="task-empty">لا توجد تسليمات مسجلة لهذا العضو.</div>';
-  const leavesHtml = leaves.length ? leaves.map((item) => `<article class="profile-history-row"><div><b>طلب إجازة #${Number(item.id)}</b><small>${escapeHtml(item.startDate)} — ${escapeHtml(item.endDate)}</small><p>${escapeHtml(item.reason)}</p></div><span class="task-tag ${item.status === 'approved' ? 'completed' : item.status === 'rejected' ? 'required' : 'optional'}">${statusText[item.status] || 'بانتظار المراجعة'}</span></article>`).join('') : '<div class="task-empty">لا توجد طلبات إجازة.</div>';
-  $('#staff-profile-content').innerHTML = `<div class="staff-profile-hero"><img class="staff-profile-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="staff-profile-identity"><span class="tiny-label">${member.isAdmin ? 'ADMINISTRATOR PROFILE' : 'STAFF MEMBER PROFILE'}</span><h1>${escapeHtml(member.username)}</h1><p>@${escapeHtml(member.handle || member.id)} · <code>${escapeHtml(member.id)}</code></p><div class="staff-profile-status"><span class="online-pill ${online ? 'online' : 'offline'}"><i></i>${online ? 'متصل بالموقع الآن' : 'غير متصل بالموقع'}</span><span class="manager-badge">${escapeHtml(member.roleName || 'عضو الاستاف')}</span></div></div></div><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">PERMISSIONS</span><h2>الرتب والصلاحيات</h2></div></div><div class="staff-profile-roles">${roles}</div></section><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">ACTIVITY OVERVIEW</span><h2>إحصائيات العضو</h2></div><small class="muted">تاريخ الإحصائيات: ${escapeHtml(state.dailyMessageStats.dailyDate || 'اليوم')}</small></div><div class="staff-detail-grid">${statCard('رسائل اليوم', stats.dailyMessages, 'في روم الرسائل')}${statCard('إجمالي الرسائل', stats.totalMessages, 'كل رسائله الموجودة في الروم')}${statCard('إجمالي التسليمات', stats.totalSubmissions)}${statCard('التسليمات المقبولة', stats.approvedSubmissions)}${statCard('التسليمات المعلقة', stats.pendingSubmissions)}${statCard('النقاط المسجلة', stats.totalPoints)}${statCard('طلبات الإجازة', stats.leaveRequests)}${statCard('الطلبات الإدارية', stats.adminRequests)}${statCard('حالة الاتصال', online ? 'متصل' : 'أوفلاين', 'حالة الاتصال الحالية')}</div></section><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">SUBMISSION HISTORY</span><h2>آخر التسليمات</h2></div></div><div class="profile-history-list">${submissionsHtml}</div></section><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">LEAVE HISTORY</span><h2>طلبات الإجازة</h2></div></div><div class="profile-history-list">${leavesHtml}</div></section>`;
+  const statusClass = (status) => (status === 'approved' ? 'completed' : status === 'rejected' ? 'required' : 'optional');
+  const typeText = { permission: 'طلب إذن / غياب', technical: 'مشكلة تقنية', 'data-change': 'تعديل بيانات', complaint: 'شكوى أو ملاحظة', other: 'طلب إداري آخر' };
+
+  const rankBadge = (icon, label, info) => (info?.rank ? `<span class="pf-rank"><b>${icon} #${info.rank}</b><small>${label} · من ${info.of}</small></span>` : `<span class="pf-rank muted-rank"><b>${icon} —</b><small>${label}</small></span>`);
+  const kpi = (label, value, note = '', accent = false) => `<article class="pf-kpi${accent ? ' accent' : ''}"><small>${label}</small><strong>${typeof value === 'string' ? escapeHtml(value) : num(value)}</strong>${note ? `<span>${note}</span>` : ''}</article>`;
+
+  const maxDay = Math.max(1, ...(mp.activity || []).map((item) => item.count));
+  const activityBars = (mp.activity || []).map((item) => {
+    const height = item.count ? Math.max(6, Math.round((item.count / maxDay) * 100)) : 2;
+    const label = escapeHtml(formatDate(`${item.date}T12:00:00Z`, { day: 'numeric', month: 'numeric', timeZone: 'UTC' }));
+    return `<div class="pf-bar" title="${escapeHtml(item.date)} — ${item.count} رسالة"><em>${item.count || ''}</em><i class="${item.count ? '' : 'empty'}" style="height:${height}%"></i><span>${label}</span></div>`;
+  }).join('');
+  const maxHour = Math.max(1, ...(mp.hours || []).map((item) => item.count));
+  const hourBars = (mp.hours || []).map((item) => `<div class="pf-hour${item.hour === mp.busiestHour ? ' top' : ''}" title="${hourLabel(item.hour)} — ${item.count} رسالة"><i style="height:${item.count ? Math.max(8, Math.round((item.count / maxHour) * 100)) : 3}%"></i>${item.hour % 6 === 0 ? `<span>${hourLabel(item.hour)}</span>` : '<span></span>'}</div>`).join('');
+
+  const totalSub = Number(stats.totalSubmissions) || 0;
+  const approvedSub = Number(stats.approvedSubmissions) || 0;
+  const approvalRate = totalSub ? Math.round((approvedSub / totalSub) * 100) : 0;
+  const pointsHtml = points.length ? points.map((item) => `<article class="profile-history-row"><div><b>${escapeHtml(item.reason || 'بدون سبب')}</b><small>${dateTime(item.createdAt)}${item.source && item.source !== 'manual' ? ` · ${escapeHtml(item.source)}` : ''}</small></div><span class="pf-points ${item.amount >= 0 ? 'plus' : 'minus'}">${item.amount >= 0 ? '+' : '−'}${num(Math.abs(item.amount))}</span></article>`).join('') : '<div class="task-empty">لا توجد حركات نقاط لهذا العضو.</div>';
+  const submissionsHtml = submissions.length ? submissions.map((item) => `<article class="profile-history-row"><div><b>تسليم #${Number(item.id)}</b><small>${dateTime(item.submittedAt)}</small>${item.note ? `<p>${escapeHtml(item.note)}</p>` : ''}</div><span class="task-tag ${statusClass(item.status)}">${statusText[item.status] || escapeHtml(item.status)}</span></article>`).join('') : '<div class="task-empty">لا توجد تسليمات مسجلة لهذا العضو.</div>';
+  const leavesHtml = leaves.length ? leaves.map((item) => `<article class="profile-history-row"><div><b>طلب إجازة #${Number(item.id)}</b><small>${escapeHtml(item.startDate)} — ${escapeHtml(item.endDate)}</small><p>${escapeHtml(item.reason)}</p></div><span class="task-tag ${statusClass(item.status)}">${statusText[item.status] || 'بانتظار المراجعة'}</span></article>`).join('') : '<div class="task-empty">لا توجد طلبات إجازة.</div>';
+  const requestsHtml = requests.length ? requests.map((item) => `<article class="profile-history-row"><div><b>${escapeHtml(item.subject)}</b><small>${escapeHtml(typeText[item.requestType] || item.requestType)} · ${dateTime(item.createdAt)}</small></div><span class="task-tag ${statusClass(item.status)}">${statusText[item.status] || 'بانتظار المراجعة'}</span></article>`).join('') : '<div class="task-empty">لا توجد طلبات إدارية.</div>';
+
+  $('#staff-profile-content').innerHTML = `
+    <div class="pf-hero" style="--pf-accent:${color}">
+      <div class="pf-cover"></div>
+      <div class="pf-hero-body">
+        <img class="pf-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt="">
+        <div class="pf-identity">
+          <span class="tiny-label">${member.isAdmin ? 'ADMINISTRATOR PROFILE' : 'STAFF MEMBER PROFILE'}</span>
+          <h1>${escapeHtml(member.username)}</h1>
+          <p>@${escapeHtml(member.handle || member.id)} · <code>${escapeHtml(member.id)}</code> <button type="button" class="pf-copy" data-copy-id="${escapeHtml(member.id)}">نسخ ID</button></p>
+          <div class="staff-profile-status"><span class="online-pill ${online ? 'online' : 'offline'}"><i></i>${online ? 'متصل بالموقع الآن' : 'غير متصل بالموقع'}</span><span class="manager-badge">${escapeHtml(member.roleName || 'عضو الاستاف')}</span></div>
+        </div>
+        <div class="pf-ranks">${rankBadge('💬', 'ترتيب الرسائل', ranks.messages)}${rankBadge('⭐', 'ترتيب النقاط', ranks.points)}</div>
+      </div>
+      <div class="pf-facts">
+        <div><small>دخل سيرفر الاستاف</small><b>${dateOnly(member.joinedAt)}</b></div>
+        <div><small>دخل السيرفر الأساسي</small><b>${dateOnly(member.mainJoinedAt)}</b></div>
+        <div><small>تاريخ إنشاء الحساب</small><b>${dateOnly(created)}</b></div>
+        <div><small>أعلى رتبة</small><b>${escapeHtml(member.roleName || 'عضو الاستاف')}</b></div>
+      </div>
+    </div>
+
+    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">MESSAGES</span><h2>الرسائل</h2></div><small class="muted">رسائل الروم المحسوبة فقط · التاريخ ${escapeHtml(state.dailyMessageStats.dailyDate || 'اليوم')}</small></div>
+      <div class="pf-kpis">
+        ${kpi('إجمالي الرسائل', mp.total, 'كل رسائله الموجودة في الروم', true)}
+        ${kpi('رسائل اليوم', mp.today)}
+        ${kpi('آخر 7 أيام', mp.week)}
+        ${kpi('آخر 30 يوم', mp.month)}
+        ${kpi('متوسط الرسائل يوميًا', mp.avgPerDay, `${num(mp.activeDays)} يوم نشاط`)}
+        ${kpi('أنشط وقت', hourLabel(mp.busiestHour), mp.busiestDay ? `أنشط يوم: ${dateOnly(`${mp.busiestDay.date}T12:00:00Z`)} (${num(mp.busiestDay.count)})` : 'لا يوجد نشاط')}
+      </div>
+      <div class="pf-charts">
+        <div class="pf-chart-card"><h3>نشاط آخر 14 يوم</h3><div class="pf-bars">${activityBars}</div></div>
+        <div class="pf-chart-card"><h3>توزيع الرسائل على ساعات اليوم <small>(توقيت القاهرة)</small></h3><div class="pf-hours">${hourBars}</div></div>
+      </div>
+      <div class="pf-facts slim"><div><small>أول رسالة</small><b>${dateTime(mp.firstAt)}</b></div><div><small>آخر رسالة</small><b>${dateTime(mp.lastAt)}</b></div></div>
+    </section>
+
+    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">PERFORMANCE</span><h2>الأداء والمهمات</h2></div></div>
+      <div class="pf-kpis">
+        ${kpi('النقاط المسجلة', stats.totalPoints, '', true)}
+        ${kpi('إجمالي التسليمات', totalSub)}
+        ${kpi('التسليمات المقبولة', approvedSub)}
+        ${kpi('بانتظار المراجعة', stats.pendingSubmissions)}
+        ${kpi('المرفوضة', stats.rejectedSubmissions)}
+        ${kpi('طلبات الإجازة', stats.leaveRequests, `${num(stats.adminRequests)} طلب إداري`)}
+      </div>
+      <div class="pf-rate"><div class="pf-rate-top"><b>نسبة قبول التسليمات</b><span>${totalSub ? `${approvalRate}%` : '—'}</span></div><div class="pf-rate-track"><i style="width:${approvalRate}%"></i></div></div>
+    </section>
+
+    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">PERMISSIONS</span><h2>الرتب والصلاحيات</h2></div></div><div class="staff-profile-roles">${roles}</div></section>
+    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">POINTS HISTORY</span><h2>آخر حركات النقاط</h2></div></div><div class="profile-history-list">${pointsHtml}</div></section>
+    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">SUBMISSION HISTORY</span><h2>آخر التسليمات</h2></div></div><div class="profile-history-list">${submissionsHtml}</div></section>
+    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">LEAVE HISTORY</span><h2>طلبات الإجازة</h2></div></div><div class="profile-history-list">${leavesHtml}</div></section>
+    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">ADMIN REQUESTS</span><h2>الطلبات الإدارية</h2></div></div><div class="profile-history-list">${requestsHtml}</div></section>`;
+  $('[data-copy-id]', $('#staff-profile-content'))?.addEventListener('click', async (event) => {
+    const id = event.currentTarget.dataset.copyId;
+    try { await navigator.clipboard.writeText(id); showToast(`تم نسخ Discord ID: ${id}`, 'success'); } catch { showToast(id, 'info'); }
+  });
 }
 
 function wireStaffRequests() {

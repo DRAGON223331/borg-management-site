@@ -117,6 +117,19 @@ db.exec(`
     created_at TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS idx_chat_room_id ON chat_messages(room, id DESC);
+  CREATE TABLE IF NOT EXISTS staff_points (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    username TEXT NOT NULL DEFAULT '',
+    amount REAL NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    actor_id TEXT NOT NULL DEFAULT '',
+    actor_name TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'manual',
+    submission_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_staff_points_user ON staff_points(user_id, created_at DESC);
   CREATE TABLE IF NOT EXISTS discord_message_log (
     message_id TEXT PRIMARY KEY,
     channel_id TEXT NOT NULL,
@@ -654,6 +667,7 @@ async function getStaffRoster() {
       roleName: highest ? highest.name : (mainMember ? 'بدون رتبة في السيرفر الأساسي' : 'مش موجود في السيرفر الأساسي'),
       roleId: highest ? highest.id : (mainMember ? 'none' : 'not-in-main'),
       rolePosition: highest ? highest.position : (mainMember ? -1 : -2),
+      joinedAt: member.joinedAt ? new Date(member.joinedAt).toISOString() : null,
       roleColor: highest ? highest.hexColor : '#64748b',
       roles: assignedRoles.map((role) => ({ id: role.id, name: role.name, position: role.position, color: role.hexColor })),
       isAdmin: MANAGER_IDS.has(member.id) || member.roles.cache.has(MANAGEMENT_STAFF_ROLE_ID) || Boolean(mainMember?.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID)) || member.permissions.has(PermissionsBitField.Flags.Administrator) || Boolean(mainMember?.permissions.has(PermissionsBitField.Flags.Administrator)),
@@ -783,6 +797,41 @@ app.get('/api/roster', requireAuth, async (req, res) => {
 });
 
 
+// ───────── بيانات صفحة بروفايل العضو ─────────
+function cairoTodayString() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+}
+function shiftDayString(day, delta) {
+  const date = new Date(`${day}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + delta);
+  return date.toISOString().slice(0, 10);
+}
+// dayCounts: [{day:'YYYY-MM-DD' (بتوقيت القاهرة), count}] — hourCounts: [{hour:0-23 (بتوقيت القاهرة), count}]
+function buildMessageProfile({ firstAt = null, lastAt = null, dayCounts = [], hourCounts = [] } = {}) {
+  const byDay = new Map(dayCounts.map((row) => [String(row.day).slice(0, 10), Number(row.count) || 0]));
+  const today = cairoTodayString();
+  const sumDays = (n) => { let sum = 0; for (let i = 0; i < n; i += 1) sum += byDay.get(shiftDayString(today, -i)) || 0; return sum; };
+  const total = [...byDay.values()].reduce((a, b) => a + b, 0);
+  const activity = Array.from({ length: 14 }, (_, i) => { const date = shiftDayString(today, -(13 - i)); return { date, count: byDay.get(date) || 0 }; });
+  const hours = Array.from({ length: 24 }, (_, hour) => ({ hour, count: 0 }));
+  for (const row of hourCounts) { const hour = Number(row.hour); if (Number.isInteger(hour) && hour >= 0 && hour < 24) hours[hour].count = Number(row.count) || 0; }
+  const topHour = hours.reduce((best, cur) => (cur.count > best.count ? cur : best), { hour: null, count: 0 });
+  let busiestDay = null;
+  for (const [date, count] of byDay) if (!busiestDay || count > busiestDay.count) busiestDay = { date, count };
+  let avgPerDay = 0;
+  if (total && byDay.size) {
+    const firstDay = [...byDay.keys()].sort()[0];
+    const spanDays = Math.max(1, Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${firstDay}T00:00:00Z`)) / 86400000) + 1);
+    avgPerDay = Math.round((total / spanDays) * 10) / 10;
+  }
+  return { total, today: byDay.get(today) || 0, week: sumDays(7), month: sumDays(30), avgPerDay, activeDays: byDay.size, firstAt, lastAt, busiestHour: topHour.count ? topHour.hour : null, busiestDay, activity, hours };
+}
+function rankOf(allStats, userId, field) {
+  const rows = allStats.filter((row) => Number(row[field]) > 0).sort((a, b) => Number(b[field]) - Number(a[field]));
+  const index = rows.findIndex((row) => String(row.userId) === String(userId));
+  return { rank: index >= 0 ? index + 1 : null, of: rows.length };
+}
+
 app.get('/api/staff-stats', requireAuth, (req, res) => {
   try { res.set('Cache-Control', 'no-store'); res.json({ stats: getAllStaffStats(), dailyDate: getDailyStaffMessageStats().dailyDate }); }
   catch (error) { res.status(500).json({ error: `تعذر تحميل الإحصائيات: ${cleanText(error.message, 180)}` }); }
@@ -793,8 +842,25 @@ app.get('/api/staff-stats/:userId', requireAuth, (req, res) => {
   const stats = getAllStaffStats().find((row) => row.userId === targetId) || { userId: targetId, dailyMessages: 0, totalMessages: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, adminRequests: 0, online: false, lastSeen: null };
   const recentSubmissions = db.prepare('SELECT id, submitted_at AS submittedAt, status, note FROM submissions WHERE user_id = ? ORDER BY submitted_at DESC LIMIT 10').all(targetId);
   const recentLeaves = db.prepare('SELECT id, start_date AS startDate, end_date AS endDate, reason, status, created_at AS createdAt, review_note AS reviewNote FROM leave_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 10').all(targetId);
+  const recentPoints = db.prepare('SELECT id, amount, reason, source, created_at AS createdAt FROM staff_points WHERE user_id = ? ORDER BY id DESC LIMIT 10').all(targetId).map((row) => ({ ...row, amount: Number(row.amount) || 0 }));
+  const recentRequests = db.prepare('SELECT id, request_type AS requestType, subject, status, created_at AS createdAt FROM staff_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 5').all(targetId);
+  // تجميع رسائل العضو بتوقيت القاهرة (SQLite مفيهوش timezone)
+  const logRows = db.prepare('SELECT created_at AS createdAt FROM discord_message_log WHERE channel_id = ? AND user_id = ?').all(MESSAGE_COUNT_CHANNEL_ID, targetId);
+  const dayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo', year: 'numeric', month: '2-digit', day: '2-digit' });
+  const hourFmt = new Intl.DateTimeFormat('en-GB', { timeZone: 'Africa/Cairo', hour: '2-digit', hourCycle: 'h23' });
+  const dayMap = new Map(); const hourMap = new Map(); let firstAt = null; let lastAt = null;
+  for (const row of logRows) {
+    const date = new Date(row.createdAt);
+    if (Number.isNaN(date.getTime())) continue;
+    const day = dayFmt.format(date); const hour = Number(hourFmt.format(date));
+    dayMap.set(day, (dayMap.get(day) || 0) + 1); hourMap.set(hour, (hourMap.get(hour) || 0) + 1);
+    if (!firstAt || row.createdAt < firstAt) firstAt = row.createdAt;
+    if (!lastAt || row.createdAt > lastAt) lastAt = row.createdAt;
+  }
+  const messageProfile = buildMessageProfile({ firstAt, lastAt, dayCounts: [...dayMap].map(([day, count]) => ({ day, count })), hourCounts: [...hourMap].map(([hour, count]) => ({ hour, count })) });
+  const allStats = getAllStaffStats();
   res.set('Cache-Control', 'no-store');
-  res.json({ stats, recentSubmissions, recentLeaves });
+  res.json({ stats, messageProfile, ranks: { messages: rankOf(allStats, targetId, 'totalMessages'), points: rankOf(allStats, targetId, 'totalPoints') }, recentPoints, recentRequests, recentSubmissions, recentLeaves });
 });
 
 app.get('/api/tasks', requireAuth, (req, res) => {
