@@ -549,3 +549,5 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 @media (max-width: 640px) {
   .notif-panel { position: fixed; top: 64px; left: 4vw; right: 4vw; width: auto; }
 }
+.task-select:disabled { cursor: not-allowed; opacity: .35; }
+.task-row.task-complete .task-row-title { text-decoration: line-through; text-decoration-color: rgba(148,163,184,.5); }

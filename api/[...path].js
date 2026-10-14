@@ -1273,7 +1273,11 @@ async function handleApi(parts, req, res) {
     const rows = await sql`SELECT id, title, points, required, active, created_by_name, created_at FROM tasks WHERE active = TRUE ORDER BY required DESC, id DESC`;
     const completedRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'approved'`;
     const completed = new Set(completedRows.map((row) => String(row.task_id)));
-    const tasks = rows.map((row) => ({ id: Number(row.id), title: row.title, points: Number(row.points || 0), required: Boolean(row.required), active: Boolean(row.active), created_by_name: row.created_by_name, created_at: row.created_at, completedByMe: completed.has(String(row.id)) }));
+    const pendingRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'pending'`;
+    const pending = new Set(pendingRows.map((row) => String(row.task_id)));
+    const rejectedRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'rejected'`;
+    const rejected = new Set(rejectedRows.map((row) => String(row.task_id)));
+    const tasks = rows.map((row) => ({ id: Number(row.id), title: row.title, points: Number(row.points || 0), required: Boolean(row.required), active: Boolean(row.active), created_by_name: row.created_by_name, created_at: row.created_at, completedByMe: completed.has(String(row.id)), pendingByMe: !completed.has(String(row.id)) && pending.has(String(row.id)), rejectedByMe: !completed.has(String(row.id)) && !pending.has(String(row.id)) && rejected.has(String(row.id)) }));
     const required = tasks.filter((task) => task.required);
     return sendJson(res, 200, { tasks, stats: { active: tasks.length, required: required.length, completedRequired: required.filter((task) => task.completedByMe).length, completedByMe: tasks.filter((task) => task.completedByMe).length } });
   }
@@ -1471,6 +1475,14 @@ async function handleApi(parts, req, res) {
     const byId = new Map(activeTasks.map((row) => [Number(row.id), row]));
     const foundTasks = taskIds.map((id) => byId.get(id)).filter(Boolean);
     if (foundTasks.length !== taskIds.length) return sendError(res, 400, 'في مهمة من اللي اخترتها مش موجودة أو اتقفلت. حدّث الصفحة وجرب تاني.');
+    // المهمة اللي اتسلمت قبل كده (اتقبلت أو اترفضت أو لسه بتتراجع) لنفس العضو ميقدرش يسلمها تاني.
+    const lockedRows = await sql`SELECT st.task_id, s.status FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status IN ('approved','pending','rejected') AND st.task_id = ANY(${taskIds})`;
+    const doneTask = lockedRows.find((row) => row.status === 'approved');
+    if (doneTask) return sendError(res, 409, `المهمة #${doneTask.task_id} انتهت بالفعل وانت خلصتها قبل كده، مينفعش تسلّمها تاني. شيلها من الاختيار.`);
+    const rejectedTask = lockedRows.find((row) => row.status === 'rejected');
+    if (rejectedTask) return sendError(res, 409, `المهمة #${rejectedTask.task_id} اتسلمت قبل كده واترفضت، ومينفعش تتسلم تاني. شيلها من الاختيار.`);
+    const waitingTask = lockedRows.find((row) => row.status === 'pending');
+    if (waitingTask) return sendError(res, 409, `المهمة #${waitingTask.task_id} متسلمة بالفعل وبانتظار مراجعة الإدارة. استنى القرار قبل ما تسلّمها تاني.`);
     const linksInput = cleanText(req.body?.evidenceLinks, 12000);
     const links = linksInput.split(/\r?\n/).map((x) => x.trim()).filter(Boolean).slice(0, 20);
     for (const link of links) {

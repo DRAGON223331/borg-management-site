@@ -227,7 +227,8 @@ async function loadTasks() {
     const result = await api('/api/tasks');
     state.tasks = result.tasks || [];
     const existingIds = new Set(state.tasks.map((task) => task.id));
-    state.selectedTaskIds = new Set([...state.selectedTaskIds].filter((id) => existingIds.has(id)));
+    const lockedIds = new Set(state.tasks.filter((task) => task.completedByMe || task.pendingByMe || task.rejectedByMe).map((task) => task.id));
+    state.selectedTaskIds = new Set([...state.selectedTaskIds].filter((id) => existingIds.has(id) && !lockedIds.has(id)));
     $('#stat-active').textContent = result.stats.active;
     $('#stat-required').textContent = result.stats.required;
     $('#stat-done-required').textContent = result.stats.completedRequired;
@@ -260,18 +261,18 @@ function renderTaskList() {
   }
   $('#task-list').innerHTML = tasks.map((task) => `
     <article class="task-row ${task.completedByMe ? 'task-complete' : ''}" data-task-card="${task.id}">
-      <input class="task-select" type="checkbox" data-select-task="${task.id}" aria-label="اختيار المهمة ${escapeHtml(task.title)}" ${state.selectedTaskIds.has(task.id) ? 'checked' : ''}>
+      <input class="task-select" type="checkbox" data-select-task="${task.id}" aria-label="اختيار المهمة ${escapeHtml(task.title)}" ${state.selectedTaskIds.has(task.id) ? 'checked' : ''} ${task.completedByMe || task.pendingByMe || task.rejectedByMe ? 'disabled' : ''}>
       <div class="task-row-body">
         <div class="task-row-title">${escapeHtml(task.title)}</div>
         <div class="task-row-desc">أُضيفت بواسطة ${escapeHtml(task.created_by_name || 'الإدارة')} · ${formatDate(task.created_at, { day: 'numeric', month: 'short' })}</div>
         <div class="task-row-meta">
           <span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? '● مهمة إجبارية' : '○ مهمة اختيارية'}</span>
           <span class="task-id">#${task.id} · ⭐ ${Number(task.points || 0)} نقطة</span>
-          ${task.completedByMe ? '<span class="task-tag completed">✓ تم تسليمها</span>' : ''}
+          ${task.completedByMe ? '<span class="task-tag completed">✓ انتهت</span>' : task.pendingByMe ? '<span class="task-tag optional">⏳ بانتظار المراجعة</span>' : task.rejectedByMe ? '<span class="task-tag required">✕ مرفوضة · اتقفلت</span>' : ''}
         </div>
       </div>
       <div class="task-row-actions">
-        ${task.completedByMe ? '<span class="task-complete-label">منجزة</span>' : ''}
+        ${task.completedByMe ? '<span class="task-complete-label">انتهت · مينفعش تتسلم تاني</span>' : task.pendingByMe ? '<span class="task-complete-label">متسلمة بانتظار المراجعة</span>' : task.rejectedByMe ? '<span class="task-complete-label">اترفضت · مينفعش تتسلم تاني</span>' : ''}
       ${state.user.canManage ? `<label class="task-points-editor" title="تعديل نقاط المهمة">⭐ <input type="number" min="0" max="100000" step="0.01" value="${Number(task.points || 0)}" data-task-points="${task.id}" aria-label="نقاط المهمة ${task.id}"> <span>نقطة</span></label>` : ''}
       ${state.user.canManage ? `<label class="task-manager-toggle"><input type="checkbox" data-required-toggle="${task.id}" ${task.required ? 'checked' : ''}> إجبارية</label>` : ''}
 ${state.user.canManage ? `<button type="button" class="task-delete-button" data-delete-task="${task.id}" aria-label="حذف المهمة ${task.id}">🗑️ حذف</button>` : ''}
@@ -363,7 +364,7 @@ function wireTasks() {
     renderTaskList();
   }));
   $('#select-visible-btn').addEventListener('click', () => {
-    const visibleIds = getFilteredTasks().map((task) => task.id);
+    const visibleIds = getFilteredTasks().filter((task) => !task.completedByMe && !task.pendingByMe && !task.rejectedByMe).map((task) => task.id);
     const allSelected = visibleIds.length && visibleIds.every((id) => state.selectedTaskIds.has(id));
     visibleIds.forEach((id) => allSelected ? state.selectedTaskIds.delete(id) : state.selectedTaskIds.add(id));
     renderTaskList();
@@ -457,8 +458,8 @@ function renderFileList() {
 }
 async function submitTasks(event) {
   event.preventDefault();
-  const taskIds = [...state.selectedTaskIds];
-  if (!taskIds.length) return showToast('حدد مهمة واحدة على الأقل قبل التسليم.', 'error');
+  const taskIds = [...state.selectedTaskIds].filter((id) => { const task = state.tasks.find((item) => item.id === id); return task && !task.completedByMe && !task.pendingByMe && !task.rejectedByMe; });
+  if (!taskIds.length) return showToast('حدد مهمة واحدة على الأقل قبل التسليم (المهمات المنتهية أو المرفوضة مينفعش تتسلم تاني).', 'error');
   const links = $('#evidence-links').value.trim();
   const files = [...$('#evidence-files').files];
   if (!links && !files.length) return showToast('ضيف رابط دليل أو ارفع صورة/فيديو.', 'error');
