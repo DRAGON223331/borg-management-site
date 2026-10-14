@@ -53,12 +53,23 @@ const KIND_LABELS = {
   request: { noun: 'الطلب الإداري', footer: 'إدارة البرج • الطلبات الإدارية' },
 };
 
-// kind: submission | leave | request — status: approved | rejected
+// kind: submission | leave | request — status: approved | rejected | reopened
 function buildReviewEmbed({ kind, status, id, reviewerId = '', note = '', fields = [] }) {
   const label = KIND_LABELS[kind] || KIND_LABELS.request;
   const approved = status === 'approved';
   const list = [...fields];
   if (reviewerId) list.push({ name: '🛡️ المراجع', value: `<@${reviewerId}>`, inline: true });
+  if (status === 'reopened') {
+    if (note) list.push({ name: '🗒️ ملاحظة الإدارة', value: clip(note, 1000), inline: false });
+    return {
+      title: `🔓 تمت إعادة فتح ${label.noun} #${id}`,
+      description: `الإدارة أعادت فتح ${label.noun} الخاص بك بعد الرفض، وتقدر تسلّمه من جديد من صفحة المهام.`,
+      color: 0xf59e0b,
+      fields: list.slice(0, 10),
+      timestamp: new Date().toISOString(),
+      footer: { text: label.footer },
+    };
+  }
   if (note) list.push({ name: approved ? '🗒️ ملاحظة الإدارة' : '📝 سبب الرفض', value: clip(note, 1000), inline: false });
   else if (!approved) list.push({ name: '📝 سبب الرفض', value: 'لم يحدد المسؤول سببًا. تقدر تسأل الإدارة لو محتاج توضيح.', inline: false });
   return {

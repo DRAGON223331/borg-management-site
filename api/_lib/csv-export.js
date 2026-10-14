@@ -9,7 +9,7 @@ const TYPES = {
   points: { label: 'سجل النقاط', file: 'points-ledger' },
   requests: { label: 'الطلبات الإدارية', file: 'admin-requests' },
 };
-const STATUS_AR = { approved: 'مقبول', rejected: 'مرفوض', pending: 'قيد المراجعة', submitted: 'قيد المراجعة' };
+const STATUS_AR = { approved: 'مقبول', rejected: 'مرفوض', pending: 'قيد المراجعة', submitted: 'قيد المراجعة', reopened: 'أُعيد فتحه' };
 const ROW_LIMIT = 5000;
 
 // حماية من حقن الصيغ (CSV injection): أي نص يبدأ بـ = + - @ يتحول لنص عادي في Excel.

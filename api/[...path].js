@@ -1659,6 +1659,41 @@ async function handleApi(parts, req, res) {
     } catch (e) { console.error('[points log]', cleanText(e.message, 180)); }
     return sendJson(res, 201, { ok: true, points: currentTotal });
   }
+  // إعادة فتح تسليم مرفوض: لو الإدارة رفضت بالغلط، الأدمن يفك القفل والعضو يقدر يسلّم المهمة تاني.
+  // التسليم القديم بيفضل في السجل بحالة 'reopened' (مش بيتمسح)، والقفل بيعتمد على حالات approved/pending/rejected بس.
+  if (route === 'submissions' && parts.length === 3 && req.method === 'POST' && parts[2] === 'reopen') {
+    if (!canManage(user)) return sendError(res, 403, 'إعادة فتح المهام للمسؤولين فقط.');
+    if (!ensureSameOrigin(req, res)) return;
+    const id = Number(parts[1]);
+    if (!Number.isSafeInteger(id) || id < 1) return sendError(res, 400, 'رقم التسليم غير صالح.');
+    const rows = await sql`SELECT * FROM submissions WHERE id = ${id} LIMIT 1`;
+    if (!rows.length) return sendError(res, 404, 'التسليم غير موجود.');
+    const sub = rows[0];
+    if (sub.status !== 'rejected') return sendError(res, 409, 'إعادة الفتح متاحة للتسليمات المرفوضة فقط.');
+    const reopenNote = cleanText(req.body?.note, 300);
+    const reopened = await sql`UPDATE submissions SET status = 'reopened', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'rejected' RETURNING id`;
+    if (!reopened.length) return sendError(res, 409, 'تم تغيير حالة التسليم من مسؤول آخر بالفعل.');
+    const taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${id}`;
+    const taskSummary = taskRows.map((t) => `• **${cleanText(t.title, 180)}**`).join('\n').slice(0, 1024) || 'لا توجد مهمات مرتبطة بالتسليم.';
+    const dmPromise = notifyReview({ token: BOT_TOKEN, userId: sub.user_id, kind: 'submission', status: 'reopened', id, reviewerId: user.id, note: reopenNote, fields: [{ name: '📋 المهمات المعاد فتحها', value: taskSummary, inline: false }] });
+    try {
+      await postDiscordEmbed(POINTS_LOG_CHANNEL_ID, {
+        title: '🔓 إعادة فتح تسليم مرفوض',
+        description: `تمت إعادة فتح التسليم **#${id}**، والعضو يقدر يسلّم المهام دي تاني.`,
+        color: 0xF59E0B,
+        fields: [
+          { name: '👤 العضو', value: `<@${sub.user_id}>`, inline: true },
+          { name: '🛡️ المسؤول', value: `<@${user.id}>`, inline: true },
+          { name: '📋 المهمات', value: taskSummary, inline: false },
+          ...(reopenNote ? [{ name: '🗒️ ملاحظة', value: reopenNote.slice(0, 1024), inline: false }] : []),
+        ],
+        footer: { text: 'Borg Management • Task Review' },
+        timestamp: new Date().toISOString(),
+      });
+    } catch (e) { console.error('[submission reopen log]', cleanText(e.message, 180)); }
+    const dm = await dmPromise;
+    return sendJson(res, 200, { ok: true, status: 'reopened', dmSent: dm.ok, message: `تمت إعادة فتح التسليم #${id}، والعضو يقدر يسلّم المهام تاني.${dmNote(dm)}` });
+  }
   if (route === 'submissions' && parts.length === 3 && req.method === 'POST' && ['approve','reject'].includes(parts[2])) {
     if (!canManage(user)) return sendError(res, 403, 'مراجعة التسليمات للمسؤولين فقط.');
     if (!ensureSameOrigin(req, res)) return;
