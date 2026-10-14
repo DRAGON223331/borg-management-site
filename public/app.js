@@ -16,6 +16,8 @@ const state = {
   onlineUserIds: new Set(),
   dailyMessageStats: { dailyStats: [], dailyTotal: 0, dailyDate: null },
   staffStats: [],
+  lbMetric: 'points',
+  audit: { entries: [], nextBefore: null, hasMore: false, loading: false },
   activeStaffProfileId: null,
 };
 
@@ -166,6 +168,17 @@ function wireNavigation() {
   if (chip) { chip.style.cursor = 'pointer'; chip.title = 'افتح ملفي الكامل'; chip.addEventListener('click', () => state.user?.id && openStaffProfile(state.user.id)); }
   $$('.nav-tab').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.page)));
   $('#personal-refresh-btn')?.addEventListener('click', () => loadPersonal(true));
+  $$('#lb-tabs [data-lb]').forEach((button) => button.addEventListener('click', () => {
+    state.lbMetric = button.dataset.lb;
+    $$('#lb-tabs [data-lb]').forEach((item) => item.classList.toggle('active', item === button));
+    renderLeaderboard();
+  }));
+  $('#audit-apply')?.addEventListener('click', () => loadAudit(true));
+  $('#audit-refresh')?.addEventListener('click', () => loadAudit(true));
+  $('#audit-more')?.addEventListener('click', () => loadAudit(false));
+  $('#audit-action')?.addEventListener('change', () => loadAudit(true));
+  $('#audit-user')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); loadAudit(true); } });
+  $('#audit-search')?.addEventListener('input', () => renderAudit());
   $$('[data-go]').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.go)));
   $('#logout-btn').addEventListener('click', async () => {
     try { await api('/api/auth/logout', { method: 'POST' }); }
@@ -175,6 +188,7 @@ function wireNavigation() {
 }
 function openPage(page) {
   if (page === 'management-chat' && !state.user?.canManage) return;
+  if (page === 'audit-log' && !state.user?.canManage) return;
   if (page === 'staff-profile' && !state.activeStaffProfileId) return;
   $$('.page').forEach((element) => element.classList.remove('active-page'));
   $(`#page-${page}`)?.classList.add('active-page');
@@ -183,6 +197,8 @@ function openPage(page) {
   if (page === 'management-chat') loadChat('management');
   if (page === 'staff-profile') loadStaffProfile(state.activeStaffProfileId);
   if (page === 'personal') loadPersonal();
+  if (page === 'leaderboard') { renderLeaderboard(); loadStaffStats(); }
+  if (page === 'audit-log') loadAudit(true);
   if (page === 'tasks') {
     loadTasks();
     loadSubmissions();
@@ -670,6 +686,7 @@ async function loadStaffStats() {
     state.dailyMessageStats.dailyTotal = state.dailyMessageStats.dailyStats.reduce((sum, row) => sum + row.count, 0);
     renderDailyMessageStats();
     renderAdminOverview();
+    renderLeaderboard();
   } catch (error) {
     const node = $('#admin-overview-cards');
     if (node && !state.staffStats.length) node.innerHTML = `<div class="loading-state">${escapeHtml(error.message)}</div>`;
@@ -716,6 +733,93 @@ async function loadStaffProfile(userId, providedMember = null) {
     $('#staff-profile-content').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
   }
 }
+const LB_METRICS = {
+  points: { field: 'totalPoints', unit: 'نقطة' },
+  messages: { field: 'totalMessages', unit: 'رسالة' },
+  today: { field: 'dailyMessages', unit: 'رسالة اليوم' },
+  approved: { field: 'approvedSubmissions', unit: 'تسليم مقبول' },
+};
+function renderLeaderboard() {
+  const podium = $('#lb-podium');
+  const list = $('#lb-list');
+  if (!podium || !list) return;
+  const metric = LB_METRICS[state.lbMetric] || LB_METRICS.points;
+  const roster = new Map(flattenRoster().map((member) => [String(member.id), member]));
+  const num = (value) => Number(value || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
+  const rows = (state.staffStats || [])
+    .map((item) => ({ item, value: Number(item[metric.field]) || 0 }))
+    .filter((row) => row.value > 0)
+    .sort((a, b) => b.value - a.value)
+    .map((row, index) => {
+      const member = roster.get(String(row.item.userId));
+      return { rank: index + 1, id: String(row.item.userId), value: row.value, name: member?.username || row.item.username || String(row.item.userId), avatar: member?.avatarUrl || avatarFallback(row.item.userId), role: member?.roleName || '' };
+    });
+  if (!rows.length) {
+    podium.innerHTML = '';
+    list.innerHTML = '<div class="task-empty">لسه مفيش بيانات كفاية للترتيب ده.</div>';
+    return;
+  }
+  const medals = ['🥇', '🥈', '🥉'];
+  const mineId = String(state.user?.id || '');
+  const card = (row) => `<button type="button" class="lb-podium-card rank-${row.rank}${row.id === mineId ? ' is-me' : ''}" data-open-staff-profile="${escapeHtml(row.id)}"><span class="lb-medal">${medals[row.rank - 1]}</span><img src="${escapeHtml(row.avatar)}" alt=""><b>${escapeHtml(row.name)}</b><small>${escapeHtml(row.role)}</small><strong>${num(row.value)}</strong><em>${metric.unit}</em></button>`;
+  const top = rows.slice(0, 3);
+  // ترتيب العرض: الثاني - الأول - الثالث عشان الأول يبقى في النص
+  const display = top.length === 3 ? [top[1], top[0], top[2]] : top;
+  podium.innerHTML = display.map(card).join('');
+  const rest = rows.slice(3);
+  list.innerHTML = rest.map((row) => `<button type="button" class="lb-row${row.id === mineId ? ' is-me' : ''}" data-open-staff-profile="${escapeHtml(row.id)}"><span class="lb-rank">#${row.rank}</span><img src="${escapeHtml(row.avatar)}" alt=""><div class="lb-name"><b>${escapeHtml(row.name)}${row.id === mineId ? ' <i>(أنت)</i>' : ''}</b><small>${escapeHtml(row.role)}</small></div><div class="lb-value"><strong>${num(row.value)}</strong><small>${metric.unit}</small></div></button>`).join('');
+  [...$$('[data-open-staff-profile]', podium), ...$$('[data-open-staff-profile]', list)].forEach((button) => button.addEventListener('click', () => openStaffProfile(button.dataset.openStaffProfile)));
+}
+
+async function loadAudit(reset = true) {
+  const box = $('#audit-list');
+  const more = $('#audit-more');
+  if (!box || !state.user?.canManage || state.audit.loading) return;
+  if (reset) { state.audit = { entries: [], nextBefore: null, hasMore: false, loading: true }; box.innerHTML = '<div class="loading-state">جاري تحميل سجل السيرفر...</div>'; }
+  else state.audit.loading = true;
+  if (more) more.disabled = true;
+  try {
+    const params = new URLSearchParams();
+    const actionType = $('#audit-action')?.value;
+    const userId = ($('#audit-user')?.value || '').trim();
+    if (actionType) params.set('actionType', actionType);
+    if (/^\d{15,22}$/.test(userId)) params.set('userId', userId);
+    if (!reset && state.audit.nextBefore) params.set('before', state.audit.nextBefore);
+    const result = await api(`/api/audit-log${params.toString() ? `?${params}` : ''}`);
+    state.audit.entries = state.audit.entries.concat(result.entries || []);
+    state.audit.nextBefore = result.nextBefore || null;
+    state.audit.hasMore = Boolean(result.hasMore);
+    renderAudit();
+  } catch (error) {
+    if (!state.audit.entries.length) box.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
+    else showToast(error.message, 'error');
+  } finally {
+    state.audit.loading = false;
+    if (more) { more.disabled = false; more.classList.toggle('hidden', !state.audit.hasMore); }
+  }
+}
+function renderAudit() {
+  const box = $('#audit-list');
+  if (!box) return;
+  const query = ($('#audit-search')?.value || '').trim().toLowerCase();
+  const toneClass = { danger: 'required', create: 'completed', edit: 'optional' };
+  const entries = state.audit.entries.filter((entry) => !query || [entry.label, entry.actor?.username, entry.targetName, entry.targetId, entry.reason, ...(entry.changes || []).map((change) => `${change.key} ${change.oldValue} ${change.newValue}`)].join(' ').toLowerCase().includes(query));
+  if (!entries.length) {
+    box.innerHTML = `<div class="task-empty">${state.audit.entries.length ? 'مفيش نتائج مطابقة للبحث.' : 'مفيش أحداث في السجل بالفلتر ده.'}</div>`;
+    return;
+  }
+  box.innerHTML = entries.map((entry) => {
+    const target = entry.targetName
+      ? `<span class="audit-target">${entry.targetAvatarUrl ? `<img src="${escapeHtml(entry.targetAvatarUrl)}" alt="">` : ''}${escapeHtml(entry.targetName)}</span>`
+      : entry.targetId ? `<span class="audit-target"><code>${escapeHtml(entry.targetId)}</code></span>` : '';
+    const extra = [entry.count > 1 ? `× ${entry.count}` : '', entry.channelId ? `روم <code>${escapeHtml(entry.channelId)}</code>` : ''].filter(Boolean).join(' · ');
+    const changes = (entry.changes || []).length
+      ? `<details class="audit-changes"><summary>التفاصيل (${entry.changes.length})</summary>${entry.changes.map((change) => `<div><code>${escapeHtml(change.key)}</code>: <span class="old">${escapeHtml(change.oldValue)}</span> ← <span class="new">${escapeHtml(change.newValue)}</span></div>`).join('')}</details>`
+      : '';
+    return `<article class="audit-entry tone-${escapeHtml(entry.tone)}"><img class="audit-avatar" src="${escapeHtml(entry.actor?.avatarUrl || avatarFallback(entry.actor?.id))}" alt=""><div class="audit-main"><div class="audit-line"><b>${escapeHtml(entry.actor?.username || 'غير معروف')}</b><span class="task-tag ${toneClass[entry.tone] || 'optional'}">${escapeHtml(entry.label)}</span>${target}${extra ? `<small class="muted">${extra}</small>` : ''}</div>${entry.reason ? `<p class="audit-reason">السبب: ${escapeHtml(entry.reason)}</p>` : ''}${changes}<time class="audit-time">${escapeHtml(formatDate(entry.createdAt, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}</time></div></article>`;
+  }).join('');
+}
+
 async function loadPersonal(force = false) {
   const me = state.user;
   const box = $('#personal-content');

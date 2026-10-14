@@ -469,6 +469,78 @@ async function discordApi(route, options = {}) {
   }
   return payload;
 }
+const AUDIT_ACTIONS = {
+  1: ['تعديل إعدادات السيرفر', 'edit'],
+  10: ['إنشاء روم', 'create'], 11: ['تعديل روم', 'edit'], 12: ['حذف روم', 'danger'],
+  13: ['إضافة صلاحية روم', 'create'], 14: ['تعديل صلاحية روم', 'edit'], 15: ['حذف صلاحية روم', 'danger'],
+  20: ['طرد عضو', 'danger'], 21: ['تنظيف أعضاء (Prune)', 'danger'], 22: ['حظر عضو', 'danger'], 23: ['فك حظر', 'create'],
+  24: ['تعديل عضو', 'edit'], 25: ['تعديل رتب عضو', 'edit'], 26: ['نقل عضو صوتيًا', 'edit'], 27: ['فصل عضو من الصوت', 'edit'], 28: ['إضافة بوت', 'create'],
+  30: ['إنشاء رتبة', 'create'], 31: ['تعديل رتبة', 'edit'], 32: ['حذف رتبة', 'danger'],
+  40: ['إنشاء دعوة', 'create'], 41: ['تعديل دعوة', 'edit'], 42: ['حذف دعوة', 'danger'],
+  50: ['إنشاء Webhook', 'create'], 51: ['تعديل Webhook', 'edit'], 52: ['حذف Webhook', 'danger'],
+  60: ['إضافة إيموجي', 'create'], 61: ['تعديل إيموجي', 'edit'], 62: ['حذف إيموجي', 'danger'],
+  72: ['حذف رسالة', 'danger'], 73: ['حذف رسائل جماعي', 'danger'], 74: ['تثبيت رسالة', 'edit'], 75: ['إلغاء تثبيت رسالة', 'edit'],
+  80: ['إضافة تكامل', 'create'], 81: ['تعديل تكامل', 'edit'], 82: ['حذف تكامل', 'danger'],
+  83: ['إنشاء Stage', 'create'], 84: ['تعديل Stage', 'edit'], 85: ['حذف Stage', 'danger'],
+  90: ['إضافة ستيكر', 'create'], 91: ['تعديل ستيكر', 'edit'], 92: ['حذف ستيكر', 'danger'],
+  100: ['إنشاء حدث', 'create'], 101: ['تعديل حدث', 'edit'], 102: ['حذف حدث', 'danger'],
+  110: ['إنشاء ثريد', 'create'], 111: ['تعديل ثريد', 'edit'], 112: ['حذف ثريد', 'danger'],
+  121: ['تعديل صلاحيات أمر', 'edit'],
+  140: ['إنشاء قاعدة AutoMod', 'create'], 141: ['تعديل قاعدة AutoMod', 'edit'], 142: ['حذف قاعدة AutoMod', 'danger'],
+  143: ['AutoMod حجب رسالة', 'edit'], 144: ['AutoMod أبلغ عن رسالة', 'edit'], 145: ['AutoMod تايم أوت', 'danger'],
+};
+function auditValue(value) {
+  if (value === null || value === undefined) return '—';
+  if (Array.isArray(value)) {
+    const names = value.map((item) => (item && typeof item === 'object' ? (item.name || item.id) : item)).filter(Boolean);
+    return cleanText(names.join('، ') || '—', 160);
+  }
+  if (typeof value === 'object') return cleanText(JSON.stringify(value), 160);
+  return cleanText(String(value), 160);
+}
+function discordAvatarUrl(user) {
+  if (!user) return '';
+  if (user.avatar) return `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=64`;
+  return `https://cdn.discordapp.com/embed/avatars/${Number((BigInt(user.id) >> 22n) % 6n)}.png`;
+}
+async function getMainAuditLog(query = {}) {
+  const LIMIT = 50;
+  const params = new URLSearchParams({ limit: String(LIMIT) });
+  const before = String(query.before || '');
+  if (/^\d{15,22}$/.test(before)) params.set('before', before);
+  const actionType = Number(query.actionType);
+  if (Number.isInteger(actionType) && actionType > 0 && actionType <= 200) params.set('action_type', String(actionType));
+  const userId = String(query.userId || '');
+  if (/^\d{15,22}$/.test(userId)) params.set('user_id', userId);
+  const data = await discordApi(`/guilds/${MAIN_GUILD_ID}/audit-logs?${params.toString()}`);
+  const users = new Map((data?.users || []).map((item) => [item.id, item]));
+  const rawEntries = data?.audit_log_entries || [];
+  const entries = rawEntries.map((entry) => {
+    const actor = users.get(entry.user_id);
+    const target = entry.target_id ? users.get(entry.target_id) : null;
+    const [label, tone] = AUDIT_ACTIONS[entry.action_type] || [`حدث #${entry.action_type}`, 'edit'];
+    const nameChange = (entry.changes || []).find((change) => change.key === 'name');
+    let targetName = '';
+    if (target) targetName = target.global_name || target.username || '';
+    else if (nameChange) targetName = auditValue(nameChange.new_value ?? nameChange.old_value);
+    return {
+      id: String(entry.id),
+      createdAt: new Date(Number((BigInt(entry.id) >> 22n) + 1420070400000n)).toISOString(),
+      actionType: Number(entry.action_type),
+      label,
+      tone,
+      actor: actor ? { id: actor.id, username: actor.global_name || actor.username, avatarUrl: discordAvatarUrl(actor) } : { id: String(entry.user_id || ''), username: entry.user_id ? String(entry.user_id) : 'غير معروف', avatarUrl: '' },
+      targetId: entry.target_id ? String(entry.target_id) : '',
+      targetName: cleanText(targetName, 120),
+      targetAvatarUrl: target ? discordAvatarUrl(target) : '',
+      reason: cleanText(entry.reason || '', 300),
+      changes: (entry.changes || []).slice(0, 8).map((change) => ({ key: cleanText(change.key, 40), oldValue: auditValue(change.old_value), newValue: auditValue(change.new_value) })),
+      count: entry.options?.count ? Number(entry.options.count) : 0,
+      channelId: entry.options?.channel_id ? String(entry.options.channel_id) : '',
+    };
+  });
+  return { entries, hasMore: rawEntries.length >= LIMIT, nextBefore: entries.length ? entries[entries.length - 1].id : null };
+}
 function parseTaskLines(content) {
   const tasks = [];
   for (const original of String(content || '').split(/\r?\n/)) {
@@ -890,6 +962,18 @@ async function handleApi(parts, req, res) {
   if (route === 'roster' && req.method === 'GET') {
     try { return sendJson(res, 200, await getRoster()); }
     catch (error) { console.error('[roster]', cleanText(error.message, 200)); return sendError(res, 503, `تعذر تحميل قائمة الاستاف: ${cleanText(error.message, 200)}`); }
+  }
+
+  if (route === 'audit-log' && parts.length === 1 && req.method === 'GET') {
+    if (!canManage(user)) return sendError(res, 403, 'سجل السيرفر متاح لمسؤولي الإدارة فقط.');
+    const auditQuery = { ...(req.query || {}) };
+    try { for (const [key, value] of new URL(req.url, 'http://localhost').searchParams) if (auditQuery[key] === undefined) auditQuery[key] = value; } catch { /* ignore */ }
+    try { return sendJson(res, 200, await getMainAuditLog(auditQuery)); }
+    catch (error) {
+      console.error('[audit-log]', cleanText(error.message, 200));
+      const hint = /permission|access/i.test(String(error.message)) ? ' تأكد إن البوت عنده صلاحية View Audit Log في السيرفر الأساسي.' : '';
+      return sendError(res, 503, `تعذر تحميل سجل السيرفر: ${cleanText(error.message, 160)}.${hint}`);
+    }
   }
 
   await ensureSchema();
