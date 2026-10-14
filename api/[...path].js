@@ -719,45 +719,89 @@ async function postDiscordEmbed(channelId, embed) {
 }
 // رسالة عادية (مش Embed) بعد قبول التسليم: مين عمل المهمة + مين قبلها + الصور/الفيديوهات المرفقة.
 async function postApprovedSubmissionMessage({ req, submissionId, sub, reviewer, taskRows }) {
-  const MAX_TOTAL = 9 * 1024 * 1024; // حد آمن لحجم المرفقات في رسالة ديسكورد الواحدة
   const files = parseJson(sub.files_json, []);
-  const attachments = [];
-  const linkOnly = [];
-  let total = 0;
-  if (files.length) {
-    if (!blobSdkPromise) blobSdkPromise = import('@vercel/blob');
-    const { get } = await blobSdkPromise;
-    for (const file of files) {
-      const size = Number(file.size || 0);
-      const link = `${siteUrl(req)}/api/evidence?token=${encodeURIComponent(file.token)}`;
-      if (attachments.length >= 10 || total + size > MAX_TOTAL) { linkOnly.push(`• ${cleanText(file.originalName, 100)}: ${link}`); continue; }
-      try {
-        const result = await get(file.pathname, { access: 'private', token: blobToken() || undefined });
-        if (!result || result.statusCode !== 200 || !result.stream) throw new Error('missing blob');
-        const data = Buffer.from(await new Response(result.stream).arrayBuffer());
-        if (total + data.length > MAX_TOTAL) { linkOnly.push(`• ${cleanText(file.originalName, 100)}: ${link}`); continue; }
-        total += data.length;
-        attachments.push({ name: cleanText(file.originalName, 100).replace(/[^\w.\-]/g, '_') || `evidence-${attachments.length + 1}`, type: file.mimeType || 'application/octet-stream', data });
-      } catch (error) {
-        console.error('[approved msg attachment]', cleanText(error.message, 160));
-        linkOnly.push(`• ${cleanText(file.originalName, 100)}: ${link}`);
-      }
-    }
-  }
+  const { attachments, linkOnly } = await loadEvidenceAttachments(req, files);
   const tasksLine = taskRows.map((t) => `**${cleanText(t.title, 120)}**`).join('، ').slice(0, 600) || 'مهمة';
   let content = `✅ **تم قبول مهمة**\n📋 **المهمة:** ${tasksLine}\n👤 **اللي عملها:** <@${sub.user_id}>\n🛡️ **اللي قبلها:** <@${reviewer.id}>`;
   if (linkOnly.length) content += `\n\n📎 **مرفقات كبيرة:**\n${linkOnly.join('\n')}`;
   content = content.slice(0, 1990);
-  const payload = { content, allowed_mentions: { parse: [] } };
-  if (!attachments.length) {
-    return discordApi(`/channels/${TASK_APPROVED_CHANNEL_ID}/messages`, { method: 'POST', body: JSON.stringify(payload) });
-  }
-  const form = new FormData();
-  payload.attachments = attachments.map((file, index) => ({ id: index, filename: file.name }));
-  form.append('payload_json', JSON.stringify(payload));
-  attachments.forEach((file, index) => form.append(`files[${index}]`, new Blob([file.data], { type: file.type }), file.name));
-  return discordApi(`/channels/${TASK_APPROVED_CHANNEL_ID}/messages`, { method: 'POST', body: form });
+  return postDiscordWithFiles(TASK_APPROVED_CHANNEL_ID, { content, allowed_mentions: { parse: [] } }, attachments);
 }
+
+// ===== فحص الملفات المرفوعة فعليًا (مش بس الامتداد/النوع اللي المتصفح بيقوله) =====
+const MEDIA_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/gif': 'gif', 'image/webp': 'webp', 'image/avif': 'avif', 'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm' };
+function detectMediaType(buf) {
+  if (!buf || buf.length < 12) return null;
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'image/jpeg';
+  if (buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))) return 'image/png';
+  const head6 = buf.subarray(0, 6).toString('latin1');
+  if (head6 === 'GIF87a' || head6 === 'GIF89a') return 'image/gif';
+  if (buf.subarray(0, 4).toString('latin1') === 'RIFF' && buf.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
+  if (buf.subarray(4, 8).toString('latin1') === 'ftyp') {
+    const brand = buf.subarray(8, 12).toString('latin1');
+    if (brand === 'avif' || brand === 'avis') return 'image/avif';
+    if (brand === 'qt  ') return 'video/quicktime';
+    return 'video/mp4';
+  }
+  if (buf[0] === 0x1A && buf[1] === 0x45 && buf[2] === 0xDF && buf[3] === 0xA3) return 'video/webm';
+  return null;
+}
+async function sniffBlobMime(pathname) {
+  if (!blobSdkPromise) blobSdkPromise = import('@vercel/blob');
+  const { get } = await blobSdkPromise;
+  const result = await get(pathname, { access: 'private', token: blobToken() || undefined });
+  if (!result || result.statusCode !== 200 || !result.stream) return null;
+  const reader = result.stream.getReader();
+  let buf = Buffer.alloc(0);
+  try {
+    while (buf.length < 16) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf = Buffer.concat([buf, Buffer.from(value)]);
+    }
+  } finally { try { await reader.cancel(); } catch { /* ignore */ } }
+  return detectMediaType(buf);
+}
+async function deleteBlobQuietly(pathname) {
+  try { if (!blobSdkPromise) blobSdkPromise = import('@vercel/blob'); const { del } = await blobSdkPromise; await del(pathname, { token: blobToken() || undefined }); } catch { /* ignore */ }
+}
+// يحمّل الأدلة من التخزين الخاص عشان تتبعت كمرفقات حقيقية في ديسكورد (بأسماء آمنة بدل اسم الملف الأصلي).
+async function loadEvidenceAttachments(req, files) {
+  const MAX_TOTAL = 9 * 1024 * 1024;
+  const attachments = [];
+  const linkOnly = [];
+  let total = 0;
+  if (!files.length) return { attachments, linkOnly };
+  if (!blobSdkPromise) blobSdkPromise = import('@vercel/blob');
+  const { get } = await blobSdkPromise;
+  for (const file of files) {
+    const link = `${siteUrl(req)}/api/evidence?token=${encodeURIComponent(file.token)}`;
+    const label = `• ${cleanText(file.originalName, 100)}: ${link}`;
+    if (attachments.length >= 10 || total + Number(file.size || 0) > MAX_TOTAL) { linkOnly.push(label); continue; }
+    try {
+      const result = await get(file.pathname, { access: 'private', token: blobToken() || undefined });
+      if (!result || result.statusCode !== 200 || !result.stream) throw new Error('missing blob');
+      const data = Buffer.from(await new Response(result.stream).arrayBuffer());
+      const type = detectMediaType(data);
+      if (!type) { linkOnly.push(`• ${cleanText(file.originalName, 100)}: ⚠️ ملف مش صورة/فيديو حقيقي، متفتحوش`); continue; }
+      if (total + data.length > MAX_TOTAL) { linkOnly.push(label); continue; }
+      total += data.length;
+      attachments.push({ name: `evidence-${attachments.length + 1}.${MEDIA_EXT[type] || 'bin'}`, type, data });
+    } catch (error) {
+      console.error('[evidence attachment]', cleanText(error.message, 160));
+      linkOnly.push(label);
+    }
+  }
+  return { attachments, linkOnly };
+}
+async function postDiscordWithFiles(channelId, payload, attachments) {
+  if (!attachments.length) return discordApi(`/channels/${channelId}/messages`, { method: 'POST', body: JSON.stringify(payload) });
+  const form = new FormData();
+  form.append('payload_json', JSON.stringify({ ...payload, attachments: attachments.map((file, index) => ({ id: index, filename: file.name })) }));
+  attachments.forEach((file, index) => form.append(`files[${index}]`, new Blob([file.data], { type: file.type }), file.name));
+  return discordApi(`/channels/${channelId}/messages`, { method: 'POST', body: form });
+}
+
 function buildLeaveEmbed(item, status = 'pending', reviewerId = '', note = '') {
   const id = Number(item.id);
   const userId = String(item.user_id ?? item.userId ?? '');
@@ -1000,6 +1044,7 @@ async function sendPrivateEvidence(req, res) {
   res.setHeader('Content-Type', file.mimeType || result.blob.contentType || 'application/octet-stream');
   res.setHeader('Content-Disposition', `${String(file.mimeType || '').startsWith('image/') || String(file.mimeType || '').startsWith('video/') ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(file.originalName || 'evidence-file')}`);
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
   res.setHeader('Cache-Control', 'private, no-store');
   Readable.fromWeb(result.stream).pipe(res);
 }
@@ -1501,7 +1546,12 @@ async function handleApi(parts, req, res) {
       if (!pathname.startsWith(`evidence/${user.id}/`) || pathname.includes('..')) return sendError(res, 400, 'مسار ملف الدليل غير صالح.');
       if (!(mimeType.startsWith('image/') || mimeType.startsWith('video/'))) return sendError(res, 400, 'ارفع صور أو فيديوهات فقط.');
       if (!Number.isFinite(size) || size < 1 || size > MAX_UPLOAD_MB * 1024 * 1024) return sendError(res, 400, `حجم الملف خارج الحد المسموح (${MAX_UPLOAD_MB}MB).`);
-      files.push({ pathname, token: crypto.randomBytes(24).toString('base64url'), originalName, mimeType, size });
+      const realType = await sniffBlobMime(pathname).catch(() => null);
+      if (!realType) {
+        await deleteBlobQuietly(pathname);
+        return sendError(res, 400, `الملف "${originalName.slice(0, 60)}" مش صورة أو فيديو حقيقي (ممكن يكون ملف متنكر). ارفع صورة أو فيديو سليم.`);
+      }
+      files.push({ pathname, token: crypto.randomBytes(24).toString('base64url'), originalName, mimeType: realType, size });
     }
     if (!links.length && !files.length) return sendError(res, 400, 'ضيف رابط دليل أو ارفع صورة/فيديو قبل الإرسال.');
     const note = cleanText(req.body?.note, 600);
@@ -1512,8 +1562,14 @@ async function handleApi(parts, req, res) {
     await pushAdminNotification(sql, { type: 'submission', title: `📨 تسليم جديد #${submissionId}`, body: `${user.username} — ${foundTasks.length} مهمة${files.length ? ` · ${files.length} ملف` : ''}`, refId: submissionId, actorId: user.id });
     const base = siteUrl(req);
     const taskText = foundTasks.map((task) => `• ${task.required ? '🔴 إجباري' : '⚪ اختياري'} — **${cleanText(task.title, 140)}** — ${formatPoints(task.points)} نقطة`).join('\n').slice(0, 1024) || 'لم يتم تحديد مهمة.';
-    const fileText = files.map((file) => `• [${cleanText(file.originalName, 120)}](${base}/api/evidence?token=${encodeURIComponent(file.token)})`).join('\n').slice(0, 1024) || 'لا توجد ملفات مرفوعة.';
-    const linkText = links.map((link) => `• ${link}`).join('\n').slice(0, 1024) || 'لا توجد روابط خارجية.';
+    let evidence = { attachments: [], linkOnly: [] };
+    try { evidence = await loadEvidenceAttachments(req, files); } catch (error) { console.error('[evidence load]', cleanText(error.message, 160)); }
+    const fileLines = [
+      ...(evidence.attachments.length ? [`📎 ${evidence.attachments.length} ملف مرفق مباشرة في الرسالة (بدون روابط)`] : []),
+      ...evidence.linkOnly,
+    ];
+    const fileText = fileLines.join('\n').slice(0, 1024) || 'لا توجد ملفات مرفوعة.';
+    const linkText = links.map((link) => `• <${link}>`).join('\n').slice(0, 1024) || 'لا توجد روابط خارجية.';
     let discordPosted = false;
     let warning = '';
     try {
@@ -1526,14 +1582,16 @@ async function handleApi(parts, req, res) {
           { name: '🧾 رقم التسليم', value: `#${submissionId}`, inline: true },
           { name: `🎯 المهمة المحددة (${foundTasks.length})`, value: taskText, inline: false },
           { name: '📎 ملفات الدليل', value: fileText, inline: false },
-          { name: '🔗 روابط إضافية', value: linkText, inline: false },
+          { name: links.length ? '🔗 روابط إضافية ⚠️ (من العضو، متفتحهاش إلا لو موثوقة)' : '🔗 روابط إضافية', value: linkText, inline: false },
           ...(note ? [{ name: '📝 ملاحظة العضو', value: note.slice(0, 1024), inline: false }] : []),
         ],
         timestamp: new Date().toISOString(),
         footer: { text: 'إدارة البرج • مراجعة أدلة المهمات' },
         ...(user.avatarUrl ? { thumbnail: { url: user.avatarUrl } } : {}),
       };
-      await postDiscordEmbed(SUBMISSION_REVIEW_CHANNEL_ID, embed);
+      const firstImage = evidence.attachments.find((file) => file.type.startsWith('image/'));
+      if (firstImage) embed.image = { url: `attachment://${firstImage.name}` };
+      await postDiscordWithFiles(SUBMISSION_REVIEW_CHANNEL_ID, { embeds: [embed], allowed_mentions: { parse: [] } }, evidence.attachments);
       discordPosted = true;
     } catch (error) { warning = cleanText(error.message, 220); console.error('[submission post]', warning); }
     try { await postDiscordMessage(TASK_SUBMISSIONS_CHANNEL_ID, `📨 تسليم جديد #${submissionId} من <@${user.id}> — بانتظار الموافقة. لا تُضاف النقاط إلا بعد اعتماد المسؤولين.`); } catch {}
