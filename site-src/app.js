@@ -270,11 +270,11 @@ function renderTaskList() {
           <span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? '● مهمة إجبارية' : '○ مهمة اختيارية'}</span>
           <span class="task-id">#${task.id} · ⭐ ${Number(task.points || 0)} نقطة</span>
           ${task.deadline_at ? `<span class="task-tag task-deadline-tag">⏰ تنتهي ${escapeHtml(formatDate(task.deadline_at, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Cairo' }))}</span>` : ''}
-          ${task.completedByMe ? '<span class="task-tag completed">✓ انتهت</span>' : task.pendingByMe ? '<span class="task-tag optional">⏳ بانتظار المراجعة</span>' : task.rejectedByMe ? '<span class="task-tag required">✕ مرفوضة · اتقفلت</span>' : ''}
+          ${task.redoRequiredByMe ? '<span class="task-tag required">🔁 الإدارة طلبت إعادة المهمة · تم خصم النقاط</span>' : task.completedByMe ? '<span class="task-tag completed">✓ انتهت</span>' : task.pendingByMe ? '<span class="task-tag optional">⏳ بانتظار المراجعة</span>' : task.rejectedByMe ? '<span class="task-tag required">✕ مرفوضة · اتقفلت</span>' : ''}
         </div>
       </div>
       <div class="task-row-actions">
-        ${task.completedByMe ? '<span class="task-complete-label">انتهت · مينفعش تتسلم تاني</span>' : task.pendingByMe ? '<span class="task-complete-label">متسلمة بانتظار المراجعة</span>' : task.rejectedByMe ? '<span class="task-complete-label">اترفضت · مينفعش تتسلم تاني</span>' : ''}
+        ${task.redoRequiredByMe ? '<span class="task-complete-label">مطلوب إعادة تسليم المهمة</span>' : task.completedByMe ? '<span class="task-complete-label">انتهت · مينفعش تتسلم تاني</span>' : task.pendingByMe ? '<span class="task-complete-label">متسلمة بانتظار المراجعة</span>' : task.rejectedByMe ? '<span class="task-complete-label">اترفضت · مينفعش تتسلم تاني</span>' : ''}
       ${state.user.canManage ? `<label class="task-points-editor" title="تعديل نقاط المهمة">⭐ <input type="number" min="0" max="100000" step="0.01" value="${Number(task.points || 0)}" data-task-points="${task.id}" aria-label="نقاط المهمة ${task.id}"> <span>نقطة</span></label>` : ''}
       ${state.user.canManage ? `<label class="task-manager-toggle"><input type="checkbox" data-required-toggle="${task.id}" ${task.required ? 'checked' : ''}> إجبارية</label>` : ''}
 ${state.user.canManage ? `<button type="button" class="task-delete-button" data-delete-task="${task.id}" aria-label="حذف المهمة ${task.id}">🗑️ حذف</button>` : ''}
@@ -549,11 +549,35 @@ async function loadSubmissions() {
     $('#submissions-list').innerHTML = submissions.map((submission) => {
       const files = (submission.files || []).map((file) => `<a href="${escapeHtml(file.url)}" target="_blank" rel="noopener noreferrer">📎 ${escapeHtml(file.originalName || 'ملف مرفوع')}</a>`).join('');
       const links = (submission.evidenceLinks || []).map((link) => `<a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">↗ فتح رابط دليل</a>`).join('');
-      const tasks = (submission.tasks || []).map((task) => `<span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? 'إجباري' : 'اختياري'} · ${escapeHtml(task.title)}</span>`).join('');
+      const tasks = (submission.tasks || []).map((task) => {
+        const redoStatus = String(task.redoStatus || '');
+        const redoBadge = redoStatus === 'requested'
+          ? '<span class="task-tag required">🔁 مطلوب إعادة المهمة</span>'
+          : redoStatus === 'submitted'
+            ? '<span class="task-tag optional">🔁 تم إعادة التسليم</span>'
+            : '';
+        const redoButton = state.user.canManage && submission.status === 'approved' && task.canRequestRedo && !redoStatus
+          ? `<button type="button" class="task-redo-action" data-redo-task="${submission.id}" data-task-id="${task.id}" data-task-title="${escapeHtml(task.title)}">🔁 طلب إعادة المهمة</button>`
+          : '';
+        return `<span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? 'إجباري' : 'اختياري'} · ${escapeHtml(task.title)}</span>${redoBadge}${redoButton}`;
+      }).join('');
       const duplicateWarning = state.user.canManage && (submission.duplicateImages || []).length ? `<div class="duplicate-image-warning"><b>⚠️ تنبيه: تم اكتشاف صورة مكررة</b>${submission.duplicateImages.map((duplicate) => `<div>${escapeHtml(duplicate.fileName)} — موجودة في ${duplicate.matches.slice(0, 5).map((match) => `التسليم #${match.submissionId} بواسطة ${escapeHtml(match.username)}`).join('، ')}</div>`).join('')}</div>` : '';
       return `<article class="submission-card"><div class="submission-top"><div class="submission-user"><img src="${escapeHtml(submission.avatarUrl || avatarFallback(submission.userId))}" alt=""><span>${escapeHtml(submission.username)}</span><span class="task-id">#${submission.id}</span><span class="task-tag ${submission.status === 'approved' ? 'completed' : submission.status === 'rejected' ? 'required' : 'optional'}">${submission.status === 'approved' ? 'تمت الموافقة' : submission.status === 'rejected' ? 'مرفوض' : submission.status === 'reopened' ? 'أُعيد فتحه' : 'بانتظار الموافقة'}</span></div><time class="submission-date">${formatDate(submission.submittedAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</time></div><div class="submission-task-list">${tasks}</div>${submission.note ? `<div class="submission-note">${escapeHtml(submission.note)}</div>` : ''}${duplicateWarning}${files || links ? `<div class="submission-evidence">${files}${links}</div>` : ''}${state.user.canManage && submission.status === 'pending' ? `<div class="manager-actions"><button class="primary-button" data-review-submission="approve" data-id="${submission.id}">موافقة وإضافة النقاط</button><button class="secondary-button" data-review-submission="reject" data-id="${submission.id}">رفض التسليم</button></div>` : ''}${state.user.canManage && submission.status === 'rejected' ? `<div class="manager-actions"><button class="secondary-button" data-review-submission="reopen" data-id="${submission.id}">🔓 إعادة فتح المهمة للعضو</button></div>` : ''}</article>`;
     }).join('');
-    $$('[data-review-submission]').forEach(button => button.addEventListener('click', async () => { const action = button.dataset.reviewSubmission; const id = button.dataset.id; let reason = ''; if (action === 'reject') { reason = window.prompt('سبب رفض التسليم (اختياري):') || ''; } if (action === 'reopen') { if (!window.confirm('هتفتح التسليم ده تاني، والعضو هيقدر يسلّم نفس المهام من جديد. متأكد؟')) return; reason = window.prompt('ملاحظة للعضو (اختياري):') || ''; } button.disabled = true; try { const result = await api(`/api/submissions/${id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason, note: reason }) }); showToast(result.message || (action === 'approve' ? `تمت الموافقة وإضافة ${result.awarded} نقطة.` : 'تم رفض التسليم.'), result.dmSent === false ? 'info' : 'success'); await Promise.all([loadSubmissions(), loadMyPoints()]); } catch (error) { showToast(error.message, 'error'); button.disabled = false; } }));
+    $$('[data-review-submission]').forEach(button => button.addEventListener('click', async () => { const action = button.dataset.reviewSubmission; const id = button.dataset.id; let reason = ''; if (action === 'reject') { reason = window.prompt('سبب رفض التسليم (اختياري):') || ''; } if (action === 'reopen') { if (!window.confirm('هتفتح التسليم ده تاني، والعضو هيقدر يسلّم نفس المهام من جديد. متأكد؟')) return; reason = window.prompt('ملاحظة للعضو (اختياري):') || ''; } button.disabled = true; try { const result = await api(`/api/submissions/${id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason, note: reason }) }); showToast(result.message || (action === 'approve' ? `تمت الموافقة وإضافة ${result.awarded} نقطة.` : 'تم رفض التسليم.'), result.dmSent === false ? 'info' : 'success'); await Promise.all([loadSubmissions(), loadMyPoints(), loadTasks()]); } catch (error) { showToast(error.message, 'error'); button.disabled = false; } }));
+    $$('[data-redo-task]').forEach(button => button.addEventListener('click', async () => {
+      const submissionId = Number(button.dataset.redoTask);
+      const taskId = Number(button.dataset.taskId);
+      const title = button.dataset.taskTitle || `المهمة #${taskId}`;
+      if (!window.confirm(`طلب إعادة المهمة دي؟\n\n${title}\n\nهيتم خصم نقاط المهمة من رصيد العضو، وهيقدر يسلّمها مرة تانية.`)) return;
+      const reason = window.prompt('سبب طلب الإعادة (اختياري):') || '';
+      button.disabled = true;
+      try {
+        const result = await api(`/api/submissions/${submissionId}/redo-task`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ taskId, reason }) });
+        showToast(result.message || `تم طلب إعادة المهمة وخصم ${result.pointsDeducted} نقطة.`, result.dmSent === false ? 'info' : 'success');
+        await Promise.all([loadSubmissions(), loadMyPoints(), loadTasks()]);
+      } catch (error) { showToast(error.message || 'تعذر طلب إعادة المهمة.', 'error'); button.disabled = false; }
+    }));
   } catch (error) {
     $('#submissions-list').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
   }

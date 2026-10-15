@@ -41,7 +41,7 @@ let lastMessageSyncAt = 0;
 let messageSyncPromise;
 
 // ───────── تخفيف الضغط: كاش في الذاكرة + حد للطلبات ─────────
-const SCHEMA_VERSION = 4; // ارفعه كل ما تضيف جدول/عمود جديد في ensureSchema
+const SCHEMA_VERSION = 5; // ارفعه كل ما تضيف جدول/عمود جديد في ensureSchema
 const PRESENCE_WINDOW_SECONDS = 150; // مدة اعتبار العضو "متصل" بعد آخر نبضة (النبضة كل 60 ثانية)
 const MESSAGE_SYNC_MIN_MS = Math.max(15, Number(process.env.MESSAGE_SYNC_MIN_SECONDS || 45)) * 1000;
 const memCache = new Map();
@@ -236,6 +236,25 @@ async function ensureSchema() {
       PRIMARY KEY (submission_id, task_id)
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_submission_tasks_task ON submission_tasks(task_id)`;
+    await sql`ALTER TABLE submission_tasks ADD COLUMN IF NOT EXISTS points_awarded NUMERIC(10,2)`;
+    await sql`CREATE TABLE IF NOT EXISTS task_rework_requests (
+      id BIGSERIAL PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      username TEXT NOT NULL,
+      task_id BIGINT NOT NULL,
+      task_title TEXT NOT NULL,
+      original_submission_id BIGINT NOT NULL,
+      requested_by TEXT NOT NULL,
+      requested_by_name TEXT NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      points_deducted NUMERIC(10,2) NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'requested' CHECK (status IN ('requested','submitted','completed','cancelled')),
+      current_submission_id BIGINT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMPTZ
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_task_rework_user_task ON task_rework_requests(user_id, task_id, created_at DESC)`;
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_task_rework_active_unique ON task_rework_requests(user_id, task_id) WHERE status IN ('requested','submitted')`;
     await sql`CREATE TABLE IF NOT EXISTS submission_review_audit (
       id BIGSERIAL PRIMARY KEY, submission_id BIGINT NOT NULL, member_id TEXT NOT NULL, member_name TEXT NOT NULL,
       decision TEXT NOT NULL CHECK (decision IN ('approved','rejected','reopened')), reviewer_id TEXT NOT NULL, reviewer_name TEXT NOT NULL,
@@ -1469,14 +1488,22 @@ async function handleApi(parts, req, res) {
   if (route === 'tasks' && parts.length === 1 && req.method === 'GET') {
     await syncDiscordTasks(sql);
     await sql`UPDATE tasks SET active = FALSE WHERE active = TRUE AND deadline_at IS NOT NULL AND deadline_at <= NOW()`;
-    const rows = await sql`SELECT id, title, points, required, active, created_by_name, created_at, deadline_at FROM tasks WHERE active = TRUE AND (deadline_at IS NULL OR deadline_at > NOW()) ORDER BY required DESC, id DESC`;
-    const completedRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'approved'`;
+    const rows = await sql`SELECT t.id, t.title, t.points, t.required, t.active, t.created_by_name, t.created_at, t.deadline_at FROM tasks t WHERE (t.active = TRUE AND (t.deadline_at IS NULL OR t.deadline_at > NOW())) OR EXISTS (SELECT 1 FROM task_rework_requests tr WHERE tr.user_id = ${user.id} AND tr.task_id = t.id AND tr.status IN ('requested','submitted')) ORDER BY t.required DESC, t.id DESC`;
+    const completedRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'approved' AND NOT EXISTS (SELECT 1 FROM task_rework_requests tr WHERE tr.user_id = s.user_id AND tr.task_id = st.task_id AND tr.status IN ('requested','submitted'))`;
     const completed = new Set(completedRows.map((row) => String(row.task_id)));
     const pendingRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'pending'`;
     const pending = new Set(pendingRows.map((row) => String(row.task_id)));
     const rejectedRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'rejected'`;
     const rejected = new Set(rejectedRows.map((row) => String(row.task_id)));
-    const tasks = rows.map((row) => ({ id: Number(row.id), title: row.title, points: Number(row.points || 0), required: Boolean(row.required), active: Boolean(row.active), created_by_name: row.created_by_name, created_at: row.created_at, deadline_at: row.deadline_at, completedByMe: completed.has(String(row.id)), pendingByMe: !completed.has(String(row.id)) && pending.has(String(row.id)), rejectedByMe: !completed.has(String(row.id)) && !pending.has(String(row.id)) && rejected.has(String(row.id)) }));
+    const reworkRows = await sql`SELECT task_id, status FROM task_rework_requests WHERE user_id = ${user.id} AND status IN ('requested','submitted')`;
+    const rework = new Map(reworkRows.map((row) => [String(row.task_id), String(row.status)]));
+    const tasks = rows.map((row) => {
+      const taskId = String(row.id);
+      const reworkStatus = rework.get(taskId) || '';
+      const completedByMe = completed.has(taskId);
+      const pendingByMe = !completedByMe && pending.has(taskId);
+      return { id: Number(row.id), title: row.title, points: Number(row.points || 0), required: Boolean(row.required), active: Boolean(row.active), created_by_name: row.created_by_name, created_at: row.created_at, deadline_at: row.deadline_at, completedByMe, pendingByMe, rejectedByMe: !completedByMe && !pendingByMe && !reworkStatus && rejected.has(taskId), redoRequiredByMe: reworkStatus === 'requested', redoPendingByMe: reworkStatus === 'submitted' };
+    });
     const required = tasks.filter((task) => task.required);
     return sendJson(res, 200, { tasks, stats: { active: tasks.length, required: required.length, completedRequired: required.filter((task) => task.completedByMe).length, completedByMe: tasks.filter((task) => task.completedByMe).length } });
   }
@@ -1677,12 +1704,12 @@ async function handleApi(parts, req, res) {
     const taskIdsInput = Array.isArray(req.body?.taskIds) ? req.body.taskIds : [];
     const taskIds = [...new Set(taskIdsInput.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))].slice(0, 40);
     if (!taskIds.length) return sendError(res, 400, 'اختار مهمة واحدة على الأقل.');
-    const activeTasks = await sql`SELECT id, title, points, required FROM tasks WHERE active = TRUE`;
+    const activeTasks = await sql`SELECT t.id, t.title, t.points, t.required FROM tasks t WHERE t.active = TRUE OR EXISTS (SELECT 1 FROM task_rework_requests tr WHERE tr.user_id = ${user.id} AND tr.task_id = t.id AND tr.status = 'requested')`;
     const byId = new Map(activeTasks.map((row) => [Number(row.id), row]));
     const foundTasks = taskIds.map((id) => byId.get(id)).filter(Boolean);
     if (foundTasks.length !== taskIds.length) return sendError(res, 400, 'في مهمة من اللي اخترتها مش موجودة أو اتقفلت. حدّث الصفحة وجرب تاني.');
     // المهمة اللي اتسلمت قبل كده (اتقبلت أو اترفضت أو لسه بتتراجع) لنفس العضو ميقدرش يسلمها تاني.
-    const lockedRows = await sql`SELECT st.task_id, s.status FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status IN ('approved','pending','rejected') AND st.task_id = ANY(${taskIds})`;
+    const lockedRows = await sql`SELECT st.task_id, s.status FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id LEFT JOIN task_rework_requests tr ON tr.user_id = s.user_id AND tr.task_id = st.task_id AND tr.status IN ('requested','submitted') WHERE s.user_id = ${user.id} AND s.status IN ('approved','pending','rejected') AND st.task_id = ANY(${taskIds}) AND NOT (s.status IN ('approved','rejected') AND tr.id IS NOT NULL)`;
     const doneTask = lockedRows.find((row) => row.status === 'approved');
     if (doneTask) return sendError(res, 409, `المهمة #${doneTask.task_id} انتهت بالفعل وانت خلصتها قبل كده، مينفعش تسلّمها تاني. شيلها من الاختيار.`);
     const rejectedTask = lockedRows.find((row) => row.status === 'rejected');
@@ -1735,6 +1762,7 @@ async function handleApi(parts, req, res) {
       VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, ${note}, ${JSON.stringify(links)}::jsonb, ${JSON.stringify(files)}::jsonb, NOW(), 'pending') RETURNING id, submitted_at`;
     const submissionId = Number(inserted[0].id);
     for (const taskId of taskIds) await sql`INSERT INTO submission_tasks(submission_id, task_id) VALUES (${submissionId}, ${taskId}) ON CONFLICT DO NOTHING`;
+    await sql`UPDATE task_rework_requests SET status = 'submitted', current_submission_id = ${submissionId} WHERE user_id = ${user.id} AND task_id = ANY(${taskIds}) AND status = 'requested'`;
     for (const file of files) if (file.sha256) await sql`INSERT INTO submission_file_hashes(submission_id, file_sha256, user_id, username, original_name, created_at) VALUES (${submissionId}, ${file.sha256}, ${user.id}, ${user.username}, ${file.originalName}, NOW()) ON CONFLICT DO NOTHING`;
     await pushAdminNotification(sql, { type: 'submission', title: `📨 تسليم جديد #${submissionId}`, body: `${user.username} — ${foundTasks.length} مهمة${files.length ? ` · ${files.length} ملف` : ''}`, refId: submissionId, actorId: user.id });
     const base = siteUrl(req);
@@ -1792,13 +1820,27 @@ async function handleApi(parts, req, res) {
     let taskRows = [];
     if (ids.length) {
       const placeholders = ids.map((_, index) => `$${index + 1}`).join(', ');
-      taskRows = await sql.query(`SELECT st.submission_id, t.id, t.title, t.points, t.required FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id IN (${placeholders}) ORDER BY t.required DESC, t.id`, ids);
+      taskRows = await sql.query(`SELECT st.submission_id, s.user_id, t.id, t.title, COALESCE(st.points_awarded, t.points) AS points, t.required FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id JOIN tasks t ON t.id = st.task_id WHERE st.submission_id IN (${placeholders}) ORDER BY st.submission_id DESC, t.required DESC, t.id`, ids);
     }
     const tasksBySubmission = new Map();
+    const submissionOwners = [...new Set(rows.map((row) => String(row.user_id)))];
+    const relatedTaskIds = [...new Set(taskRows.map((row) => Number(row.id)))];
+    const activeReworks = submissionOwners.length && relatedTaskIds.length
+      ? await sql`SELECT user_id, task_id, status FROM task_rework_requests WHERE user_id = ANY(${submissionOwners}) AND task_id = ANY(${relatedTaskIds}) AND status IN ('requested','submitted')`
+      : [];
+    const activeReworkMap = new Map(activeReworks.map((row) => [`${row.user_id}:${row.task_id}`, String(row.status)]));
+    const submissionStatusById = new Map(rows.map((row) => [Number(row.id), String(row.status)]));
+    const latestApprovedSubmissionByUserTask = new Map();
+    for (const row of taskRows) {
+      if (submissionStatusById.get(Number(row.submission_id)) !== 'approved') continue;
+      const key = `${row.user_id}:${row.id}`;
+      if (!latestApprovedSubmissionByUserTask.has(key)) latestApprovedSubmissionByUserTask.set(key, Number(row.submission_id));
+    }
     for (const row of taskRows) {
       const key = Number(row.submission_id);
       if (!tasksBySubmission.has(key)) tasksBySubmission.set(key, []);
-      tasksBySubmission.get(key).push({ id: Number(row.id), title: row.title, points: Number(row.points || 0), required: Boolean(row.required) });
+      const userTaskKey = `${row.user_id}:${row.id}`;
+      tasksBySubmission.get(key).push({ id: Number(row.id), title: row.title, points: Number(row.points || 0), required: Boolean(row.required), redoStatus: activeReworkMap.get(userTaskKey) || '', canRequestRedo: latestApprovedSubmissionByUserTask.get(userTaskKey) === key });
     }
     const duplicateMap = new Map();
     if (canManage(user) && ids.length) {
@@ -1856,6 +1898,76 @@ async function handleApi(parts, req, res) {
     } catch (e) { console.error('[points log]', cleanText(e.message, 180)); }
     return sendJson(res, 201, { ok: true, points: currentTotal });
   }
+  // طلب إعادة مهمة واحدة حتى لو كان تسليمها مقبولًا؛ تُسحب نقاط المهمة فقط وتُحفظ كل الحركة في سجل النقاط.
+  if (route === 'submissions' && parts.length === 3 && req.method === 'POST' && parts[2] === 'redo-task') {
+    if (!canManage(user)) return sendError(res, 403, 'طلب إعادة المهمات متاح للمسؤولين فقط.');
+    if (!ensureSameOrigin(req, res)) return;
+    const submissionId = Number(parts[1]);
+    const taskId = Number(req.body?.taskId);
+    if (!Number.isSafeInteger(submissionId) || submissionId < 1 || !Number.isSafeInteger(taskId) || taskId < 1) return sendError(res, 400, 'رقم التسليم أو المهمة غير صالح.');
+    const submissionRows = await sql`SELECT id, user_id, username, status FROM submissions WHERE id = ${submissionId} LIMIT 1`;
+    if (!submissionRows.length) return sendError(res, 404, 'التسليم غير موجود.');
+    const sub = submissionRows[0];
+    if (String(sub.status) !== 'approved') return sendError(res, 409, 'طلب إعادة المهمة متاح للتسليمات المقبولة فقط.');
+    // For legacy one-task submissions, the points ledger gives the exact historical award even if the task's value changed later.
+    const taskCountRows = await sql`SELECT COUNT(*)::int AS total FROM submission_tasks WHERE submission_id = ${submissionId}`;
+    if (Number(taskCountRows[0]?.total || 0) === 1) {
+      const historicalAwardRows = await sql`SELECT COALESCE(SUM(amount),0) AS amount FROM staff_points WHERE submission_id = ${submissionId} AND source = 'task'`;
+      await sql`UPDATE submission_tasks SET points_awarded = ${Number(historicalAwardRows[0]?.amount || 0)} WHERE submission_id = ${submissionId} AND task_id = ${taskId} AND points_awarded IS NULL`;
+    }
+    await sql`UPDATE submission_tasks st SET points_awarded = t.points FROM tasks t WHERE st.task_id = t.id AND st.submission_id = ${submissionId} AND st.points_awarded IS NULL`;
+    const taskRows = await sql`SELECT t.id, t.title, COALESCE(st.points_awarded, t.points) AS points_awarded FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${submissionId} AND t.id = ${taskId} LIMIT 1`;
+    if (!taskRows.length) return sendError(res, 404, 'المهمة دي مش مرتبطة بالتسليم المحدد.');
+    const task = taskRows[0];
+    const pointsDeducted = Math.round(Number(task.points_awarded || 0) * 100) / 100;
+    const reason = cleanText(req.body?.reason, 400);
+    const created = await sql`
+      WITH new_request AS (
+        INSERT INTO task_rework_requests(user_id, username, task_id, task_title, original_submission_id, requested_by, requested_by_name, reason, points_deducted, status, created_at)
+        SELECT ${sub.user_id}, ${sub.username}, ${taskId}, ${task.title}, ${submissionId}, ${user.id}, ${user.username}, ${reason}, ${pointsDeducted}, 'requested', NOW()
+        WHERE NOT EXISTS (SELECT 1 FROM task_rework_requests WHERE user_id = ${sub.user_id} AND task_id = ${taskId} AND status IN ('requested','submitted'))
+        RETURNING id, user_id, username, task_id, task_title, original_submission_id, points_deducted
+      ), debit AS (
+        INSERT INTO staff_points(user_id, username, amount, reason, actor_id, actor_name, source, submission_id, created_at)
+        SELECT nr.user_id, nr.username, -nr.points_deducted, ${`خصم نقاط لطلب إعادة المهمة #${taskId}`}, ${user.id}, ${user.username}, 'task_rework', nr.original_submission_id, NOW()
+        FROM new_request nr WHERE nr.points_deducted > 0
+        RETURNING id
+      )
+      SELECT * FROM new_request
+    `;
+    if (!created.length) return sendError(res, 409, 'الإدارة طلبت إعادة المهمة دي بالفعل أو العضو بيعيد تسليمها حاليًا.');
+    const reworkId = Number(created[0].id);
+    const totalRows = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${sub.user_id}`;
+    const totalAfter = Number(totalRows[0]?.total || 0);
+    const taskSummary = `**${cleanText(task.title, 180)}** (#${taskId})`;
+    const fields = [
+      { name: '📋 المهمة المطلوب إعادتها', value: taskSummary, inline: false },
+      { name: '💎 النقاط المسحوبة', value: `-${formatPoints(pointsDeducted)} نقطة`, inline: true },
+      { name: '📊 الرصيد الحالي', value: `${formatPoints(totalAfter)} نقطة`, inline: true },
+      { name: '🛡️ المسؤول', value: `<@${user.id}>`, inline: true },
+    ];
+    const dmPromise = notifyReview({ token: BOT_TOKEN, userId: sub.user_id, kind: 'submission', status: 'redo_requested', id: reworkId, reviewerId: user.id, note: reason, fields });
+    try {
+      await postDiscordEmbed(POINTS_LOG_CHANNEL_ID, {
+        title: '🔁 طلب إعادة مهمة وخصم نقاط',
+        description: `تم طلب إعادة المهمة من <@${sub.user_id}> رغم اعتمادها سابقًا.`,
+        color: 0xf59e0b,
+        fields: [
+          { name: '👤 العضو', value: `<@${sub.user_id}>`, inline: true },
+          { name: '📋 المهمة', value: taskSummary, inline: false },
+          { name: '💎 النقاط المسحوبة', value: `-${formatPoints(pointsDeducted)} نقطة`, inline: true },
+          { name: '📊 الرصيد الحالي', value: `${formatPoints(totalAfter)} نقطة`, inline: true },
+          { name: '🛡️ المسؤول', value: `<@${user.id}>`, inline: true },
+          ...(reason ? [{ name: '📝 السبب', value: reason.slice(0, 1024), inline: false }] : []),
+        ],
+        footer: { text: 'Borg Management • Task Rework' },
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) { console.error('[task redo log]', cleanText(error.message, 180)); }
+    const dm = await dmPromise;
+    return sendJson(res, 200, { ok: true, id: reworkId, taskId, pointsDeducted, totalAfter, dmSent: dm.ok, message: `تم طلب إعادة المهمة وخصم ${formatPoints(pointsDeducted)} نقطة من رصيد العضو.${dmNote(dm)}` });
+  }
+
   // إعادة فتح تسليم مرفوض: لو الإدارة رفضت بالغلط، الأدمن يفك القفل والعضو يقدر يسلّم المهمة تاني.
   // التسليم القديم بيفضل في السجل بحالة 'reopened' (مش بيتمسح)، والقفل بيعتمد على حالات approved/pending/rejected بس.
   if (route === 'submissions' && parts.length === 3 && req.method === 'POST' && parts[2] === 'reopen') {
@@ -1903,9 +2015,10 @@ async function handleApi(parts, req, res) {
     if (!['pending', 'submitted'].includes(String(sub.status))) return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
     if (parts[2] === 'reject') {
       const reason = cleanText(req.body?.reason, 300);
-      const taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${id} ORDER BY t.id`;
+      const taskRows = await sql`SELECT t.id, t.title, COALESCE(st.points_awarded, t.points) AS points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${id} ORDER BY t.id`;
       const rejected = await sql`UPDATE submissions SET status = 'rejected', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status IN ('pending','submitted') RETURNING id`;
       if (!rejected.length) return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
+      await sql`UPDATE task_rework_requests SET status = 'requested', current_submission_id = NULL WHERE user_id = ${sub.user_id} AND status = 'submitted' AND current_submission_id = ${id}`;
       await sql`INSERT INTO submission_review_audit(submission_id, member_id, member_name, decision, reviewer_id, reviewer_name, reason, created_at) VALUES (${id}, ${sub.user_id}, ${sub.username}, 'rejected', ${user.id}, ${user.username}, ${reason}, NOW())`;
       const dmPromise = notifyReview({ token: BOT_TOKEN, userId: sub.user_id, kind: 'submission', status: 'rejected', id, reviewerId: user.id, note: reason });
       const totals = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${sub.user_id}`;
@@ -1920,10 +2033,12 @@ async function handleApi(parts, req, res) {
       const dm = await dmPromise;
       return sendJson(res, 200, { ok: true, status: 'rejected', dmSent: dm.ok, message: `تم رفض التسليم.${dmNote(dm)}` });
     }
-    const taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${id}`;
+    await sql`UPDATE submission_tasks st SET points_awarded = t.points FROM tasks t WHERE st.task_id = t.id AND st.submission_id = ${id} AND st.points_awarded IS NULL`;
+    const taskRows = await sql`SELECT t.id, t.title, COALESCE(st.points_awarded, t.points) AS points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${id}`;
     const amount = Math.round(taskRows.reduce((sum, t) => sum + Number(t.points || 0), 0) * 100) / 100;
     const marked = await sql`UPDATE submissions SET status = 'approved', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status IN ('pending','submitted') RETURNING id`;
     if (!marked.length) return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
+    await sql`UPDATE task_rework_requests SET status = 'completed', completed_at = NOW() WHERE user_id = ${sub.user_id} AND status = 'submitted' AND current_submission_id = ${id}`;
     await sql`INSERT INTO submission_review_audit(submission_id, member_id, member_name, decision, reviewer_id, reviewer_name, reason, created_at) VALUES (${id}, ${sub.user_id}, ${sub.username}, 'approved', ${user.id}, ${user.username}, ${cleanText(req.body?.reason || req.body?.note, 300)}, NOW())`;
     if (amount > 0) await sql`INSERT INTO staff_points(user_id, username, amount, reason, actor_id, actor_name, source, submission_id, created_at) VALUES (${sub.user_id}, ${sub.username}, ${amount}, ${`اعتماد تسليم #${id}`}, ${user.id}, ${user.username}, 'task', ${id}, NOW())`;
     const totalAfterRows = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${sub.user_id}`;

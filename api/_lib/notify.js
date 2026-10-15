@@ -70,6 +70,17 @@ function buildReviewEmbed({ kind, status, id, reviewerId = '', note = '', fields
       footer: { text: label.footer },
     };
   }
+  if (status === 'redo_requested') {
+    if (note) list.push({ name: '📝 ملاحظة الإدارة', value: clip(note, 1000), inline: false });
+    return {
+      title: `🔁 الإدارة طلبت إعادة مهمة`,
+      description: 'الإدارة طلبت منك إعادة مهمة تم اعتمادها سابقًا. تم خصم نقاط المهمة من رصيدك، افتح صفحة المهام وارفع دليلًا جديدًا للمهمة المطلوبة.',
+      color: 0xf59e0b,
+      fields: list.slice(0, 10),
+      timestamp: new Date().toISOString(),
+      footer: { text: 'إدارة البرج • إعادة المهمات' },
+    };
+  }
   if (note) list.push({ name: approved ? '🗒️ ملاحظة الإدارة' : '📝 سبب الرفض', value: clip(note, 1000), inline: false });
   else if (!approved) list.push({ name: '📝 سبب الرفض', value: 'لم يحدد المسؤول سببًا. تقدر تسأل الإدارة لو محتاج توضيح.', inline: false });
   return {

@@ -244,6 +244,15 @@ async function handleSubmissionReview(interaction, res, { action, submissionId, 
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ`;
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS discord_message_id TEXT`;
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS discord_channel_id TEXT`;
+    await sql`ALTER TABLE submission_tasks ADD COLUMN IF NOT EXISTS points_awarded NUMERIC(10,2)`;
+    await sql`CREATE TABLE IF NOT EXISTS task_rework_requests (
+      id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL, username TEXT NOT NULL, task_id BIGINT NOT NULL, task_title TEXT NOT NULL,
+      original_submission_id BIGINT NOT NULL, requested_by TEXT NOT NULL, requested_by_name TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+      points_deducted NUMERIC(10,2) NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'requested' CHECK (status IN ('requested','submitted','completed','cancelled')),
+      current_submission_id BIGINT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), completed_at TIMESTAMPTZ
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_task_rework_user_task ON task_rework_requests(user_id, task_id, created_at DESC)`;
+    await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_task_rework_active_unique ON task_rework_requests(user_id, task_id) WHERE status IN ('requested','submitted')`;
     await sql`CREATE TABLE IF NOT EXISTS submission_review_audit (id BIGSERIAL PRIMARY KEY, submission_id BIGINT NOT NULL, member_id TEXT NOT NULL, member_name TEXT NOT NULL, decision TEXT NOT NULL CHECK (decision IN ('approved','rejected','reopened')), reviewer_id TEXT NOT NULL, reviewer_name TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
 
     const found = await sql`SELECT * FROM submissions WHERE id = ${submissionId} LIMIT 1`;
@@ -252,7 +261,10 @@ async function handleSubmissionReview(interaction, res, { action, submissionId, 
       return;
     }
     const sub = found[0];
-    const taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${submissionId} ORDER BY t.id`;
+    if (action === 'approve' && ['pending', 'submitted'].includes(String(sub.status || ''))) {
+      await sql`UPDATE submission_tasks st SET points_awarded = t.points FROM tasks t WHERE st.task_id = t.id AND st.submission_id = ${submissionId} AND st.points_awarded IS NULL`;
+    }
+    const taskRows = await sql`SELECT t.id, t.title, COALESCE(st.points_awarded, t.points) AS points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${submissionId} ORDER BY t.id`;
     const targetMessageId = messageId || String(sub.discord_message_id || '');
     targetMessageIdForErrors = targetMessageId;
     if (!targetMessageId || (messageId && String(sub.discord_message_id || '') !== messageId) || String(sub.discord_channel_id || '') !== SUBMISSION_REVIEW_CHANNEL_ID || (interaction.channel_id && String(sub.discord_channel_id || '') !== String(interaction.channel_id))) {
@@ -281,7 +293,7 @@ async function handleSubmissionReview(interaction, res, { action, submissionId, 
           RETURNING id, user_id, username, status
         ),
         task_amount AS (
-          SELECT COALESCE(SUM(t.points), 0)::numeric(10,2) AS amount
+          SELECT COALESCE(SUM(COALESCE(st.points_awarded, t.points)), 0)::numeric(10,2) AS amount
           FROM submission_tasks st JOIN tasks t ON t.id = st.task_id
           WHERE st.submission_id = ${submissionId}
         ),
@@ -306,7 +318,11 @@ async function handleSubmissionReview(interaction, res, { action, submissionId, 
         finalStatus = requestedStatus;
         finalReviewer = reviewerId;
         amount = finalStatus === 'approved' ? Math.round(Number(changedRows[0].task_amount || 0) * 100) / 100 : 0;
+        if (finalStatus === 'rejected') {
+          await sql`UPDATE task_rework_requests SET status = 'requested', current_submission_id = NULL WHERE user_id = ${sub.user_id} AND status = 'submitted' AND current_submission_id = ${submissionId}`;
+        }
         if (finalStatus === 'approved') {
+          await sql`UPDATE task_rework_requests SET status = 'completed', completed_at = NOW() WHERE user_id = ${sub.user_id} AND status = 'submitted' AND current_submission_id = ${submissionId}`;
           const totals = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${sub.user_id}`;
           totalAfter = Number(totals[0]?.total || 0);
         }
