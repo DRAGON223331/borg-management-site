@@ -146,6 +146,40 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .page-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; margin-bottom: 26px; }
 .page-heading-badge { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; color: #82d6bc; border: 1px solid rgba(78,214,173,.16); background: rgba(78,214,173,.06); border-radius: 100px; padding: 10px 13px; font-size: 10px; margin-top: 12px; }
 .manager-task-box { border: 1px solid rgba(137,114,251,.22); background: linear-gradient(145deg, rgba(137,114,251,.075), rgba(17,26,41,.95) 47%); padding: 20px; border-radius: 18px; margin-bottom: 24px; }
+.task-deadline-setting { display: grid; grid-template-columns: minmax(170px, .7fr) minmax(220px, 1fr); align-items: center; gap: 8px 14px; padding: 12px 13px; margin-top: 10px; border: 1px solid rgba(245,158,11,.18); border-radius: 12px; background: rgba(245,158,11,.035); }
+.task-deadline-setting label { font-size: 11px; font-weight: 800; }
+.task-deadline-setting input { border: 1px solid rgba(165,180,205,.16); border-radius: 9px; background: #0d1524; color: var(--text); padding: 10px; font: inherit; min-width: 0; }
+.task-deadline-setting small { color: #a8b2c4; font-size: 10px; grid-column: 1 / -1; }
+.task-deadline-tag { color: #f8c979 !important; border-color: rgba(245,158,11,.2) !important; background: rgba(245,158,11,.07) !important; }
+.queued-deadline { display: block; color: #f8c979; font-size: 9px; margin-top: 4px; }
+.task-stats-overview { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; margin: 14px 0 18px; }
+.task-stat-card { border: 1px solid var(--border); background: rgba(8,14,25,.42); border-radius: 12px; padding: 14px; }
+.task-stat-card small { display: block; font-size: 10px; color: #9aa8bd; }
+.task-stat-card b { display: block; margin-top: 7px; font-size: 23px; color: #e7e3ff; }
+.review-insights-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; }
+.review-insight-panel { border: 1px solid var(--border); border-radius: 13px; padding: 13px; min-width: 0; background: rgba(8,14,25,.3); }
+.review-insight-panel h3 { font-size: 12px; margin: 0 0 10px; }
+.review-insight-panel > p { margin: 0 0 9px; }
+.review-insight-list { display: flex; flex-direction: column; gap: 6px; }
+.review-member-row { display: flex; align-items: center; gap: 8px; padding: 8px; background: rgba(255,255,255,.02); border: 1px solid rgba(165,180,205,.08); border-radius: 9px; min-width: 0; }
+.review-member-row > div { flex: 1; min-width: 0; }
+.review-member-row b, .review-member-row small { display: block; overflow-wrap: anywhere; }
+.review-member-row b { font-size: 10px; }
+.review-member-row small { font-size: 9px; color: #8e9bb0; margin-top: 4px; }
+.review-member-row code { font-size: 8px; color: #8392aa; }
+.review-member-rank { min-width: 24px; color: #b6a9ff; font-size: 10px; font-weight: 900; }
+.submission-audit-heading { margin-top: 24px; }
+.audit-export-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.submission-audit-list { display: flex; flex-direction: column; gap: 7px; }
+.submission-audit-row { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; padding: 11px 12px; border: 1px solid var(--border); border-radius: 10px; background: rgba(8,14,25,.3); }
+.submission-audit-row b, .submission-audit-row small { display: block; }
+.submission-audit-row b { font-size: 11px; }
+.submission-audit-row small { font-size: 9px; line-height: 1.8; color: #9aa8bd; margin-top: 5px; overflow-wrap: anywhere; }
+.submission-audit-row p { margin: 6px 0 0; font-size: 10px; color: #c4bbff; }
+.submission-audit-row time { flex: 0 0 auto; color: #8190a7; font-size: 9px; direction: ltr; }
+.duplicate-image-warning { padding: 10px 12px; margin-top: 10px; border: 1px solid rgba(245,158,11,.3); border-radius: 10px; background: rgba(245,158,11,.07); color: #f8d28a; font-size: 10px; line-height: 1.9; overflow-wrap: anywhere; }
+.duplicate-image-warning b { display: block; margin-bottom: 4px; }
+
 .manager-task-box > p { font-size: 11px; line-height: 1.9; margin: -3px 0 16px; }
 .manager-badge { color: #c4bbff; border: 1px solid rgba(137,114,251,.2); background: rgba(137,114,251,.1); border-radius: 7px; padding: 6px 9px; font-size: 9px; font-weight: 800; white-space: nowrap; }
 .task-create-row { display: grid; grid-template-columns: minmax(0,1fr) 125px auto; gap: 9px; }
@@ -328,6 +362,11 @@ button:disabled { cursor: not-allowed; opacity: .5; }
   .page-heading { flex-direction: column; }
   .page-heading-badge { margin-top: -4px; }
   .task-create-row { grid-template-columns: 1fr 115px; }
+  .task-deadline-setting { grid-template-columns: 1fr; }
+  .task-deadline-setting small { grid-column: auto; }
+  .task-stats-overview { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .review-insights-grid { grid-template-columns: 1fr; }
+  .submission-audit-row { flex-direction: column; }
   .task-create-row button { grid-column: span 2; }
   .task-row { align-items: flex-start; gap: 10px; padding: 13px 11px; }
   .task-row-actions { flex-direction: column; align-items: flex-start; }

@@ -8,6 +8,7 @@ const TYPES = {
   leaves: { label: 'طلبات الإجازة', file: 'leave-requests' },
   points: { label: 'سجل النقاط', file: 'points-ledger' },
   requests: { label: 'الطلبات الإدارية', file: 'admin-requests' },
+  'review-audit': { label: 'سجل قرارات مراجعة التسليمات', file: 'submission-review-audit' },
 };
 const STATUS_AR = { approved: 'مقبول', rejected: 'مرفوض', pending: 'قيد المراجعة', submitted: 'قيد المراجعة', reopened: 'أُعيد فتحه' };
 const ROW_LIMIT = 5000;
@@ -75,13 +76,21 @@ async function buildCsv(sql, type, { messageChannelId = '' } = {}) {
       FROM staff_points ORDER BY id DESC LIMIT ${ROW_LIMIT}`;
     headers = ['رقم الحركة', 'Discord ID', 'الاسم', 'المقدار', 'السبب', 'المصدر', 'ID المسؤول', 'اسم المسؤول', 'رقم التسليم', 'الوقت (القاهرة)'];
     rows = data.map((r) => [r.id, r.user_id, r.username, r.amount, r.reason, r.source, r.actor_id, r.actor_name, r.submission_id, r.created_at]);
-  } else {
+  } else if (key === 'requests') {
     const data = await sql`
       SELECT id, user_id, username, request_type, subject, details, status, review_note, reviewed_by,
         to_char(created_at AT TIME ZONE 'Africa/Cairo', 'YYYY-MM-DD HH24:MI') AS created_at, to_char(reviewed_at AT TIME ZONE 'Africa/Cairo', 'YYYY-MM-DD HH24:MI') AS reviewed_at
       FROM staff_requests ORDER BY id DESC LIMIT ${ROW_LIMIT}`;
     headers = ['رقم الطلب', 'Discord ID', 'الاسم', 'النوع', 'العنوان', 'التفاصيل', 'الحالة', 'ملاحظة الإدارة', 'المراجع', 'وقت الطلب (القاهرة)', 'وقت المراجعة (القاهرة)'];
     rows = data.map((r) => [r.id, r.user_id, r.username, r.request_type, r.subject, r.details, status(r.status), r.review_note, r.reviewed_by, r.created_at, r.reviewed_at]);
+  } else {
+    const data = await sql`
+      SELECT id, submission_id, member_id, member_name, decision, reviewer_id, reviewer_name, reason,
+        to_char(created_at AT TIME ZONE 'Africa/Cairo', 'YYYY-MM-DD HH24:MI:SS') AS created_at
+      FROM submission_review_audit ORDER BY id DESC LIMIT ${ROW_LIMIT}`;
+    const decision = (v) => ({ approved: 'موافقة', rejected: 'رفض', reopened: 'إعادة فتح' }[v] || v || '');
+    headers = ['رقم السجل', 'رقم التسليم', 'Discord ID العضو', 'اسم العضو', 'القرار', 'Discord ID المراجع', 'اسم المراجع', 'السبب/الملاحظة', 'وقت القرار (القاهرة)'];
+    rows = data.map((r) => [r.id, r.submission_id, r.member_id, r.member_name, decision(r.decision), r.reviewer_id, r.reviewer_name, r.reason, r.created_at]);
   }
   const stamp = new Date().toISOString().slice(0, 10);
   return { csv: toCsv(headers, rows), rowCount: rows.length, filename: `${TYPES[key].file}-${stamp}.csv`, label: TYPES[key].label, type: key };

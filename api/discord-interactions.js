@@ -3,6 +3,8 @@
 const crypto = require('node:crypto');
 const DISCORD_API = 'https://discord.com/api/v10';
 const LEAVE_REQUEST_CHANNEL_ID = '1556945732957765722';
+const SUBMISSION_REVIEW_CHANNEL_ID = process.env.SUBMISSION_REVIEW_CHANNEL_ID || '1556945732957765722';
+const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
 const LEAVE_NOTICE_CHANNEL_ID = process.env.LEAVE_NOTICE_CHANNEL_ID || '1558102515885678734'; // accepted/rejected notices go here
 const MANAGER_IDS = new Set((process.env.MANAGER_IDS || '1286035404323164172,1525203473262706821,848304089057460254,1475483362536980552').split(',').map((x) => x.trim()).filter(Boolean));
 const MANAGEMENT_MAIN_ROLE_ID = process.env.MANAGEMENT_MAIN_ROLE_ID || '1538623033806168135';
@@ -188,6 +190,81 @@ async function handleCommand(interaction, res) {
     await fetch(`${DISCORD_API}/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
   } catch (error) { console.error('[points command followup]', cleanText(error?.message || error, 160)); }
 }
+function reviewAuthorized(interaction) {
+  const reviewerId = String(interaction.member?.user?.id || interaction.user?.id || '');
+  const roles = Array.isArray(interaction.member?.roles) ? interaction.member.roles.map(String) : [];
+  return MANAGER_IDS.has(reviewerId) || isAdministrator(interaction.member?.permissions) || roles.includes(MANAGEMENT_MAIN_ROLE_ID) || roles.includes(MANAGEMENT_STAFF_ROLE_ID);
+}
+async function handleSubmissionReview(interaction, res, { action, submissionId, isModal }) {
+  if (String(interaction.channel_id || '') !== SUBMISSION_REVIEW_CHANNEL_ID) return send(res, { type: 4, data: { content: 'أزرار مراجعة التسليمات شغالة في روم مراجعة المهمات فقط.', flags: 64 } });
+  const reviewerId = String(interaction.member?.user?.id || interaction.user?.id || '');
+  let authorized = reviewAuthorized(interaction);
+  if (!authorized && BOT_TOKEN) {
+    const guildIds = [MAIN_GUILD_ID, STAFF_GUILD_ID];
+    const lookups = await Promise.allSettled(guildIds.map((guildId) => discordApi(`/guilds/${guildId}/members/${reviewerId}`)));
+    authorized = lookups.some((result) => result.status === 'fulfilled' && (result.value?.roles || []).some((roleId) => roleId === MANAGEMENT_MAIN_ROLE_ID || roleId === MANAGEMENT_STAFF_ROLE_ID));
+  }
+  if (!authorized) return send(res, { type: 4, data: { content: 'مراجعة تسليمات المهمات للمسؤولين فقط.', flags: 64 } });
+  if (!isModal && action === 'reject') {
+    return send(res, { type: 9, data: { custom_id: `submission:rejectmodal:${submissionId}`, title: `رفض التسليم #${submissionId}`, components: [{ type: 1, components: [{ type: 4, custom_id: 'reason', label: 'سبب الرفض (اختياري)', style: 2, required: false, max_length: 400, placeholder: 'اكتب سبب الرفض هنا' }] }] } });
+  }
+  const note = isModal ? cleanText((interaction.data?.components || []).flatMap((row) => row.components || []).find((c) => c.custom_id === 'reason')?.value, 400) : '';
+  const messageId = String(interaction.message?.id || '');
+  let targetMessageIdForErrors = messageId;
+  if (!isModal && !messageId) return send(res, { type: 4, data: { content: 'تعذر تحديد رسالة التسليم.', flags: 64 } });
+  // Ack first; the work continues within this request and the message is edited through REST.
+  send(res, { type: 6 });
+  try {
+    const sql = await getSql();
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS discord_message_id TEXT`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS discord_channel_id TEXT`;
+    await sql`CREATE TABLE IF NOT EXISTS submission_review_audit (id BIGSERIAL PRIMARY KEY, submission_id BIGINT NOT NULL, member_id TEXT NOT NULL, member_name TEXT NOT NULL, decision TEXT NOT NULL CHECK (decision IN ('approved','rejected','reopened')), reviewer_id TEXT NOT NULL, reviewer_name TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
+    const found = await sql`SELECT * FROM submissions WHERE id = ${submissionId} LIMIT 1`;
+    if (!found.length) throw new Error('التسليم غير موجود في قاعدة البيانات.');
+    const sub = found[0];
+    const targetMessageId = messageId || String(sub.discord_message_id || '');
+    targetMessageIdForErrors = targetMessageId;
+    if (!targetMessageId || (messageId && String(sub.discord_message_id || '') !== messageId) || String(sub.discord_channel_id || '') !== String(interaction.channel_id || '')) throw new Error('رسالة ديسكورد لا تطابق التسليم المسجل.');
+    const sourceMessage = interaction.message || await discordApi(`/channels/${sub.discord_channel_id}/messages/${targetMessageId}`);
+    if (sub.status !== 'pending') {
+      const oldEmbed = sourceMessage?.embeds?.[0] || {};
+      const doneEmbed = { title: oldEmbed.title || `مراجعة التسليم #${submissionId}`, description: `تمت مراجعة التسليم مسبقًا. الحالة الحالية: ${sub.status === 'approved' ? 'مقبول ✅' : 'مرفوض ❌'}.`, color: sub.status === 'approved' ? 0x22c55e : 0xef4444, timestamp: new Date().toISOString() };
+      await discordApi(`/channels/${SUBMISSION_REVIEW_CHANNEL_ID}/messages/${targetMessageId}`, { method: 'PATCH', body: JSON.stringify({ embeds: [doneEmbed], components: [], allowed_mentions: { parse: [] } }) });
+      return;
+    }
+    const finalStatus = action === 'approve' ? 'approved' : 'rejected';
+    const updated = await sql`UPDATE submissions SET status = ${finalStatus}, reviewed_by = ${reviewerId}, reviewed_at = NOW() WHERE id = ${submissionId} AND status = 'pending' RETURNING *`;
+    if (!updated.length) throw new Error('تمت مراجعة التسليم من مسؤول آخر بالفعل.');
+    await sql`INSERT INTO submission_review_audit(submission_id, member_id, member_name, decision, reviewer_id, reviewer_name, reason, created_at) VALUES (${submissionId}, ${sub.user_id}, ${sub.username}, ${finalStatus}, ${reviewerId}, ${String(interaction.member?.user?.global_name || interaction.member?.user?.username || interaction.user?.username || reviewerId)}, ${note}, NOW())`;
+    let amount = 0; let totalAfter = 0; let taskRows = [];
+    if (finalStatus === 'approved') {
+      taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${submissionId}`;
+      amount = Math.round(taskRows.reduce((sum, task) => sum + Number(task.points || 0), 0) * 100) / 100;
+      if (amount > 0) await sql`INSERT INTO staff_points(user_id, username, amount, reason, actor_id, actor_name, source, submission_id, created_at) VALUES (${sub.user_id}, ${sub.username}, ${amount}, ${`اعتماد تسليم #${submissionId}`}, ${reviewerId}, ${String(interaction.member?.user?.global_name || interaction.member?.user?.username || interaction.user?.username || reviewerId)}, 'task', ${submissionId}, NOW())`;
+      const totals = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${sub.user_id}`;
+      totalAfter = Number(totals[0]?.total || 0);
+    }
+    const reviewerName = String(interaction.member?.user?.global_name || interaction.member?.user?.username || interaction.user?.username || reviewerId);
+    const old = sourceMessage?.embeds?.[0] || {};
+    const fields = Array.isArray(old.fields) ? old.fields.filter((field) => field.name !== '🛡️ قرار المراجعة') : [];
+    fields.push({ name: '🛡️ قرار المراجعة', value: `${finalStatus === 'approved' ? '✅ مقبول' : '❌ مرفوض'} بواسطة <@${reviewerId}>${note ? `\nالسبب: ${note}` : ''}${finalStatus === 'approved' ? `\nالنقاط المضافة: +${fmtPoints(amount)} · الرصيد: ${fmtPoints(totalAfter)}` : ''}`.slice(0, 1024), inline: false });
+    const cleanEmbed = { title: old.title || `${finalStatus === 'approved' ? '✅' : '❌'} تسليم مهمة #${submissionId}`, description: finalStatus === 'approved' ? 'تم قبول التسليم وإضافة نقاطه.' : 'تم رفض التسليم ولم تتم إضافة نقاط.', color: finalStatus === 'approved' ? 0x22c55e : 0xef4444, fields: fields.slice(0, 25), timestamp: new Date().toISOString(), ...(old.footer?.text ? { footer: { text: old.footer.text } } : {}) };
+    if (old.thumbnail?.url) cleanEmbed.thumbnail = { url: old.thumbnail.url };
+    if (old.image?.url) cleanEmbed.image = { url: old.image.url };
+    await discordApi(`/channels/${SUBMISSION_REVIEW_CHANNEL_ID}/messages/${targetMessageId}`, { method: 'PATCH', body: JSON.stringify({ embeds: [cleanEmbed], components: [], allowed_mentions: { parse: [] } }) });
+    try {
+      const notify = require('./_lib/notify.js');
+      await notify.notifyReview({ token: BOT_TOKEN, userId: sub.user_id, kind: 'submission', status: finalStatus, id: submissionId, reviewerId, note, fields: finalStatus === 'approved' ? [{ name: '💎 النقاط المضافة', value: `+${fmtPoints(amount)} نقطة`, inline: true }, { name: '📊 رصيدك الحالي', value: `${fmtPoints(totalAfter)} نقطة`, inline: true }] : [] });
+    } catch (error) { console.error('[submission review DM]', cleanText(error.message, 160)); }
+    try {
+      await discordApi(`/channels/${POINTS_LOG_CHANNEL_ID}/messages`, { method: 'POST', body: JSON.stringify({ embeds: [{ title: finalStatus === 'approved' ? '✅ اعتماد تسليم مهمة' : '❌ رفض تسليم مهمة', description: `التسليم **#${submissionId}** — ${finalStatus === 'approved' ? `تمت إضافة **+${fmtPoints(amount)} نقطة**.` : 'لم تتم إضافة نقاط.'}`, color: finalStatus === 'approved' ? 0x22c55e : 0xef4444, fields: [{ name: '👤 العضو', value: `<@${sub.user_id}>`, inline: true }, { name: '🛡️ المراجع', value: `<@${reviewerId}>`, inline: true }, ...(note ? [{ name: '📝 السبب/الملاحظة', value: note.slice(0, 1024), inline: false }] : [])], timestamp: new Date().toISOString() }], allowed_mentions: { parse: [] } }) });
+    } catch (error) { console.error('[submission review log]', cleanText(error.message, 160)); }
+  } catch (error) {
+    console.error('[submission review interaction]', cleanText(error?.message || error, 200));
+    if (targetMessageIdForErrors) { try { await discordApi(`/channels/${SUBMISSION_REVIEW_CHANNEL_ID}/messages/${targetMessageIdForErrors}`, { method: 'PATCH', body: JSON.stringify({ content: `⚠️ تعذر إنهاء مراجعة التسليم #${submissionId}: ${cleanText(error?.message || error, 160)}`, components: [], allowed_mentions: { parse: [] } }) }); } catch { /* no further action */ } }
+  }
+}
+
 async function handler(req, res) {
   if (req.method === 'GET') {
     // Open /api/discord-interactions in a browser to check the configuration (no secrets are shown).
@@ -208,6 +285,8 @@ async function handler(req, res) {
 
   const customId = String(interaction.data?.custom_id || '');
   const isModal = interaction.type === 5;
+  const submissionMatch = isModal ? customId.match(/^submission:(rejectmodal):(\d+)$/) : customId.match(/^submission:(approve|reject):(\d+)$/);
+  if (submissionMatch) return handleSubmissionReview(interaction, res, { action: submissionMatch[1] === 'rejectmodal' ? 'reject' : submissionMatch[1], submissionId: Number(submissionMatch[2]), isModal });
   const match = isModal ? customId.match(/^leave:(rejectmodal):(\d+)$/) : customId.match(/^leave:(approve|reject):(\d+)$/);
   if (!match) return send(res, { type: 4, data: { content: 'الزر ده مش مدعوم.', flags: 64 } });
   if (String(interaction.channel_id || '') !== LEAVE_REQUEST_CHANNEL_ID) return send(res, { type: 4, data: { content: 'الأزرار دي شغالة في روم طلبات الإجازات فقط.', flags: 64 } });

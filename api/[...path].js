@@ -40,7 +40,7 @@ let lastMessageSyncAt = 0;
 let messageSyncPromise;
 
 // ───────── تخفيف الضغط: كاش في الذاكرة + حد للطلبات ─────────
-const SCHEMA_VERSION = 3; // ارفعه كل ما تضيف جدول/عمود جديد في ensureSchema
+const SCHEMA_VERSION = 4; // ارفعه كل ما تضيف جدول/عمود جديد في ensureSchema
 const PRESENCE_WINDOW_SECONDS = 150; // مدة اعتبار العضو "متصل" بعد آخر نبضة (النبضة كل 60 ثانية)
 const MESSAGE_SYNC_MIN_MS = Math.max(15, Number(process.env.MESSAGE_SYNC_MIN_SECONDS || 45)) * 1000;
 const memCache = new Map();
@@ -209,6 +209,8 @@ async function ensureSchema() {
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_tasks_active ON tasks(active, required DESC, id DESC)`;
     await sql`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS points NUMERIC(10,2) NOT NULL DEFAULT 1`;
+    await sql`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deadline_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deadline_reminded_at TIMESTAMPTZ`;
     await sql`CREATE TABLE IF NOT EXISTS submissions (
       id BIGSERIAL PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -223,6 +225,8 @@ async function ensureSchema() {
     await sql`CREATE INDEX IF NOT EXISTS idx_submissions_user ON submissions(user_id, submitted_at DESC)`;
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS reviewed_by TEXT`;
     await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS discord_message_id TEXT`;
+    await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS discord_channel_id TEXT`;
     await sql`CREATE TABLE IF NOT EXISTS staff_points (id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL, username TEXT NOT NULL, amount NUMERIC(10,2) NOT NULL, reason TEXT NOT NULL DEFAULT '', actor_id TEXT NOT NULL, actor_name TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'manual', submission_id BIGINT, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
     await sql`CREATE INDEX IF NOT EXISTS idx_staff_points_user ON staff_points(user_id, created_at DESC)`;
     await sql`CREATE TABLE IF NOT EXISTS submission_tasks (
@@ -231,6 +235,19 @@ async function ensureSchema() {
       PRIMARY KEY (submission_id, task_id)
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_submission_tasks_task ON submission_tasks(task_id)`;
+    await sql`CREATE TABLE IF NOT EXISTS submission_review_audit (
+      id BIGSERIAL PRIMARY KEY, submission_id BIGINT NOT NULL, member_id TEXT NOT NULL, member_name TEXT NOT NULL,
+      decision TEXT NOT NULL CHECK (decision IN ('approved','rejected','reopened')), reviewer_id TEXT NOT NULL, reviewer_name TEXT NOT NULL,
+      reason TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_submission_review_audit_created ON submission_review_audit(created_at DESC)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_submission_review_audit_submission ON submission_review_audit(submission_id, created_at DESC)`;
+    await sql`CREATE TABLE IF NOT EXISTS submission_file_hashes (
+      submission_id BIGINT NOT NULL REFERENCES submissions(id) ON DELETE CASCADE, file_sha256 TEXT NOT NULL, user_id TEXT NOT NULL,
+      username TEXT NOT NULL, original_name TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (submission_id, file_sha256)
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_submission_file_hashes_sha256 ON submission_file_hashes(file_sha256)`;
     await sql`CREATE TABLE IF NOT EXISTS chat_messages (
       id BIGSERIAL PRIMARY KEY,
       room TEXT NOT NULL CHECK (room IN ('staff', 'management')),
@@ -434,6 +451,7 @@ const SLASH_COMMANDS = [
         { name: 'Leave requests', name_localizations: { ar: 'طلبات الإجازة' }, value: 'leaves' },
         { name: 'Points ledger', name_localizations: { ar: 'سجل النقاط' }, value: 'points' },
         { name: 'Admin requests', name_localizations: { ar: 'الطلبات الإدارية' }, value: 'requests' },
+        { name: 'Submission review audit', name_localizations: { ar: 'سجل قرارات مراجعة التسليمات' }, value: 'review-audit' },
       ],
     }],
   },
@@ -761,6 +779,22 @@ async function sniffBlobMime(pathname) {
     }
   } finally { try { await reader.cancel(); } catch { /* ignore */ } }
   return detectMediaType(buf);
+}
+async function sha256Blob(pathname) {
+  if (!blobSdkPromise) blobSdkPromise = import('@vercel/blob');
+  const { get } = await blobSdkPromise;
+  const result = await get(pathname, { access: 'private', token: blobToken() || undefined });
+  if (!result || result.statusCode !== 200 || !result.stream) throw new Error('تعذر قراءة الصورة لحساب بصمتها.');
+  const hash = crypto.createHash('sha256');
+  const reader = result.stream.getReader();
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      hash.update(Buffer.from(value));
+    }
+  } finally { try { reader.releaseLock(); } catch { /* no-op */ } }
+  return hash.digest('hex');
 }
 async function deleteBlobQuietly(pathname) {
   try { if (!blobSdkPromise) blobSdkPromise = import('@vercel/blob'); const { del } = await blobSdkPromise; await del(pathname, { token: blobToken() || undefined }); } catch { /* ignore */ }
@@ -1131,6 +1165,31 @@ async function getRoster() {
   return { guildName: mainGuild.name, memberCount: rows.length, groups };
 }
 
+async function updateDiscordSubmissionReview(sub, status, reviewer, reason = '') {
+  if (!BOT_TOKEN || !sub?.discord_message_id || !sub?.discord_channel_id) return false;
+  try {
+    const prior = await discordApi(`/channels/${sub.discord_channel_id}/messages/${sub.discord_message_id}`);
+    const source = (prior.embeds || [])[0] || {};
+    const approved = status === 'approved';
+    const rejected = status === 'rejected';
+    // Discord returns response-only keys (type/provider/proxy URLs) that are not accepted on PATCH.
+    const updated = {
+      title: source.title || `${approved ? '✅ تمت الموافقة' : rejected ? '❌ تم الرفض' : '🔓 إعادة فتح'} على التسليم #${sub.id}`,
+      description: `${approved ? '✅ تمت الموافقة على التسليم.' : rejected ? '❌ تم رفض التسليم.' : '🔓 أُعيد فتح التسليم.'}\n\n**المراجع:** <@${reviewer}>${reason ? `\n**ملاحظة:** ${cleanText(reason, 300)}` : ''}`,
+      color: approved ? 0x22c55e : rejected ? 0xef4444 : 0xf59e0b,
+      timestamp: new Date().toISOString(),
+      ...(source.url ? { url: source.url } : {}),
+      ...(Array.isArray(source.fields) ? { fields: source.fields.map((f) => ({ name: String(f.name || '').slice(0, 256), value: String(f.value || '').slice(0, 1024), inline: Boolean(f.inline) })).slice(0, 25) } : {}),
+      ...(source.footer?.text ? { footer: { text: String(source.footer.text).slice(0, 2048), ...(source.footer.icon_url ? { icon_url: source.footer.icon_url } : {}) } } : {}),
+      ...(source.author?.name ? { author: { name: String(source.author.name).slice(0, 256), ...(source.author.url ? { url: source.author.url } : {}), ...(source.author.icon_url ? { icon_url: source.author.icon_url } : {}) } } : {}),
+      ...(source.thumbnail?.url ? { thumbnail: { url: source.thumbnail.url } } : {}),
+      ...(source.image?.url ? { image: { url: source.image.url } } : {}),
+    };
+    await discordApi(`/channels/${sub.discord_channel_id}/messages/${sub.discord_message_id}`, { method: 'PATCH', body: JSON.stringify({ embeds: [updated], components: [], allowed_mentions: { parse: [] } }) });
+    return true;
+  } catch (error) { console.error('[submission discord message update]', cleanText(error.message, 180)); return false; }
+}
+
 async function handleApi(parts, req, res) {
   const route = parts[0] || '';
   const user = getSessionUser(req);
@@ -1164,6 +1223,59 @@ async function handleApi(parts, req, res) {
     try { await syncChannelMessageCounts(await getSql(), { force: true, budgetMs: 40000 }); } catch (error) { console.error('[cron message sync]', cleanText(error?.message || error, 200)); }
     return sendJson(res, 200, { ok: true, ...result });
   }
+  if (route === 'cron' && parts[1] === 'task-deadlines' && req.method === 'GET') {
+    const secret = process.env.CRON_SECRET || '';
+    const authorizedCron = Boolean(secret) && String(req.headers?.authorization || '') === `Bearer ${secret}`;
+    if (!authorizedCron && !canManage(user)) return sendError(res, 401, 'غير مصرح. اضبط CRON_SECRET على Vercel.');
+    await ensureSchema();
+    const sql = await getSql();
+    const closed = await sql`UPDATE tasks SET active = FALSE WHERE active = TRUE AND deadline_at IS NOT NULL AND deadline_at <= NOW() RETURNING id`;
+    const reminders = BOT_TOKEN ? await sql`UPDATE tasks SET deadline_reminded_at = NOW() WHERE active = TRUE AND deadline_at IS NOT NULL AND deadline_at > NOW() AND deadline_at <= NOW() + INTERVAL '24 hours' AND deadline_reminded_at IS NULL RETURNING id, title, deadline_at, required` : [];
+    // تدريجيًا، احسب بصمات الصور المرفوعة في الإصدارات القديمة حتى تُكتشف التكرارات التاريخية أيضًا.
+    let backfilledImages = 0;
+    try {
+      const legacyRows = await sql`SELECT id, user_id, username, files_json FROM submissions WHERE EXISTS (SELECT 1 FROM jsonb_array_elements(files_json) f WHERE COALESCE(f->>'sha256', '') = '' AND COALESCE(f->>'mimeType', '') LIKE 'image/%' AND COALESCE(f->>'pathname', '') LIKE 'evidence/%') ORDER BY id ASC LIMIT 40`;
+      for (const legacy of legacyRows) {
+        const legacyFiles = parseJson(legacy.files_json, []);
+        let changed = false;
+        for (const file of legacyFiles) {
+          if (backfilledImages >= 5) break;
+          if (file?.sha256 || !String(file?.mimeType || '').toLowerCase().startsWith('image/') || !String(file?.pathname || '').startsWith('evidence/')) continue;
+          try {
+            const sha256 = await sha256Blob(file.pathname);
+            file.sha256 = sha256;
+            await sql`INSERT INTO submission_file_hashes(submission_id, file_sha256, user_id, username, original_name, created_at) VALUES (${legacy.id}, ${sha256}, ${legacy.user_id}, ${legacy.username}, ${cleanText(file.originalName || 'صورة قديمة', 180)}, NOW()) ON CONFLICT DO NOTHING`;
+            backfilledImages += 1;
+            changed = true;
+          } catch (error) { console.error('[legacy image fingerprint]', cleanText(error?.message || error, 140)); }
+        }
+        if (changed) await sql`UPDATE submissions SET files_json = ${JSON.stringify(legacyFiles)}::jsonb WHERE id = ${legacy.id}`;
+        if (backfilledImages >= 5) break;
+      }
+    } catch (error) { console.error('[legacy image backfill]', cleanText(error?.message || error, 180)); }
+    let recipients = [];
+    let dmSent = 0; let dmFailed = 0;
+    if (reminders.length && BOT_TOKEN) {
+      try {
+        const roster = await cached('roster', 120_000, getRoster);
+        recipients = (roster.groups || []).flatMap((group) => group.members || []).map((member) => ({ user_id: String(member.id), username: member.username || String(member.id) })).filter((member) => /^\d{15,22}$/.test(member.user_id)).slice(0, 500);
+      } catch (error) {
+        console.error('[deadline reminder roster]', cleanText(error?.message || error, 160));
+        recipients = await sql`SELECT user_id, MAX(username) AS username FROM (SELECT user_id, username FROM site_presence WHERE last_seen > NOW() - INTERVAL '90 days' UNION ALL SELECT user_id, username FROM staff_points UNION ALL SELECT user_id, username FROM submissions UNION ALL SELECT user_id, username FROM discord_message_log WHERE channel_id = ${MESSAGE_COUNT_CHANNEL_ID} AND created_at > NOW() - INTERVAL '90 days') p GROUP BY user_id LIMIT 500`;
+      }
+      const reminderPages = [];
+      for (let i = 0; i < reminders.length; i += 25) {
+        const pageTasks = reminders.slice(i, i + 25);
+        const reminderFields = pageTasks.map((task) => ({ name: `${task.required ? '🔴' : '⚪'} ${cleanText(task.title, 240)}`.slice(0, 256), value: `#${Number(task.id)} · ينتهي <t:${Math.floor(new Date(task.deadline_at).getTime() / 1000)}:R>`, inline: false }));
+        reminderPages.push({ title: `⏰ تذكير بموعد انتهاء المهمات${reminders.length > 25 ? ` (${Math.floor(i / 25) + 1}/${Math.ceil(reminders.length / 25)})` : ''}`, description: 'في مهمات موعد تسليمها خلال الـ24 ساعة القادمة. سلّم الدليل قبل انتهاء المهلة.', color: 0xf59e0b, fields: reminderFields, timestamp: new Date().toISOString(), footer: { text: 'إدارة البرج • تذكير مواعيد التسليم' } });
+      }
+      const { dmUser } = require('./_lib/notify.js');
+      let cursor = 0;
+      const workers = Array.from({ length: Math.min(8, recipients.length) }, async () => { while (cursor < recipients.length) { const person = recipients[cursor++]; let allSent = true; for (const embed of reminderPages) { const sent = await dmUser({ token: BOT_TOKEN, userId: person.user_id, embed }); if (!sent.ok) allSent = false; } if (allSent) dmSent += 1; else dmFailed += 1; } });
+      await Promise.all(workers);
+    }
+    return sendJson(res, 200, { ok: true, closed: closed.length, reminderTasks: reminders.length, recipients: recipients.length, dmSent, dmFailed, backfilledImages });
+  }
   if (route === 'evidence') return sendPrivateEvidence(req, res);
   if (route === 'uploads' && parts[1] === 'token') return handleUploadToken(req, res);
   if (!user) return sendError(res, 401, 'سجل دخولك بديسكورد أولًا.');
@@ -1193,6 +1305,39 @@ async function handleApi(parts, req, res) {
   await ensureSchema();
   const sql = await getSql();
 
+  if (route === 'submission-audit' && parts.length === 1 && req.method === 'GET') {
+    if (!canManage(user)) return sendError(res, 403, 'سجل قرارات التسليم متاح لمسؤولي الإدارة فقط.');
+    const rows = await sql`SELECT id, submission_id, member_id, member_name, decision, reviewer_id, reviewer_name, reason, created_at FROM submission_review_audit ORDER BY id DESC LIMIT 200`;
+    return sendJson(res, 200, { entries: rows.map((row) => ({ id: Number(row.id), submissionId: Number(row.submission_id), memberId: row.member_id, memberName: row.member_name, decision: row.decision, reviewerId: row.reviewer_id, reviewerName: row.reviewer_name, reason: row.reason, createdAt: row.created_at })) });
+  }
+  if (route === 'submission-audit.csv' && parts.length === 1 && req.method === 'GET') {
+    if (!canManage(user)) return sendError(res, 403, 'تصدير سجل القرارات متاح لمسؤولي الإدارة فقط.');
+    const out = await require('./_lib/csv-export.js').buildCsv(sql, 'review-audit', { messageChannelId: MESSAGE_COUNT_CHANNEL_ID });
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${out.filename}"`);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.end(out.csv);
+  }
+  if (route === 'task-stats' && parts.length === 1 && req.method === 'GET') {
+    if (!canManage(user)) return sendError(res, 403, 'إحصائيات المهمات متاحة لمسؤولي الإدارة فقط.');
+    const totals = await sql`SELECT COUNT(*) FILTER (WHERE status = 'approved')::int AS approved, COUNT(*) FILTER (WHERE status = 'rejected')::int AS rejected, COUNT(*) FILTER (WHERE status IN ('pending','submitted'))::int AS pending, COUNT(*)::int AS total FROM submissions`;
+    const active = await sql`WITH people AS (SELECT user_id, MAX(username) AS username FROM (SELECT user_id, username FROM site_presence UNION ALL SELECT user_id, username FROM staff_points UNION ALL SELECT user_id, username FROM submissions UNION ALL SELECT user_id, username FROM discord_message_log WHERE channel_id = ${MESSAGE_COUNT_CHANNEL_ID} AND created_at > NOW() - INTERVAL '90 days') p GROUP BY user_id), stats AS (SELECT p.user_id, p.username, COUNT(s.id)::int AS submissions, COUNT(s.id) FILTER (WHERE s.status = 'approved')::int AS approved, COUNT(s.id) FILTER (WHERE s.status = 'rejected')::int AS rejected, MAX(s.submitted_at) AS last_submission FROM people p LEFT JOIN submissions s ON s.user_id = p.user_id GROUP BY p.user_id, p.username) SELECT * FROM stats`;
+    // أضف كل أعضاء سيرفر الاستاف من الروستر حتى تظهر الحسابات التي لم تسلّم أي مهمة أصلًا.
+    const peopleById = new Map(active.map((item) => [String(item.user_id), item]));
+    try {
+      const roster = await cached('roster', 120_000, getRoster);
+      for (const group of (roster.groups || [])) for (const member of (group.members || [])) {
+        const id = String(member.id || '');
+        if (id && !peopleById.has(id)) peopleById.set(id, { user_id: id, username: member.username || id, submissions: 0, approved: 0, rejected: 0, last_submission: null });
+      }
+    } catch (error) { console.error('[task stats roster]', cleanText(error?.message || error, 160)); }
+    const fullMemberStats = [...peopleById.values()];
+    const mostActive = fullMemberStats.filter((item) => Number(item.submissions) > 0).sort((a, b) => Number(b.submissions) - Number(a.submissions)).slice(0, 10).map((x) => ({ userId: x.user_id, username: x.username, submissions: Number(x.submissions), approved: Number(x.approved), rejected: Number(x.rejected), lastSubmission: x.last_submission }));
+    const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+    const inactive = fullMemberStats.filter((item) => !item.last_submission || new Date(item.last_submission).getTime() < cutoff).sort((a, b) => (a.last_submission ? new Date(a.last_submission).getTime() : 0) - (b.last_submission ? new Date(b.last_submission).getTime() : 0)).slice(0, 50).map((x) => ({ userId: x.user_id, username: x.username, submissions: Number(x.submissions), lastSubmission: x.last_submission }));
+    return sendJson(res, 200, { totals: totals[0] || { total: 0, approved: 0, rejected: 0, pending: 0 }, mostActive, inactive, inactiveDays: 14 });
+  }
 
   if (route === 'notifications' && parts.length === 1 && req.method === 'GET') {
     if (!canManage(user)) return sendError(res, 403, 'الإشعارات متاحة لمسؤولي الإدارة فقط.');
@@ -1315,14 +1460,15 @@ async function handleApi(parts, req, res) {
 
   if (route === 'tasks' && parts.length === 1 && req.method === 'GET') {
     await syncDiscordTasks(sql);
-    const rows = await sql`SELECT id, title, points, required, active, created_by_name, created_at FROM tasks WHERE active = TRUE ORDER BY required DESC, id DESC`;
+    await sql`UPDATE tasks SET active = FALSE WHERE active = TRUE AND deadline_at IS NOT NULL AND deadline_at <= NOW()`;
+    const rows = await sql`SELECT id, title, points, required, active, created_by_name, created_at, deadline_at FROM tasks WHERE active = TRUE AND (deadline_at IS NULL OR deadline_at > NOW()) ORDER BY required DESC, id DESC`;
     const completedRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'approved'`;
     const completed = new Set(completedRows.map((row) => String(row.task_id)));
     const pendingRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'pending'`;
     const pending = new Set(pendingRows.map((row) => String(row.task_id)));
     const rejectedRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'rejected'`;
     const rejected = new Set(rejectedRows.map((row) => String(row.task_id)));
-    const tasks = rows.map((row) => ({ id: Number(row.id), title: row.title, points: Number(row.points || 0), required: Boolean(row.required), active: Boolean(row.active), created_by_name: row.created_by_name, created_at: row.created_at, completedByMe: completed.has(String(row.id)), pendingByMe: !completed.has(String(row.id)) && pending.has(String(row.id)), rejectedByMe: !completed.has(String(row.id)) && !pending.has(String(row.id)) && rejected.has(String(row.id)) }));
+    const tasks = rows.map((row) => ({ id: Number(row.id), title: row.title, points: Number(row.points || 0), required: Boolean(row.required), active: Boolean(row.active), created_by_name: row.created_by_name, created_at: row.created_at, deadline_at: row.deadline_at, completedByMe: completed.has(String(row.id)), pendingByMe: !completed.has(String(row.id)) && pending.has(String(row.id)), rejectedByMe: !completed.has(String(row.id)) && !pending.has(String(row.id)) && rejected.has(String(row.id)) }));
     const required = tasks.filter((task) => task.required);
     return sendJson(res, 200, { tasks, stats: { active: tasks.length, required: required.length, completedRequired: required.filter((task) => task.completedByMe).length, completedByMe: tasks.filter((task) => task.completedByMe).length } });
   }
@@ -1330,18 +1476,24 @@ async function handleApi(parts, req, res) {
     if (!canManage(user)) return sendError(res, 403, 'الصلاحية دي للمسؤولين فقط.');
     const raw = Array.isArray(req.body?.tasks) ? req.body.tasks : [];
     if (!raw.length || raw.length > 40) return sendError(res, 400, 'أضف من مهمة واحدة إلى 40 مهمة في المرة الواحدة.');
-    const tasks = raw.map((item) => { const points = Number(typeof item === 'string' ? 1 : (item?.points ?? 1)); return { title: cleanText(typeof item === 'string' ? item : item?.title, 240), required: typeof item === 'string' ? false : Boolean(item?.required), points: Number.isFinite(points) && points >= 0 && points <= 100000 && Math.round(points * 100) / 100 === points ? Math.round(points * 100) / 100 : NaN }; }).filter((task) => task.title);
+    const tasks = raw.map((item) => {
+      const points = Number(typeof item === 'string' ? 1 : (item?.points ?? 1));
+      const deadlineRaw = typeof item === 'string' ? '' : cleanText(item?.deadlineAt, 80);
+      const deadlineMs = deadlineRaw ? Date.parse(deadlineRaw) : NaN;
+      return { title: cleanText(typeof item === 'string' ? item : item?.title, 240), required: typeof item === 'string' ? false : Boolean(item?.required), points: Number.isFinite(points) && points >= 0 && points <= 100000 && Math.round(points * 100) / 100 === points ? Math.round(points * 100) / 100 : NaN, deadlineAt: deadlineRaw && Number.isFinite(deadlineMs) ? new Date(deadlineMs).toISOString() : null, deadlineInvalid: Boolean(deadlineRaw && !Number.isFinite(deadlineMs)) };
+    }).filter((task) => task.title);
     if (tasks.some((task) => !Number.isFinite(task.points))) return sendError(res, 400, 'عدد النقاط لازم يكون رقمًا من 0 إلى 100000، ويسمح بالكسور مثل 0.1.');
+    if (tasks.some((task) => task.deadlineInvalid || (task.deadlineAt && Date.parse(task.deadlineAt) <= Date.now()))) return sendError(res, 400, 'موعد انتهاء المهمة غير صالح أو في الماضي. اختار موعدًا مستقبليًا.');
     if (!tasks.length) return sendError(res, 400, 'اكتب اسم مهمة صحيح.');
     const created = [];
     for (const task of tasks) {
-      const rows = await sql`INSERT INTO tasks(title, points, required, active, created_by, created_by_name, created_at) VALUES (${task.title}, ${task.points}, ${task.required}, TRUE, ${user.id}, ${user.username}, NOW()) RETURNING id`;
+      const rows = await sql`INSERT INTO tasks(title, points, required, active, created_by, created_by_name, created_at, deadline_at) VALUES (${task.title}, ${task.points}, ${task.required}, TRUE, ${user.id}, ${user.username}, NOW(), ${task.deadlineAt}) RETURNING id`;
       created.push({ id: Number(rows[0].id), ...task });
     }
     let discordPosted = false;
     let warning = '';
     try {
-      const lines = created.map((task) => `• [${task.required ? 'إجباري' : 'اختياري'}] #${task.id} — ${task.title} [${formatPoints(task.points)} نقطة]`);
+      const lines = created.map((task) => `• [${task.required ? 'إجباري' : 'اختياري'}] #${task.id} — ${task.title} [${formatPoints(task.points)} نقطة]${task.deadlineAt ? ` · ⏰ حتى ${new Intl.DateTimeFormat('ar-EG', { timeZone: 'Africa/Cairo', dateStyle: 'short', timeStyle: 'short' }).format(new Date(task.deadlineAt))}` : ''}`);
       let batch = [];
       let charCount = '📋 مهمات جديدة | إدارة البرج\n'.length;
       const batches = [];
@@ -1513,6 +1665,7 @@ async function handleApi(parts, req, res) {
   }
 
   if (route === 'submissions' && parts.length === 1 && req.method === 'POST') {
+    await sql`UPDATE tasks SET active = FALSE WHERE active = TRUE AND deadline_at IS NOT NULL AND deadline_at <= NOW()`;
     const taskIdsInput = Array.isArray(req.body?.taskIds) ? req.body.taskIds : [];
     const taskIds = [...new Set(taskIdsInput.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))].slice(0, 40);
     if (!taskIds.length) return sendError(res, 400, 'اختار مهمة واحدة على الأقل.');
@@ -1551,14 +1704,30 @@ async function handleApi(parts, req, res) {
         await deleteBlobQuietly(pathname);
         return sendError(res, 400, `الملف "${originalName.slice(0, 60)}" مش صورة أو فيديو حقيقي (ممكن يكون ملف متنكر). ارفع صورة أو فيديو سليم.`);
       }
-      files.push({ pathname, token: crypto.randomBytes(24).toString('base64url'), originalName, mimeType: realType, size });
+      let sha256 = null;
+      if (realType.startsWith('image/')) {
+        try { sha256 = await sha256Blob(pathname); }
+        catch (error) { console.error('[image fingerprint]', cleanText(error.message, 180)); }
+      }
+      files.push({ pathname, token: crypto.randomBytes(24).toString('base64url'), originalName, mimeType: realType, size, ...(sha256 ? { sha256 } : {}) });
     }
     if (!links.length && !files.length) return sendError(res, 400, 'ضيف رابط دليل أو ارفع صورة/فيديو قبل الإرسال.');
     const note = cleanText(req.body?.note, 600);
+    const submittedHashes = files.filter((file) => file.sha256).map((file) => file.sha256);
+    let duplicateRows = [];
+    if (submittedHashes.length) duplicateRows = await sql`SELECT file_sha256, submission_id, user_id, username, original_name, created_at FROM submission_file_hashes WHERE file_sha256 = ANY(${submittedHashes}) ORDER BY created_at ASC LIMIT 200`;
+    const duplicatesByHash = new Map();
+    for (const item of duplicateRows) {
+      const key = item.file_sha256;
+      if (!duplicatesByHash.has(key)) duplicatesByHash.set(key, []);
+      duplicatesByHash.get(key).push({ submissionId: Number(item.submission_id), userId: item.user_id, username: item.username, originalName: item.original_name, submittedAt: item.created_at });
+    }
+    const duplicateImages = files.filter((file) => file.sha256 && duplicatesByHash.has(file.sha256)).map((file) => ({ fileName: file.originalName, matches: duplicatesByHash.get(file.sha256) }));
     const inserted = await sql`INSERT INTO submissions(user_id, username, avatar_url, note, evidence_links, files_json, submitted_at, status)
       VALUES (${user.id}, ${user.username}, ${user.avatarUrl || null}, ${note}, ${JSON.stringify(links)}::jsonb, ${JSON.stringify(files)}::jsonb, NOW(), 'pending') RETURNING id, submitted_at`;
     const submissionId = Number(inserted[0].id);
     for (const taskId of taskIds) await sql`INSERT INTO submission_tasks(submission_id, task_id) VALUES (${submissionId}, ${taskId}) ON CONFLICT DO NOTHING`;
+    for (const file of files) if (file.sha256) await sql`INSERT INTO submission_file_hashes(submission_id, file_sha256, user_id, username, original_name, created_at) VALUES (${submissionId}, ${file.sha256}, ${user.id}, ${user.username}, ${file.originalName}, NOW()) ON CONFLICT DO NOTHING`;
     await pushAdminNotification(sql, { type: 'submission', title: `📨 تسليم جديد #${submissionId}`, body: `${user.username} — ${foundTasks.length} مهمة${files.length ? ` · ${files.length} ملف` : ''}`, refId: submissionId, actorId: user.id });
     const base = siteUrl(req);
     const taskText = foundTasks.map((task) => `• ${task.required ? '🔴 إجباري' : '⚪ اختياري'} — **${cleanText(task.title, 140)}** — ${formatPoints(task.points)} نقطة`).join('\n').slice(0, 1024) || 'لم يتم تحديد مهمة.';
@@ -1575,7 +1744,7 @@ async function handleApi(parts, req, res) {
     try {
       const embed = {
         title: `📨 دليل مهمة جديد #${submissionId}`,
-        description: 'وصل دليل جديد من عضو الاستاف، والتسليم بانتظار مراجعة المسؤولين.\n\n**بعد المراجعة، تتم الموافقة أو الرفض من لوحة الموقع.**',
+        description: 'وصل دليل جديد من عضو الاستاف، والتسليم بانتظار مراجعة المسؤولين.\n\n**استخدم زري الموافقة أو الرفض هنا مباشرة، أو راجعه من الموقع.**',
         color: 0x5865F2,
         fields: [
           { name: '👤 العضو', value: `<@${user.id}>\n\`${user.id}\``, inline: true },
@@ -1584,6 +1753,7 @@ async function handleApi(parts, req, res) {
           { name: '📎 ملفات الدليل', value: fileText, inline: false },
           { name: links.length ? '🔗 روابط إضافية ⚠️ (من العضو، متفتحهاش إلا لو موثوقة)' : '🔗 روابط إضافية', value: linkText, inline: false },
           ...(note ? [{ name: '📝 ملاحظة العضو', value: note.slice(0, 1024), inline: false }] : []),
+          ...(duplicateImages.length ? [{ name: '⚠️ تحذير: صورة مكررة', value: duplicateImages.map((d) => `${cleanText(d.fileName, 80)} — ${d.matches.slice(0, 4).map((m) => `#${m.submissionId} من ${cleanText(m.username, 60)}`).join('، ')}`).join('\n').slice(0, 1024), inline: false }] : []),
         ],
         timestamp: new Date().toISOString(),
         footer: { text: 'إدارة البرج • مراجعة أدلة المهمات' },
@@ -1591,11 +1761,19 @@ async function handleApi(parts, req, res) {
       };
       const firstImage = evidence.attachments.find((file) => file.type.startsWith('image/'));
       if (firstImage) embed.image = { url: `attachment://${firstImage.name}` };
-      await postDiscordWithFiles(SUBMISSION_REVIEW_CHANNEL_ID, { embeds: [embed], allowed_mentions: { parse: [] } }, evidence.attachments);
+      const posted = await postDiscordWithFiles(SUBMISSION_REVIEW_CHANNEL_ID, {
+        embeds: [embed],
+        components: [{ type: 1, components: [
+          { type: 2, style: 3, label: '✅ موافقة وإضافة النقاط', custom_id: `submission:approve:${submissionId}` },
+          { type: 2, style: 4, label: '❌ رفض التسليم', custom_id: `submission:reject:${submissionId}` },
+        ] }],
+        allowed_mentions: { parse: [] },
+      }, evidence.attachments);
+      if (posted?.id) await sql`UPDATE submissions SET discord_message_id = ${String(posted.id)}, discord_channel_id = ${SUBMISSION_REVIEW_CHANNEL_ID} WHERE id = ${submissionId}`;
       discordPosted = true;
     } catch (error) { warning = cleanText(error.message, 220); console.error('[submission post]', warning); }
     try { await postDiscordMessage(TASK_SUBMISSIONS_CHANNEL_ID, `📨 تسليم جديد #${submissionId} من <@${user.id}> — بانتظار الموافقة. لا تُضاف النقاط إلا بعد اعتماد المسؤولين.`); } catch {}
-    return sendJson(res, 201, { ok: true, submissionId, discordPosted, warning, message: discordPosted ? 'اتسجل تسليم المهمة واترسل لروم التسليم.' : 'اتسجل التسليم في الموقع، لكن البوت لم يستطع إرساله لروم التسليم.' });
+    return sendJson(res, 201, { ok: true, submissionId, discordPosted, warning, duplicateImages, message: `${discordPosted ? 'اتسجل تسليم المهمة واترسل لروم التسليم.' : 'اتسجل التسليم في الموقع، لكن البوت لم يستطع إرساله لروم التسليم.'}${duplicateImages.length ? ' ⚠️ تم اكتشاف صورة مكررة وسيظهر التحذير للمراجعين.' : ''}` });
   }
 
   if (route === 'submissions' && parts.length === 1 && req.method === 'GET') {
@@ -1614,9 +1792,20 @@ async function handleApi(parts, req, res) {
       if (!tasksBySubmission.has(key)) tasksBySubmission.set(key, []);
       tasksBySubmission.get(key).push({ id: Number(row.id), title: row.title, points: Number(row.points || 0), required: Boolean(row.required) });
     }
+    const duplicateMap = new Map();
+    if (canManage(user) && ids.length) {
+      const matches = await sql`SELECT own.submission_id AS submission_id, own.file_sha256 AS file_sha256, other.submission_id AS duplicate_submission_id, other.user_id AS duplicate_user_id, other.username AS duplicate_username, other.original_name AS duplicate_file_name, other.created_at AS duplicate_created_at FROM submission_file_hashes own JOIN submission_file_hashes other ON other.file_sha256 = own.file_sha256 AND other.submission_id <> own.submission_id WHERE own.submission_id = ANY(${ids}) ORDER BY own.submission_id, other.created_at ASC LIMIT 2000`;
+      for (const match of matches) {
+        const key = `${Number(match.submission_id)}:${match.file_sha256}`;
+        if (!duplicateMap.has(key)) duplicateMap.set(key, []);
+        duplicateMap.get(key).push({ submissionId: Number(match.duplicate_submission_id), userId: match.duplicate_user_id, username: match.duplicate_username, fileName: match.duplicate_file_name, submittedAt: match.duplicate_created_at });
+      }
+    }
     const submissions = rows.map((row) => {
-      const files = parseJson(row.files_json, []).map((file) => ({ ...file, url: `/api/evidence?token=${encodeURIComponent(file.token)}` }));
-      return { id: Number(row.id), userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, note: row.note, evidenceLinks: parseJson(row.evidence_links, []), files, submittedAt: row.submitted_at, status: row.status, tasks: tasksBySubmission.get(Number(row.id)) || [] };
+      const rawFiles = parseJson(row.files_json, []);
+      const files = rawFiles.map((file) => ({ ...file, url: `/api/evidence?token=${encodeURIComponent(file.token)}`, duplicateMatches: file.sha256 ? (duplicateMap.get(`${Number(row.id)}:${file.sha256}`) || []) : [] }));
+      const duplicateImages = files.filter((file) => file.duplicateMatches.length).map((file) => ({ fileName: file.originalName, matches: file.duplicateMatches }));
+      return { id: Number(row.id), userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, note: row.note, evidenceLinks: parseJson(row.evidence_links, []), files, duplicateImages, submittedAt: row.submitted_at, status: row.status, reviewedBy: row.reviewed_by, reviewedAt: row.reviewed_at, tasks: tasksBySubmission.get(Number(row.id)) || [] };
     });
     return sendJson(res, 200, { submissions });
   }
@@ -1673,6 +1862,7 @@ async function handleApi(parts, req, res) {
     const reopenNote = cleanText(req.body?.note, 300);
     const reopened = await sql`UPDATE submissions SET status = 'reopened', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'rejected' RETURNING id`;
     if (!reopened.length) return sendError(res, 409, 'تم تغيير حالة التسليم من مسؤول آخر بالفعل.');
+    await sql`INSERT INTO submission_review_audit(submission_id, member_id, member_name, decision, reviewer_id, reviewer_name, reason, created_at) VALUES (${id}, ${sub.user_id}, ${sub.username}, 'reopened', ${user.id}, ${user.username}, ${reopenNote}, NOW())`;
     const taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${id}`;
     const taskSummary = taskRows.map((t) => `• **${cleanText(t.title, 180)}**`).join('\n').slice(0, 1024) || 'لا توجد مهمات مرتبطة بالتسليم.';
     const dmPromise = notifyReview({ token: BOT_TOKEN, userId: sub.user_id, kind: 'submission', status: 'reopened', id, reviewerId: user.id, note: reopenNote, fields: [{ name: '📋 المهمات المعاد فتحها', value: taskSummary, inline: false }] });
@@ -1691,6 +1881,7 @@ async function handleApi(parts, req, res) {
         timestamp: new Date().toISOString(),
       });
     } catch (e) { console.error('[submission reopen log]', cleanText(e.message, 180)); }
+    await updateDiscordSubmissionReview(sub, 'reopened', user.id, reopenNote);
     const dm = await dmPromise;
     return sendJson(res, 200, { ok: true, status: 'reopened', dmSent: dm.ok, message: `تمت إعادة فتح التسليم #${id}، والعضو يقدر يسلّم المهام تاني.${dmNote(dm)}` });
   }
@@ -1706,6 +1897,7 @@ async function handleApi(parts, req, res) {
       const reason = cleanText(req.body?.reason, 300);
       const rejected = await sql`UPDATE submissions SET status = 'rejected', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id`;
       if (!rejected.length) return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
+      await sql`INSERT INTO submission_review_audit(submission_id, member_id, member_name, decision, reviewer_id, reviewer_name, reason, created_at) VALUES (${id}, ${sub.user_id}, ${sub.username}, 'rejected', ${user.id}, ${user.username}, ${reason}, NOW())`;
       const dmPromise = notifyReview({ token: BOT_TOKEN, userId: sub.user_id, kind: 'submission', status: 'rejected', id, reviewerId: user.id, note: reason });
       try {
         await postDiscordEmbed(POINTS_LOG_CHANNEL_ID, {
@@ -1721,6 +1913,7 @@ async function handleApi(parts, req, res) {
           timestamp: new Date().toISOString(),
         });
       } catch (e) { console.error('[submission reject log]', cleanText(e.message, 180)); }
+      await updateDiscordSubmissionReview(sub, 'rejected', user.id, reason);
       const dm = await dmPromise;
       return sendJson(res, 200, { ok: true, status: 'rejected', dmSent: dm.ok, message: `تم رفض التسليم.${dmNote(dm)}` });
     }
@@ -1728,7 +1921,9 @@ async function handleApi(parts, req, res) {
     const amount = Math.round(taskRows.reduce((sum, t) => sum + Number(t.points || 0), 0) * 100) / 100;
     const marked = await sql`UPDATE submissions SET status = 'approved', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id`;
     if (!marked.length) return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
+    await sql`INSERT INTO submission_review_audit(submission_id, member_id, member_name, decision, reviewer_id, reviewer_name, reason, created_at) VALUES (${id}, ${sub.user_id}, ${sub.username}, 'approved', ${user.id}, ${user.username}, ${cleanText(req.body?.reason || req.body?.note, 300)}, NOW())`;
     if (amount > 0) await sql`INSERT INTO staff_points(user_id, username, amount, reason, actor_id, actor_name, source, submission_id, created_at) VALUES (${sub.user_id}, ${sub.username}, ${amount}, ${`اعتماد تسليم #${id}`}, ${user.id}, ${user.username}, 'task', ${id}, NOW())`;
+    await updateDiscordSubmissionReview(sub, 'approved', user.id, cleanText(req.body?.reason || req.body?.note, 300));
     const totalAfterRows = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${sub.user_id}`;
     const totalAfter = Number(totalAfterRows[0]?.total || 0);
     const taskSummary = taskRows.map(t => `• **${cleanText(t.title, 180)}** — ${formatPoints(t.points)} نقطة`).join('\n').slice(0, 1024) || 'لا توجد مهمات مرتبطة بالتسليم.';

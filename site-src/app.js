@@ -137,12 +137,13 @@ async function initialize() {
     if (state.user.canManage) {
       $('#task-manager').classList.remove('hidden');
       $$('.manager-only').forEach((element) => element.classList.remove('hidden'));
+      wireTaskInsights();
       $('#submissions-heading').textContent = 'آخر تسليمات الاستاف';
       $('#manager-leave-section').classList.remove('hidden');
       $('#manager-staff-request-section')?.classList.remove('hidden');
       wireNotifications();
     }
-    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests(), loadStaffRequests(), loadStaffStats(), loadNotifications()]);
+    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests(), loadStaffRequests(), loadStaffStats(), loadNotifications(), ...(state.user.canManage ? [loadTaskInsights(), loadSubmissionAudit()] : [])]);
     startChatPolling();
     startPresenceHeartbeat();
     // تخفيف الضغط على السيرفر: التحديثات الدورية بتقف لما التبويب يتخبى وبتتأخر شوية.
@@ -268,6 +269,7 @@ function renderTaskList() {
         <div class="task-row-meta">
           <span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? '● مهمة إجبارية' : '○ مهمة اختيارية'}</span>
           <span class="task-id">#${task.id} · ⭐ ${Number(task.points || 0)} نقطة</span>
+          ${task.deadline_at ? `<span class="task-tag task-deadline-tag">⏰ تنتهي ${escapeHtml(formatDate(task.deadline_at, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Cairo' }))}</span>` : ''}
           ${task.completedByMe ? '<span class="task-tag completed">✓ انتهت</span>' : task.pendingByMe ? '<span class="task-tag optional">⏳ بانتظار المراجعة</span>' : task.rejectedByMe ? '<span class="task-tag required">✕ مرفوضة · اتقفلت</span>' : ''}
         </div>
       </div>
@@ -389,7 +391,10 @@ function queueCurrentTask() {
   const pointsRaw = $('#new-task-points').value.trim();
   const points = Number(pointsRaw);
   if (!pointsRaw || !Number.isFinite(points) || points < 0 || points > 100000 || Math.round(points * 100) / 100 !== points) return showToast('اكتب نقاطًا من 0 إلى 100000 وبحد أقصى منزلتين عشريتين، مثل 0.1 أو 0.25.', 'error');
-  state.queue.push({ key: state.queueNextId++, title, required: $('#new-task-required').value === '1', points: Math.round(points * 100) / 100 });
+  const deadlineRaw = $('#new-task-deadline')?.value || '';
+  const deadlineDate = deadlineRaw ? new Date(deadlineRaw) : null;
+  if (deadlineRaw && (!deadlineDate || !Number.isFinite(deadlineDate.getTime()) || deadlineDate.getTime() <= Date.now())) return showToast('موعد انتهاء المهمة لازم يكون في المستقبل.', 'error');
+  state.queue.push({ key: state.queueNextId++, title, required: $('#new-task-required').value === '1', points: Math.round(points * 100) / 100, deadlineAt: deadlineDate ? deadlineDate.toISOString() : null });
   input.value = '';
   $('#new-task-points').value = '1';
   input.focus();
@@ -406,7 +411,7 @@ function renderTaskQueue() {
   queue.innerHTML = state.queue.map((item) => `
     <div class="queued-task" data-queue-key="${item.key}">
       <span class="task-id">${String(state.queue.indexOf(item) + 1).padStart(2, '0')}</span>
-      <div class="queued-task-title">${escapeHtml(item.title)}</div>
+      <div class="queued-task-title">${escapeHtml(item.title)}${item.deadlineAt ? `<small class="queued-deadline">⏰ ${escapeHtml(formatDate(item.deadlineAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Cairo' }))}</small>` : ''}</div>
       <label class="queued-task-points" title="عدد نقاط هذه المهمة">⭐ <input type="number" min="0" max="100000" step="0.01" value="${Number(item.points)}" data-queue-points="${item.key}" aria-label="نقاط ${escapeHtml(item.title)}"> <span>نقطة</span></label>
       <select data-queue-required="${item.key}" aria-label="نوع المهمة"><option value="1" ${item.required ? 'selected' : ''}>إجبارية</option><option value="0" ${!item.required ? 'selected' : ''}>اختيارية</option></select>
       <button class="remove-queue-item" data-remove-queue="${item.key}" aria-label="حذف المهمة">×</button>
@@ -440,7 +445,7 @@ async function publishQueuedTasks() {
   try {
     const result = await api('/api/tasks', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tasks: state.queue.map(({ title, required, points }) => ({ title, required, points })) }),
+      body: JSON.stringify({ tasks: state.queue.map(({ title, required, points, deadlineAt }) => ({ title, required, points, deadlineAt })) }),
     });
     state.queue = [];
     renderTaskQueue();
@@ -545,12 +550,55 @@ async function loadSubmissions() {
       const files = (submission.files || []).map((file) => `<a href="${escapeHtml(file.url)}" target="_blank" rel="noopener noreferrer">📎 ${escapeHtml(file.originalName || 'ملف مرفوع')}</a>`).join('');
       const links = (submission.evidenceLinks || []).map((link) => `<a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">↗ فتح رابط دليل</a>`).join('');
       const tasks = (submission.tasks || []).map((task) => `<span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? 'إجباري' : 'اختياري'} · ${escapeHtml(task.title)}</span>`).join('');
-      return `<article class="submission-card"><div class="submission-top"><div class="submission-user"><img src="${escapeHtml(submission.avatarUrl || avatarFallback(submission.userId))}" alt=""><span>${escapeHtml(submission.username)}</span><span class="task-id">#${submission.id}</span><span class="task-tag ${submission.status === 'approved' ? 'completed' : submission.status === 'rejected' ? 'required' : 'optional'}">${submission.status === 'approved' ? 'تمت الموافقة' : submission.status === 'rejected' ? 'مرفوض' : submission.status === 'reopened' ? 'أُعيد فتحه' : 'بانتظار الموافقة'}</span></div><time class="submission-date">${formatDate(submission.submittedAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</time></div><div class="submission-task-list">${tasks}</div>${submission.note ? `<div class="submission-note">${escapeHtml(submission.note)}</div>` : ''}${files || links ? `<div class="submission-evidence">${files}${links}</div>` : ''}${state.user.canManage && submission.status === 'pending' ? `<div class="manager-actions"><button class="primary-button" data-review-submission="approve" data-id="${submission.id}">موافقة وإضافة النقاط</button><button class="secondary-button" data-review-submission="reject" data-id="${submission.id}">رفض التسليم</button></div>` : ''}${state.user.canManage && submission.status === 'rejected' ? `<div class="manager-actions"><button class="secondary-button" data-review-submission="reopen" data-id="${submission.id}">🔓 إعادة فتح المهمة للعضو</button></div>` : ''}</article>`;
+      const duplicateWarning = state.user.canManage && (submission.duplicateImages || []).length ? `<div class="duplicate-image-warning"><b>⚠️ تنبيه: تم اكتشاف صورة مكررة</b>${submission.duplicateImages.map((duplicate) => `<div>${escapeHtml(duplicate.fileName)} — موجودة في ${duplicate.matches.slice(0, 5).map((match) => `التسليم #${match.submissionId} بواسطة ${escapeHtml(match.username)}`).join('، ')}</div>`).join('')}</div>` : '';
+      return `<article class="submission-card"><div class="submission-top"><div class="submission-user"><img src="${escapeHtml(submission.avatarUrl || avatarFallback(submission.userId))}" alt=""><span>${escapeHtml(submission.username)}</span><span class="task-id">#${submission.id}</span><span class="task-tag ${submission.status === 'approved' ? 'completed' : submission.status === 'rejected' ? 'required' : 'optional'}">${submission.status === 'approved' ? 'تمت الموافقة' : submission.status === 'rejected' ? 'مرفوض' : submission.status === 'reopened' ? 'أُعيد فتحه' : 'بانتظار الموافقة'}</span></div><time class="submission-date">${formatDate(submission.submittedAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</time></div><div class="submission-task-list">${tasks}</div>${submission.note ? `<div class="submission-note">${escapeHtml(submission.note)}</div>` : ''}${duplicateWarning}${files || links ? `<div class="submission-evidence">${files}${links}</div>` : ''}${state.user.canManage && submission.status === 'pending' ? `<div class="manager-actions"><button class="primary-button" data-review-submission="approve" data-id="${submission.id}">موافقة وإضافة النقاط</button><button class="secondary-button" data-review-submission="reject" data-id="${submission.id}">رفض التسليم</button></div>` : ''}${state.user.canManage && submission.status === 'rejected' ? `<div class="manager-actions"><button class="secondary-button" data-review-submission="reopen" data-id="${submission.id}">🔓 إعادة فتح المهمة للعضو</button></div>` : ''}</article>`;
     }).join('');
     $$('[data-review-submission]').forEach(button => button.addEventListener('click', async () => { const action = button.dataset.reviewSubmission; const id = button.dataset.id; let reason = ''; if (action === 'reject') { reason = window.prompt('سبب رفض التسليم (اختياري):') || ''; } if (action === 'reopen') { if (!window.confirm('هتفتح التسليم ده تاني، والعضو هيقدر يسلّم نفس المهام من جديد. متأكد؟')) return; reason = window.prompt('ملاحظة للعضو (اختياري):') || ''; } button.disabled = true; try { const result = await api(`/api/submissions/${id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason, note: reason }) }); showToast(result.message || (action === 'approve' ? `تمت الموافقة وإضافة ${result.awarded} نقطة.` : 'تم رفض التسليم.'), result.dmSent === false ? 'info' : 'success'); await Promise.all([loadSubmissions(), loadMyPoints()]); } catch (error) { showToast(error.message, 'error'); button.disabled = false; } }));
   } catch (error) {
     $('#submissions-list').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
   }
+}
+
+function wireTaskInsights() {
+  $('#task-insights-refresh')?.addEventListener('click', () => loadTaskInsights(true));
+  $('#submission-audit-refresh')?.addEventListener('click', loadSubmissionAudit);
+  $('#submission-audit-export')?.addEventListener('click', () => { window.location.href = '/api/submission-audit.csv'; });
+}
+function renderMiniMemberList(items, mode) {
+  if (!items?.length) return '<div class="task-empty">لا توجد بيانات كافية حتى الآن.</div>';
+  return items.map((item, index) => {
+    const details = mode === 'active' ? `${Number(item.submissions || 0)} تسليم · ${Number(item.approved || 0)} مقبول · ${Number(item.rejected || 0)} مرفوض` : (item.lastSubmission ? `آخر تسليم: ${formatDate(item.lastSubmission, { day: 'numeric', month: 'short', year: 'numeric' })}` : 'لم يسجّل أي تسليم');
+    return `<div class="review-member-row"><span class="review-member-rank">${mode === 'active' ? `#${index + 1}` : '•'}</span><div><b>${escapeHtml(item.username || item.userId)}</b><small>${escapeHtml(details)}</small></div><code>${escapeHtml(item.userId)}</code></div>`;
+  }).join('');
+}
+async function loadTaskInsights(force = false) {
+  if (!state.user?.canManage) return;
+  const overview = $('#task-stats-overview');
+  if (force && overview) overview.innerHTML = '<div class="loading-state">جاري تحديث الإحصائيات...</div>';
+  try {
+    const result = await api('/api/task-stats');
+    const totals = result.totals || {};
+    if (overview) overview.innerHTML = [
+      ['إجمالي التسليمات', totals.total || 0], ['المقبولة', totals.approved || 0], ['المرفوضة', totals.rejected || 0], ['قيد المراجعة', totals.pending || 0],
+    ].map(([label, value]) => `<div class="task-stat-card"><small>${label}</small><b>${Number(value).toLocaleString('en-US')}</b></div>`).join('');
+    $('#task-most-active').innerHTML = renderMiniMemberList(result.mostActive, 'active');
+    $('#task-inactive-members').innerHTML = renderMiniMemberList(result.inactive, 'inactive');
+  } catch (error) {
+    if (overview) overview.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
+  }
+}
+async function loadSubmissionAudit() {
+  if (!state.user?.canManage) return;
+  const box = $('#submission-audit-list');
+  if (!box) return;
+  box.innerHTML = '<div class="loading-state">جاري تحميل سجل القرارات...</div>';
+  try {
+    const result = await api('/api/submission-audit');
+    const entries = result.entries || [];
+    if (!entries.length) { box.innerHTML = '<div class="task-empty">لسه مفيش قرارات محفوظة.</div>'; return; }
+    const labels = { approved: '✅ موافقة', rejected: '❌ رفض', reopened: '🔓 إعادة فتح' };
+    box.innerHTML = entries.map((entry) => `<article class="submission-audit-row"><div><b>${escapeHtml(labels[entry.decision] || entry.decision)} · التسليم #${entry.submissionId}</b><small>العضو: ${escapeHtml(entry.memberName)} (${escapeHtml(entry.memberId)}) · الأدمن: ${escapeHtml(entry.reviewerName)} (${escapeHtml(entry.reviewerId)})</small>${entry.reason ? `<p>${escapeHtml(entry.reason)}</p>` : ''}</div><time>${escapeHtml(formatDate(entry.createdAt, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Cairo' }))}</time></article>`).join('');
+  } catch (error) { box.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`; }
 }
 
 async function loadMyPoints() {

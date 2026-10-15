@@ -54,6 +54,10 @@
     {
       "path": "/api/cron/leave-sync",
       "schedule": "0 23 * * *"
+    },
+    {
+      "path": "/api/cron/task-deadlines",
+      "schedule": "0 22 * * *"
     }
   ]
 }

@@ -170,6 +170,7 @@
               <select id="new-task-required" aria-label="نوع المهمة"><option value="1">إجبارية</option><option value="0">اختيارية</option></select>
               <input id="new-task-points" type="number" min="0" max="100000" step="0.01" value="1" aria-label="نقاط المهمة" title="نقاط المهمة" style="max-width:110px"><button id="queue-task-btn" class="secondary-button">+ إضافة للقائمة</button>
             </div>
+            <div class="task-deadline-setting"><label for="new-task-deadline">⏰ موعد انتهاء المهمة <span class="muted">(اختياري)</span></label><input id="new-task-deadline" type="datetime-local" aria-label="موعد انتهاء المهمة"><small>سيتم تذكير الأعضاء بالخاص قبل الموعد خلال 24 ساعة، وستُغلق المهمة تلقائيًا عند انتهاء المهلة.</small></div>
             <div id="task-queue" class="task-queue"><div class="empty-inline">لسه مفيش مهمات في قائمة النشر.</div></div>
             <div class="manager-actions"><span id="queue-count" class="muted small-copy">0 مهمات جاهزة للنشر</span><button id="publish-tasks-btn" class="primary-button" disabled>نشر المهمات في ديسكورد ↗</button></div>
             <div class="task-create-row" style="margin-top:14px"><input id="manual-points-user" type="text" placeholder="Discord ID للعضو"><input id="manual-points-amount" type="number" step="0.01" placeholder="+/- النقاط"><input id="manual-points-reason" type="text" maxlength="300" placeholder="سبب التعديل"><button id="manual-points-btn" class="secondary-button" type="button">إضافة/خصم نقاط</button></div>
@@ -200,6 +201,16 @@
           <section class="recent-submissions-section">
             <div class="section-title-row"><div><span class="tiny-label">SUBMISSION HISTORY</span><h2 id="submissions-heading">آخر تسليماتي</h2></div><button id="refresh-submissions-btn" class="text-button">تحديث ↻</button></div>
             <div id="submissions-list" class="submissions-list"><div class="loading-state">جاري تحميل سجل التسليم...</div></div>
+          </section>
+          <section id="task-review-manager" class="manager-task-box manager-only hidden">
+            <div class="section-title-row"><div><span class="tiny-label">TASK PERFORMANCE</span><h2>إحصائيات المهمات والتسليمات</h2></div><button id="task-insights-refresh" class="text-button" type="button">تحديث الإحصائيات ↻</button></div>
+            <div id="task-stats-overview" class="task-stats-overview"><div class="loading-state">جاري حساب الإحصائيات...</div></div>
+            <div class="review-insights-grid">
+              <div class="review-insight-panel"><h3>🏆 الأكثر نشاطًا</h3><div id="task-most-active" class="review-insight-list"><div class="loading-state">جاري التحميل...</div></div></div>
+              <div class="review-insight-panel"><h3>💤 لم يسلّموا منذ فترة</h3><p class="muted small-copy">يظهر هنا من لم يسلّم منذ 14 يومًا أو لم يسلّم أي مهمة من قبل.</p><div id="task-inactive-members" class="review-insight-list"><div class="loading-state">جاري التحميل...</div></div></div>
+            </div>
+            <div class="section-title-row submission-audit-heading"><div><span class="tiny-label">ADMIN DECISIONS</span><h2>سجل قرارات الأدمن</h2><p class="muted small-copy">من وافق أو رفض، والعضو، والسبب، ووقت القرار.</p></div><div class="audit-export-actions"><button id="submission-audit-export" class="secondary-button" type="button">تصدير CSV ↓</button><button id="submission-audit-refresh" class="text-button" type="button">تحديث السجل ↻</button></div></div>
+            <div id="submission-audit-list" class="submission-audit-list"><div class="loading-state">جاري تحميل سجل القرارات...</div></div>
           </section>
         </section>
 
