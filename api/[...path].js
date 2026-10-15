@@ -17,6 +17,7 @@ const MANAGEMENT_STAFF_ROLE_ID = process.env.MANAGEMENT_STAFF_ROLE_ID || '155962
 const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 const TASK_PING_ROLE_ID = (process.env.TASK_PING_ROLE_ID || '1556647362062188544').trim(); // رتبة بتتمنشن مع كل مهمات جديدة
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
+const TASK_EVIDENCE_ARCHIVE_CHANNEL_ID = '1556651404154642504'; // الروم المطلوب نشر صور وأدلة التسليم فيها
 const TASK_APPROVED_CHANNEL_ID = (process.env.TASK_APPROVED_CHANNEL_ID || process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504').trim(); // روم رسالة "المهمة اتقبلت" العادية
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
 const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
@@ -1777,6 +1778,7 @@ async function handleApi(parts, req, res) {
     const linkText = links.map((link) => `• <${link}>`).join('\n').slice(0, 1024) || 'لا توجد روابط خارجية.';
     let discordPosted = false;
     let warning = '';
+    let reviewEmbed = null;
     try {
       const embed = {
         title: `📨 دليل مهمة جديد #${submissionId}`,
@@ -1797,6 +1799,7 @@ async function handleApi(parts, req, res) {
       };
       const firstImage = evidence.attachments.find((file) => file.type.startsWith('image/'));
       if (firstImage) embed.image = { url: `attachment://${firstImage.name}` };
+      reviewEmbed = embed;
       const posted = await postDiscordWithFiles(SUBMISSION_REVIEW_CHANNEL_ID, {
         embeds: [embed],
         components: [{ type: 1, components: [
@@ -1808,8 +1811,27 @@ async function handleApi(parts, req, res) {
       if (posted?.id) await sql`UPDATE submissions SET discord_message_id = ${String(posted.id)}, discord_channel_id = ${SUBMISSION_REVIEW_CHANNEL_ID} WHERE id = ${submissionId}`;
       discordPosted = true;
     } catch (error) { warning = cleanText(error.message, 220); console.error('[submission post]', warning); }
-    try { await postDiscordMessage(TASK_SUBMISSIONS_CHANNEL_ID, `📨 تسليم جديد #${submissionId} من <@${user.id}> — بانتظار الموافقة. لا تُضاف النقاط إلا بعد اعتماد المسؤولين.`); } catch {}
-    return sendJson(res, 201, { ok: true, submissionId, discordPosted, warning, duplicateImages, message: `${discordPosted ? 'اتسجل تسليم المهمة واترسل لروم التسليم.' : 'اتسجل التسليم في الموقع، لكن البوت لم يستطع إرساله لروم التسليم.'}${duplicateImages.length ? ' ⚠️ تم اكتشاف صورة مكررة وسيظهر التحذير للمراجعين.' : ''}` });
+    // انشر نسخة كاملة من الدليل في روم تسليمات المهمات، مع رفع الصور/الفيديوهات كمرفقات فعلية.
+    // تبقى أزرار القبول والرفض في روم المراجعة فقط.
+    try {
+      if (!reviewEmbed) throw new Error('لم يتم تجهيز تفاصيل الدليل للنسخة الأرشيفية.');
+      const mirrorEmbed = {
+        ...reviewEmbed,
+        description: '📨 وصل دليل مهمة جديد. الصور والفيديوهات المرفوعة تظهر كمرفقات أسفل الرسالة عند توفرها. تتم الموافقة أو الرفض من رسالة التسليم في روم المراجعة.',
+        footer: { text: 'إدارة البرج • أرشيف أدلة المهمات' },
+      };
+      await postDiscordWithFiles(TASK_EVIDENCE_ARCHIVE_CHANNEL_ID, {
+        embeds: [mirrorEmbed],
+        allowed_mentions: { parse: [] },
+      }, evidence.attachments);
+    } catch (mirrorError) {
+      console.error('[submission evidence mirror]', cleanText(mirrorError?.message || mirrorError, 220));
+      try { await postDiscordMessage(TASK_EVIDENCE_ARCHIVE_CHANNEL_ID, `📨 تسليم جديد #${submissionId} من <@${user.id}> — تعذّر إرفاق الملفات هنا؛ راجع رسالة التسليم في روم المراجعة.`, { parse: [] }); } catch {}
+    }
+    if (String(TASK_SUBMISSIONS_CHANNEL_ID) !== String(TASK_EVIDENCE_ARCHIVE_CHANNEL_ID)) {
+      try { await postDiscordMessage(TASK_SUBMISSIONS_CHANNEL_ID, `📨 تسليم جديد #${submissionId} من <@${user.id}> — بانتظار الموافقة. لا تُضاف النقاط إلا بعد اعتماد المسؤولين.`); } catch {}
+    }
+    return sendJson(res, 201, { ok: true, submissionId, discordPosted, warning, duplicateImages, message: `${discordPosted ? 'اتسجل تسليم المهمة واترسل لروم المراجعة وروم التسليمات.' : 'اتسجل التسليم في الموقع، لكن البوت لم يستطع إرساله لروم المراجعة.'}${duplicateImages.length ? ' ⚠️ تم اكتشاف صورة مكررة وسيظهر التحذير للمراجعين.' : ''}` });
   }
 
   if (route === 'submissions' && parts.length === 1 && req.method === 'GET') {
