@@ -40,7 +40,6 @@ const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 const TASK_PING_ROLE_ID = (process.env.TASK_PING_ROLE_ID || '1556647362062188544').trim(); // رتبة بتتمنشن مع كل مهمات جديدة
 const MESSAGE_COUNT_CHANNEL_ID = (process.env.MESSAGE_COUNT_CHANNEL_ID || '1552049641913065552').trim();
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
-const TASK_EVIDENCE_ARCHIVE_CHANNEL_ID = '1556651404154642504'; // الروم المطلوب نشر صور وأدلة التسليم فيها
 const TASK_APPROVED_CHANNEL_ID = (process.env.TASK_APPROVED_CHANNEL_ID || TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504').trim();
 const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
@@ -1182,27 +1181,11 @@ app.post('/api/submissions', requireAuth, (req, res) => {
         const posted = await channel.send({ embeds: [embed], files: attachable, components: [submissionReviewActionRow(submissionId)], allowedMentions: { parse: [] } });
         db.prepare('UPDATE submissions SET discord_message_id = ?, discord_channel_id = ? WHERE id = ?').run(String(posted.id), String(channel.id), submissionId);
         discordPosted = true;
-
-        // أرسل نسخة أرشيفية إلى روم تسليمات المهمات مع المرفقات الفعلية، دون أزرار مراجعة.
-        if (String(TASK_EVIDENCE_ARCHIVE_CHANNEL_ID) !== String(channel.id)) {
-          try {
-            const archiveChannel = await fetchTextChannel(TASK_EVIDENCE_ARCHIVE_CHANNEL_ID);
-            const archiveEmbed = EmbedBuilder.from(embed)
-              .setDescription('📨 وصل دليل مهمة جديد. الصور والفيديوهات المرفوعة تظهر كمرفقات أسفل الرسالة عند توفرها. تتم الموافقة أو الرفض من رسالة التسليم في روم المراجعة.')
-              .setFooter({ text: 'إدارة البرج • أرشيف أدلة المهمات' });
-            const archiveFiles = files
-              .filter((file) => file.size <= ATTACHMENT_LIMIT_MB * 1024 * 1024)
-              .map((file) => new AttachmentBuilder(file.path, { name: path.basename(file.originalname) }));
-            await archiveChannel.send({ embeds: [archiveEmbed], files: archiveFiles, allowedMentions: { parse: [] } });
-          } catch (mirrorError) {
-            console.error('[submission evidence mirror]', mirrorError.message);
-          }
-        }
       } catch (error) {
         warning = error.message;
         console.error('[submission post]', error.message);
       }
-      res.status(201).json({ ok: true, submissionId, discordPosted, warning, message: discordPosted ? 'اتسجل تسليم المهمة واترسل لروم التسليم.' : 'اتسجل التسليم في الموقع، لكن البوت لم يستطع إرساله لروم التسليم.' });
+      res.status(201).json({ ok: true, submissionId, discordPosted, warning, message: discordPosted ? 'اتسجل تسليم المهمة واترسل لروم المراجعة فقط.' : 'اتسجل التسليم في الموقع، لكن البوت لم يستطع إرساله لروم المراجعة.' });
     } catch (error) {
       for (const file of files) {
         try { fs.unlinkSync(file.path); } catch { /* ignore cleanup errors */ }
