@@ -4,6 +4,7 @@
 // المتغيرات المطلوبة: DISCORD_BOT_TOKEN و DATABASE_URL (نفس قاعدة بيانات الموقع).
 const { Client, GatewayIntentBits, Partials, Events, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
 const { neon } = require('@neondatabase/serverless');
+const { buildSubmissionNotifications } = require('../lib/submission-notifications.js');
 
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DB_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || process.env.DATABASE_URL_UNPOOLED || process.env.POSTGRES_PRISMA_URL;
@@ -14,6 +15,7 @@ const sql = neon(DB_URL);
 const TRIGGER = /^(?:نقاطي|نقاطى|mypoints|my points)$/i;
 const REVIEW_CHANNEL_ID = process.env.SUBMISSION_REVIEW_CHANNEL_ID || '1556945732957765722';
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
+const TASK_APPROVED_CHANNEL_ID = (process.env.TASK_APPROVED_CHANNEL_ID || process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504').trim();
 const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID || '883871561474539630';
 const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
 const MANAGEMENT_MAIN_ROLE_ID = process.env.MANAGEMENT_MAIN_ROLE_ID || '1538623033806168135';
@@ -64,7 +66,7 @@ async function updateSubmissionMessage(message, submission, status, reviewerId, 
   const fields = (prior?.fields || []).filter((field) => field.name !== '🛡️ قرار المراجعة');
   fields.push({
     name: '🛡️ قرار المراجعة',
-    value: `${approved ? '✅ مقبول' : '❌ مرفوض'} بواسطة <@${reviewerId}>${reason ? `\nالسبب: ${clean(reason, 400)}` : ''}${approved ? `\nالنقاط المضافة: +${fmt(amount)} · الرصيد: ${fmt(totalAfter)}` : ''}`.slice(0, 1024),
+    value: `${approved ? '✅ مقبول' : '❌ مرفوض'} بواسطة <@${reviewerId}>${reason ? `\nالسبب: ${clean(reason, 400)}` : ''}${approved ? `\nالنقاط المضافة: +${fmt(amount)} · الرصيد: ${fmt(totalAfter)}` : '\nلم تتم إضافة نقاط.'}`.slice(0, 1024),
     inline: false,
   });
   embed.setTitle(prior?.title || `${approved ? '✅' : '❌'} تسليم مهمة #${submission.id}`)
@@ -87,9 +89,9 @@ async function processSubmissionReview(interaction, submissionId, status, reason
   if (!['pending', 'submitted'].includes(String(sub.status))) throw new Error(`تمت مراجعة التسليم مسبقًا؛ حالته الحالية: ${sub.status}.`);
 
   const message = await getSubmissionMessage(sub);
+  const taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${submissionId} ORDER BY t.id`;
   let amount = 0;
   if (status === 'approved') {
-    const taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${submissionId}`;
     amount = Math.round(taskRows.reduce((sum, task) => sum + Number(task.points || 0), 0) * 100) / 100;
   }
   const reviewerId = String(interaction.user.id);
@@ -104,17 +106,14 @@ async function processSubmissionReview(interaction, submissionId, status, reason
   const totalAfter = Number(totals[0]?.total || 0);
   await updateSubmissionMessage(message, sub, status, reviewerId, reason, amount, totalAfter);
 
+  const notification = buildSubmissionNotifications({ submissionId, sub, reviewerId, status, taskRows, amount, totalAfter, reason });
+  try {
+    const decisionChannel = await client.channels.fetch(TASK_APPROVED_CHANNEL_ID);
+    if (decisionChannel?.isTextBased()) await decisionChannel.send({ content: notification.announcementContent, allowedMentions: { parse: [] } });
+  } catch (error) { console.error('[review decision announcement]', error.message); }
   try {
     const logChannel = await client.channels.fetch(POINTS_LOG_CHANNEL_ID);
-    if (logChannel?.isTextBased()) {
-      const embed = new EmbedBuilder()
-        .setTitle(status === 'approved' ? '✅ اعتماد تسليم مهمة' : '❌ رفض تسليم مهمة')
-        .setDescription(`التسليم **#${submissionId}** — ${status === 'approved' ? `تمت إضافة **+${fmt(amount)} نقطة**.` : 'لم تتم إضافة نقاط.'}`)
-        .setColor(status === 'approved' ? 0x22c55e : 0xef4444)
-        .addFields({ name: '👤 العضو', value: `<@${sub.user_id}>`, inline: true }, { name: '🛡️ المراجع', value: `<@${reviewerId}>`, inline: true }, ...(reason ? [{ name: '📝 السبب', value: clean(reason, 1000), inline: false }] : []))
-        .setTimestamp(new Date());
-      await logChannel.send({ embeds: [embed], allowedMentions: { parse: [] } });
-    }
+    if (logChannel?.isTextBased()) await logChannel.send({ embeds: [EmbedBuilder.from(notification.logEmbed)], allowedMentions: { parse: [] } });
   } catch (error) { console.error('[review points log]', error.message); }
   try {
     const user = await client.users.fetch(String(sub.user_id));
@@ -123,7 +122,7 @@ async function processSubmissionReview(interaction, submissionId, status, reason
       .setColor(status === 'approved' ? 0x22c55e : 0xef4444);
     await user.send({ embeds: [dm] });
   } catch (error) { console.error('[review DM]', error.message); }
-  return { status, amount, totalAfter };
+  return { status, amount, totalAfter, taskRows };
 }
 client.on(Events.InteractionCreate, async (interaction) => {
   const customId = String(interaction.customId || '');

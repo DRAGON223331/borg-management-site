@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { Readable } = require('node:stream');
 const { notifyReview } = require('./_lib/notify.js');
+const { buildSubmissionNotifications } = require('../lib/submission-notifications.js');
 
 const DISCORD_API = 'https://discord.com/api/v10';
 const COOKIE_NAME = 'borg.sid';
@@ -20,7 +21,7 @@ const TASK_APPROVED_CHANNEL_ID = (process.env.TASK_APPROVED_CHANNEL_ID || proces
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
 const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
 const LEAVE_REQUEST_CHANNEL_ID = '1556945732957765722'; // ثابت: روم طلبات الإجازة ومراجعتها
-const STAFF_REQUEST_CHANNEL_ID = process.env.STAFF_REQUEST_CHANNEL_ID || '1558102515885678734'; // روم الطلبات الإدارية الأخرى
+const STAFF_REQUEST_CHANNEL_ID = '1560142058826768425'; // ثابت: روم كل الطلبات الإدارية غير الإجازات، وسجلات قبولها ورفضها
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '1559176035432402976';
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const COOKIE_SECRET = process.env.SESSION_SECRET || '';
@@ -735,12 +736,12 @@ async function postDiscordEmbed(channelId, embed) {
     body: JSON.stringify({ embeds: [embed], allowed_mentions: { parse: [] } }),
   });
 }
-// رسالة عادية (مش Embed) بعد قبول التسليم: مين عمل المهمة + مين قبلها + الصور/الفيديوهات المرفقة.
-async function postApprovedSubmissionMessage({ req, submissionId, sub, reviewer, taskRows }) {
+// رسالة موحدة بعد القبول أو الرفض: نفس النص سواء القرار من الموقع أو من ديسكورد.
+async function postSubmissionDecisionMessage({ req, submissionId, sub, reviewerId, status, reason = '', taskRows, amount = 0, totalAfter = 0 }) {
+  const notification = buildSubmissionNotifications({ submissionId, sub, reviewerId, status, reason, taskRows, amount, totalAfter });
   const files = parseJson(sub.files_json, []);
   const { attachments, linkOnly } = await loadEvidenceAttachments(req, files);
-  const tasksLine = taskRows.map((t) => `**${cleanText(t.title, 120)}**`).join('، ').slice(0, 600) || 'مهمة';
-  let content = `✅ **تم قبول مهمة**\n📋 **المهمة:** ${tasksLine}\n👤 **اللي عملها:** <@${sub.user_id}>\n🛡️ **اللي قبلها:** <@${reviewer.id}>`;
+  let content = notification.announcementContent;
   if (linkOnly.length) content += `\n\n📎 **مرفقات كبيرة:**\n${linkOnly.join('\n')}`;
   content = content.slice(0, 1990);
   return postDiscordWithFiles(TASK_APPROVED_CHANNEL_ID, { content, allowed_mentions: { parse: [] } }, attachments);
@@ -1165,21 +1166,28 @@ async function getRoster() {
   return { guildName: mainGuild.name, memberCount: rows.length, groups };
 }
 
-async function updateDiscordSubmissionReview(sub, status, reviewer, reason = '') {
+async function updateDiscordSubmissionReview(sub, status, reviewer, reason = '', amount = 0, totalAfter = 0) {
   if (!BOT_TOKEN || !sub?.discord_message_id || !sub?.discord_channel_id) return false;
   try {
     const prior = await discordApi(`/channels/${sub.discord_channel_id}/messages/${sub.discord_message_id}`);
     const source = (prior.embeds || [])[0] || {};
     const approved = status === 'approved';
     const rejected = status === 'rejected';
+    const reopened = status === 'reopened';
+    const priorFields = Array.isArray(source.fields) ? source.fields.filter((f) => f.name !== '🛡️ قرار المراجعة') : [];
+    const decisionField = {
+      name: '🛡️ قرار المراجعة',
+      value: `${approved ? '✅ مقبول' : rejected ? '❌ مرفوض' : '🔓 أُعيد فتحه'} بواسطة <@${reviewer}>${reason ? `\n${reopened ? 'ملاحظة' : 'السبب'}: ${cleanText(reason, 300)}` : ''}${approved ? `\nالنقاط المضافة: +${formatPoints(amount)} · الرصيد: ${formatPoints(totalAfter)}` : rejected ? '\nلم تتم إضافة نقاط.' : ''}`.slice(0, 1024),
+      inline: false,
+    };
     // Discord returns response-only keys (type/provider/proxy URLs) that are not accepted on PATCH.
     const updated = {
-      title: source.title || `${approved ? '✅ تمت الموافقة' : rejected ? '❌ تم الرفض' : '🔓 إعادة فتح'} على التسليم #${sub.id}`,
-      description: `${approved ? '✅ تمت الموافقة على التسليم.' : rejected ? '❌ تم رفض التسليم.' : '🔓 أُعيد فتح التسليم.'}\n\n**المراجع:** <@${reviewer}>${reason ? `\n**ملاحظة:** ${cleanText(reason, 300)}` : ''}`,
+      title: source.title || `${approved ? '✅' : rejected ? '❌' : '🔓'} تسليم مهمة #${sub.id}`,
+      description: approved ? 'تم قبول التسليم وإضافة نقاطه.' : rejected ? 'تم رفض التسليم ولم تتم إضافة نقاط.' : 'تمت إعادة فتح التسليم ويمكن للعضو التسليم مرة أخرى.',
       color: approved ? 0x22c55e : rejected ? 0xef4444 : 0xf59e0b,
       timestamp: new Date().toISOString(),
       ...(source.url ? { url: source.url } : {}),
-      ...(Array.isArray(source.fields) ? { fields: source.fields.map((f) => ({ name: String(f.name || '').slice(0, 256), value: String(f.value || '').slice(0, 1024), inline: Boolean(f.inline) })).slice(0, 25) } : {}),
+      fields: [...priorFields.map((f) => ({ name: String(f.name || '').slice(0, 256), value: String(f.value || '').slice(0, 1024), inline: Boolean(f.inline) })), decisionField].slice(0, 25),
       ...(source.footer?.text ? { footer: { text: String(source.footer.text).slice(0, 2048), ...(source.footer.icon_url ? { icon_url: source.footer.icon_url } : {}) } } : {}),
       ...(source.author?.name ? { author: { name: String(source.author.name).slice(0, 256), ...(source.author.url ? { url: source.author.url } : {}), ...(source.author.icon_url ? { icon_url: source.author.icon_url } : {}) } } : {}),
       ...(source.thumbnail?.url ? { thumbnail: { url: source.thumbnail.url } } : {}),
@@ -1895,25 +1903,20 @@ async function handleApi(parts, req, res) {
     if (!['pending', 'submitted'].includes(String(sub.status))) return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
     if (parts[2] === 'reject') {
       const reason = cleanText(req.body?.reason, 300);
+      const taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${id} ORDER BY t.id`;
       const rejected = await sql`UPDATE submissions SET status = 'rejected', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status IN ('pending','submitted') RETURNING id`;
       if (!rejected.length) return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
       await sql`INSERT INTO submission_review_audit(submission_id, member_id, member_name, decision, reviewer_id, reviewer_name, reason, created_at) VALUES (${id}, ${sub.user_id}, ${sub.username}, 'rejected', ${user.id}, ${user.username}, ${reason}, NOW())`;
       const dmPromise = notifyReview({ token: BOT_TOKEN, userId: sub.user_id, kind: 'submission', status: 'rejected', id, reviewerId: user.id, note: reason });
+      const totals = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${sub.user_id}`;
+      const totalAfter = Number(totals[0]?.total || 0);
+      const notification = buildSubmissionNotifications({ submissionId: id, sub, reviewerId: user.id, status: 'rejected', taskRows, amount: 0, totalAfter, reason });
       try {
-        await postDiscordEmbed(POINTS_LOG_CHANNEL_ID, {
-          title: '❌ تم رفض تسليم مهمة',
-          description: `تم رفض التسليم **#${id}**، ولم تتم إضافة أي نقاط إلى رصيد العضو.`,
-          color: 0xEF4444,
-          fields: [
-            { name: '👤 العضو', value: `<@${sub.user_id}>`, inline: true },
-            { name: '🛡️ المسؤول', value: `<@${user.id}>`, inline: true },
-            { name: '📝 سبب الرفض', value: (reason || 'لم يتم تحديد سبب').slice(0, 1024), inline: false },
-          ],
-          footer: { text: 'Borg Management • Task Review' },
-          timestamp: new Date().toISOString(),
-        });
+        await postDiscordEmbed(POINTS_LOG_CHANNEL_ID, notification.logEmbed);
       } catch (e) { console.error('[submission reject log]', cleanText(e.message, 180)); }
-      await updateDiscordSubmissionReview(sub, 'rejected', user.id, reason);
+      try { await postSubmissionDecisionMessage({ req, submissionId: id, sub, reviewerId: user.id, status: 'rejected', reason, taskRows, amount: 0, totalAfter }); }
+      catch (e) { console.error('[submission reject announcement]', cleanText(e.message, 200)); }
+      await updateDiscordSubmissionReview(sub, 'rejected', user.id, reason, 0, totalAfter);
       const dm = await dmPromise;
       return sendJson(res, 200, { ok: true, status: 'rejected', dmSent: dm.ok, message: `تم رفض التسليم.${dmNote(dm)}` });
     }
@@ -1923,27 +1926,16 @@ async function handleApi(parts, req, res) {
     if (!marked.length) return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
     await sql`INSERT INTO submission_review_audit(submission_id, member_id, member_name, decision, reviewer_id, reviewer_name, reason, created_at) VALUES (${id}, ${sub.user_id}, ${sub.username}, 'approved', ${user.id}, ${user.username}, ${cleanText(req.body?.reason || req.body?.note, 300)}, NOW())`;
     if (amount > 0) await sql`INSERT INTO staff_points(user_id, username, amount, reason, actor_id, actor_name, source, submission_id, created_at) VALUES (${sub.user_id}, ${sub.username}, ${amount}, ${`اعتماد تسليم #${id}`}, ${user.id}, ${user.username}, 'task', ${id}, NOW())`;
-    await updateDiscordSubmissionReview(sub, 'approved', user.id, cleanText(req.body?.reason || req.body?.note, 300));
     const totalAfterRows = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${sub.user_id}`;
     const totalAfter = Number(totalAfterRows[0]?.total || 0);
     const taskSummary = taskRows.map(t => `• **${cleanText(t.title, 180)}** — ${formatPoints(t.points)} نقطة`).join('\n').slice(0, 1024) || 'لا توجد مهمات مرتبطة بالتسليم.';
+    const reason = cleanText(req.body?.reason || req.body?.note, 300);
+    await updateDiscordSubmissionReview(sub, 'approved', user.id, reason, amount, totalAfter);
+    const notification = buildSubmissionNotifications({ submissionId: id, sub, reviewerId: user.id, status: 'approved', taskRows, amount, totalAfter, reason });
     try {
-      await postDiscordEmbed(POINTS_LOG_CHANNEL_ID, {
-        title: '✅ اعتماد تسليم مهمة وإضافة النقاط',
-        description: `تمت مراجعة التسليم **#${id}** واعتماده بواسطة الإدارة.`,
-        color: 0x22C55E,
-        fields: [
-          { name: '👤 العضو', value: `<@${sub.user_id}>`, inline: true },
-          { name: '💎 النقاط المضافة', value: `**+${formatPoints(amount)} نقطة**`, inline: true },
-          { name: '📊 الرصيد بعد الاعتماد', value: `**${formatPoints(totalAfter)} نقطة**`, inline: true },
-          { name: '🛡️ المسؤول', value: `<@${user.id}>`, inline: true },
-          { name: '📋 تفاصيل المهمات والنقاط', value: taskSummary, inline: false },
-        ],
-        footer: { text: 'Borg Management • Task Review' },
-        timestamp: new Date().toISOString(),
-      });
+      await postDiscordEmbed(POINTS_LOG_CHANNEL_ID, notification.logEmbed);
     } catch (e) { console.error('[submission approve log]', cleanText(e.message, 180)); }
-    try { await postApprovedSubmissionMessage({ req, submissionId: id, sub, reviewer: user, taskRows }); } catch (e) { console.error('[submission approved message]', cleanText(e.message, 200)); }
+    try { await postSubmissionDecisionMessage({ req, submissionId: id, sub, reviewerId: user.id, status: 'approved', taskRows, amount, totalAfter, reason }); } catch (e) { console.error('[submission approved message]', cleanText(e.message, 200)); }
     const dm = await notifyReview({ token: BOT_TOKEN, userId: sub.user_id, kind: 'submission', status: 'approved', id, reviewerId: user.id, fields: [
       { name: '💎 النقاط المضافة', value: `**+${formatPoints(amount)} نقطة**`, inline: true },
       { name: '📊 رصيدك الحالي', value: `**${formatPoints(totalAfter)} نقطة**`, inline: true },

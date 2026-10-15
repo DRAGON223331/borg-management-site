@@ -5,6 +5,7 @@ const DISCORD_API = 'https://discord.com/api/v10';
 const LEAVE_REQUEST_CHANNEL_ID = '1556945732957765722';
 const SUBMISSION_REVIEW_CHANNEL_ID = process.env.SUBMISSION_REVIEW_CHANNEL_ID || '1556945732957765722';
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
+const TASK_APPROVED_CHANNEL_ID = (process.env.TASK_APPROVED_CHANNEL_ID || process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504').trim();
 const LEAVE_NOTICE_CHANNEL_ID = process.env.LEAVE_NOTICE_CHANNEL_ID || '1558102515885678734'; // accepted/rejected notices go here
 const MANAGER_IDS = new Set((process.env.MANAGER_IDS || '1286035404323164172,1525203473262706821,848304089057460254,1475483362536980552').split(',').map((x) => x.trim()).filter(Boolean));
 const MANAGEMENT_MAIN_ROLE_ID = process.env.MANAGEMENT_MAIN_ROLE_ID || '1538623033806168135';
@@ -14,6 +15,7 @@ const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
 const MESSAGE_COUNT_CHANNEL_ID = (process.env.MESSAGE_COUNT_CHANNEL_ID || '1552049641913065552').trim();
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY || '';
+const { buildSubmissionNotifications } = require('../lib/submission-notifications.js');
 
 function send(res, payload, status = 200) {
   res.statusCode = status;
@@ -250,6 +252,7 @@ async function handleSubmissionReview(interaction, res, { action, submissionId, 
       return;
     }
     const sub = found[0];
+    const taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${submissionId} ORDER BY t.id`;
     const targetMessageId = messageId || String(sub.discord_message_id || '');
     targetMessageIdForErrors = targetMessageId;
     if (!targetMessageId || (messageId && String(sub.discord_message_id || '') !== messageId) || String(sub.discord_channel_id || '') !== SUBMISSION_REVIEW_CHANNEL_ID || (interaction.channel_id && String(sub.discord_channel_id || '') !== String(interaction.channel_id))) {
@@ -324,12 +327,17 @@ async function handleSubmissionReview(interaction, res, { action, submissionId, 
       }
     }
 
+    if (finalStatus === 'rejected') {
+      const totals = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${sub.user_id}`;
+      totalAfter = Number(totals[0]?.total || 0);
+    }
+
     if (!['approved', 'rejected'].includes(finalStatus)) {
       reply({ type: 4, data: { content: 'حالة التسليم الحالية غير قابلة للمراجعة. حدّث الموقع وتحقق من السجل.', flags: 64 } });
       return;
     }
     const fields = Array.isArray(old.fields) ? old.fields.filter((field) => field.name !== '🛡️ قرار المراجعة') : [];
-    fields.push({ name: '🛡️ قرار المراجعة', value: `${finalStatus === 'approved' ? '✅ مقبول' : '❌ مرفوض'} بواسطة <@${finalReviewer}>${finalNote ? `\nالسبب: ${finalNote}` : ''}${finalStatus === 'approved' ? `\nالنقاط المضافة: +${fmtPoints(amount)} · الرصيد: ${fmtPoints(totalAfter)}` : ''}${!changed ? '\nتمت مراجعة التسليم سابقًا.' : ''}`.slice(0, 1024), inline: false });
+    fields.push({ name: '🛡️ قرار المراجعة', value: `${finalStatus === 'approved' ? '✅ مقبول' : '❌ مرفوض'} بواسطة <@${finalReviewer}>${finalNote ? `\nالسبب: ${finalNote}` : ''}${finalStatus === 'approved' ? `\nالنقاط المضافة: +${fmtPoints(amount)} · الرصيد: ${fmtPoints(totalAfter)}` : '\nلم تتم إضافة نقاط.'}${!changed ? '\nتمت مراجعة التسليم سابقًا.' : ''}`.slice(0, 1024), inline: false });
     const cleanEmbed = {
       title: old.title || `${finalStatus === 'approved' ? '✅' : '❌'} تسليم مهمة #${submissionId}`,
       description: finalStatus === 'approved' ? 'تم قبول التسليم وإضافة نقاطه.' : 'تم رفض التسليم ولم تتم إضافة نقاط.',
@@ -345,9 +353,11 @@ async function handleSubmissionReview(interaction, res, { action, submissionId, 
 
     // Deliver secondary notices without making the review itself depend on them.
     if (changed) {
+      const notification = buildSubmissionNotifications({ submissionId, sub, reviewerId: finalReviewer, status: finalStatus, taskRows, amount, totalAfter, reason: finalNote });
       const sideJobs = [
         require('./_lib/notify.js').notifyReview({ token: BOT_TOKEN, userId: sub.user_id, kind: 'submission', status: finalStatus, id: submissionId, reviewerId: finalReviewer, note: finalNote, fields: finalStatus === 'approved' ? [{ name: '💎 النقاط المضافة', value: `+${fmtPoints(amount)} نقطة`, inline: true }, { name: '📊 رصيدك الحالي', value: `${fmtPoints(totalAfter)} نقطة`, inline: true }] : [] }),
-        discordApi(`/channels/${POINTS_LOG_CHANNEL_ID}/messages`, { method: 'POST', body: JSON.stringify({ embeds: [{ title: finalStatus === 'approved' ? '✅ اعتماد تسليم مهمة' : '❌ رفض تسليم مهمة', description: `التسليم **#${submissionId}** — ${finalStatus === 'approved' ? `تمت إضافة **+${fmtPoints(amount)} نقطة**.` : 'لم تتم إضافة نقاط.'}`, color: finalStatus === 'approved' ? 0x22c55e : 0xef4444, fields: [{ name: '👤 العضو', value: `<@${sub.user_id}>`, inline: true }, { name: '🛡️ المراجع', value: `<@${finalReviewer}>`, inline: true }, ...(finalNote ? [{ name: '📝 السبب/الملاحظة', value: finalNote.slice(0, 1024), inline: false }] : [])], timestamp: new Date().toISOString() }], allowed_mentions: { parse: [] } }) }),
+        discordApi(`/channels/${TASK_APPROVED_CHANNEL_ID}/messages`, { method: 'POST', body: JSON.stringify({ content: notification.announcementContent, allowed_mentions: { parse: [] } }) }),
+        discordApi(`/channels/${POINTS_LOG_CHANNEL_ID}/messages`, { method: 'POST', body: JSON.stringify({ embeds: [notification.logEmbed], allowed_mentions: { parse: [] } }) }),
       ];
       const sideWork = Promise.allSettled(sideJobs).then((results) => results.forEach((result) => { if (result.status === 'rejected') console.error('[submission review side job]', cleanText(result.reason?.message || result.reason, 180)); }));
       let scheduled = false;

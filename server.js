@@ -11,6 +11,7 @@ const multer = require('multer');
 const helmet = require('helmet');
 const { rateLimit } = require('express-rate-limit');
 const { Server } = require('socket.io');
+const { buildSubmissionNotifications } = require('./lib/submission-notifications.js');
 const {
   Client,
   GatewayIntentBits,
@@ -39,10 +40,11 @@ const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 const TASK_PING_ROLE_ID = (process.env.TASK_PING_ROLE_ID || '1556647362062188544').trim(); // رتبة بتتمنشن مع كل مهمات جديدة
 const MESSAGE_COUNT_CHANNEL_ID = (process.env.MESSAGE_COUNT_CHANNEL_ID || '1552049641913065552').trim();
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
+const TASK_APPROVED_CHANNEL_ID = (process.env.TASK_APPROVED_CHANNEL_ID || TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504').trim();
 const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
 const LEAVE_REQUEST_CHANNEL_ID = '1556945732957765722'; // ثابت: روم طلبات الإجازة ومراجعتها
-const STAFF_REQUEST_CHANNEL_ID = process.env.STAFF_REQUEST_CHANNEL_ID || '1558102515885678734'; // روم الطلبات الإدارية الأخرى
+const STAFF_REQUEST_CHANNEL_ID = '1560142058826768425'; // ثابت: روم كل الطلبات الإدارية غير الإجازات، وسجلات قبولها ورفضها
 const MANAGER_IDS = new Set((process.env.MANAGER_IDS || '1286035404323164172,1525203473262706821,848304089057460254,1475483362536980552')
   .split(',').map((x) => x.trim()).filter(Boolean));
 const ATTACHMENT_LIMIT_MB = Math.max(1, Number(process.env.DISCORD_ATTACHMENT_LIMIT_MB || 8));
@@ -676,14 +678,20 @@ async function handleSubmissionButton(interaction, submissionId, targetStatus) {
     const approved = result.status === 'approved';
     const existingFields = original?.fields || [];
     const fields = existingFields.filter((field) => field.name !== '🛡️ قرار المراجعة');
-    fields.push({ name: '🛡️ قرار المراجعة', value: `${approved ? '✅ مقبول' : '❌ مرفوض'} بواسطة <@${result.reviewer}>${approved ? `\nالنقاط المضافة: +${fmtPointsMsg(result.amount)} · الرصيد: ${fmtPointsMsg(result.totalAfter)}` : ''}${!result.changed ? '\nتمت مراجعة التسليم سابقًا.' : ''}`, inline: false });
+    fields.push({ name: '🛡️ قرار المراجعة', value: `${approved ? '✅ مقبول' : '❌ مرفوض'} بواسطة <@${result.reviewer}>${approved ? `\nالنقاط المضافة: +${fmtPointsMsg(result.amount)} · الرصيد: ${fmtPointsMsg(result.totalAfter)}` : '\nلم تتم إضافة نقاط.'}${!result.changed ? '\nتمت مراجعة التسليم سابقًا.' : ''}`, inline: false });
     embed.setDescription(approved ? 'تم قبول التسليم وإضافة نقاطه.' : 'تم رفض التسليم ولم تتم إضافة نقاط.').setColor(approved ? 0x22c55e : 0xef4444).setTimestamp(new Date()).setFields(fields.slice(0, 25));
     await interaction.message.edit({ embeds: [embed], components: [], allowedMentions: { parse: [] } });
 
     if (result.changed) {
+      const taskRows = db.prepare('SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ? ORDER BY t.id').all(submissionId);
+      const notification = buildSubmissionNotifications({ submissionId, sub: result.current, reviewerId: result.reviewer || reviewerId, status: result.status, taskRows, amount: result.amount, totalAfter: result.totalAfter });
+      const decisionChannel = await client.channels.fetch(TASK_APPROVED_CHANNEL_ID).catch(() => null);
+      if (decisionChannel?.isTextBased() && typeof decisionChannel.send === 'function') {
+        await decisionChannel.send({ content: notification.announcementContent, allowedMentions: { parse: [] } }).catch((error) => console.warn('[submission decision announcement]', error.message));
+      }
       const logChannel = await client.channels.fetch(POINTS_LOG_CHANNEL_ID).catch(() => null);
       if (logChannel?.isTextBased() && typeof logChannel.send === 'function') {
-        await logChannel.send({ embeds: [new EmbedBuilder().setTitle(approved ? '✅ اعتماد تسليم مهمة' : '❌ رفض تسليم مهمة').setDescription(`التسليم **#${submissionId}** — ${approved ? `تمت إضافة **+${fmtPointsMsg(result.amount)} نقطة**.` : 'لم تتم إضافة نقاط.'}`).setColor(approved ? 0x22c55e : 0xef4444).addFields({ name: '👤 العضو', value: `<@${result.current.user_id}>`, inline: true }, { name: '🛡️ المراجع', value: `<@${reviewerId}>`, inline: true }).setTimestamp(new Date())], allowedMentions: { parse: [] } }).catch((error) => console.warn('[submission points log]', error.message));
+        await logChannel.send({ embeds: [EmbedBuilder.from(notification.logEmbed)], allowedMentions: { parse: [] } }).catch((error) => console.warn('[submission points log]', error.message));
       }
       const memberUser = await client.users.fetch(result.current.user_id).catch(() => null);
       if (memberUser) {
