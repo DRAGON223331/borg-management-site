@@ -40,6 +40,7 @@ const TASK_PING_ROLE_ID = (process.env.TASK_PING_ROLE_ID || '1556647362062188544
 const MESSAGE_COUNT_CHANNEL_ID = (process.env.MESSAGE_COUNT_CHANNEL_ID || '1552049641913065552').trim();
 const TASK_SUBMISSIONS_CHANNEL_ID = process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504';
 const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
+const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
 const LEAVE_REQUEST_CHANNEL_ID = '1556945732957765722'; // ثابت: روم طلبات الإجازة ومراجعتها
 const STAFF_REQUEST_CHANNEL_ID = process.env.STAFF_REQUEST_CHANNEL_ID || '1558102515885678734'; // روم الطلبات الإدارية الأخرى
 const MANAGER_IDS = new Set((process.env.MANAGER_IDS || '1286035404323164172,1525203473262706821,848304089057460254,1475483362536980552')
@@ -81,6 +82,7 @@ db.exec(`
     created_at TEXT NOT NULL,
     source_message_id TEXT,
     source_line_index INTEGER,
+    points REAL NOT NULL DEFAULT 1,
     UNIQUE(source_message_id, source_line_index)
   );
   CREATE INDEX IF NOT EXISTS idx_tasks_active ON tasks(active, required DESC, id DESC);
@@ -183,9 +185,29 @@ db.exec(`
 for (const statement of [
   'ALTER TABLE leave_requests ADD COLUMN discord_message_id TEXT',
   'ALTER TABLE leave_requests ADD COLUMN discord_channel_id TEXT',
+  'ALTER TABLE submissions ADD COLUMN discord_message_id TEXT',
+  'ALTER TABLE submissions ADD COLUMN discord_channel_id TEXT',
+  'ALTER TABLE submissions ADD COLUMN reviewed_by TEXT',
+  'ALTER TABLE submissions ADD COLUMN reviewed_at TEXT',
+  'ALTER TABLE tasks ADD COLUMN points REAL NOT NULL DEFAULT 1',
 ]) {
   try { db.exec(statement); } catch (error) { if (!/duplicate column name/i.test(error.message)) throw error; }
 }
+db.exec(`
+  CREATE TABLE IF NOT EXISTS submission_review_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    submission_id INTEGER NOT NULL,
+    member_id TEXT NOT NULL,
+    member_name TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK (decision IN ('approved','rejected','reopened')),
+    reviewer_id TEXT NOT NULL,
+    reviewer_name TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_submission_review_audit_created ON submission_review_audit(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_submission_review_audit_submission ON submission_review_audit(submission_id, created_at DESC);
+`);
 
 class SqliteSessionStore extends session.Store {
   get(sid, callback) {
@@ -543,7 +565,13 @@ client.on(Events.MessageCreate, async (message) => {
 });
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isButton()) return;
-  const match = String(interaction.customId || '').match(/^leave:(approve|reject):(\d+)$/);
+  const customId = String(interaction.customId || '');
+  const submissionMatch = customId.match(/^submission:(approve|reject):(\d+)$/);
+  if (submissionMatch) {
+    await handleSubmissionButton(interaction, Number(submissionMatch[2]), submissionMatch[1] === 'approve' ? 'approved' : 'rejected');
+    return;
+  }
+  const match = customId.match(/^leave:(approve|reject):(\d+)$/);
   if (!match) return;
   if (String(interaction.channelId) !== LEAVE_REQUEST_CHANNEL_ID) {
     try { await interaction.reply({ content: 'الأزرار دي شغالة في روم طلبات الإجازات فقط.', ephemeral: true }); } catch {}
@@ -567,7 +595,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction.deferUpdate();
     const row = db.prepare('SELECT * FROM leave_requests WHERE id = ?').get(id);
     if (!row || row.discord_message_id !== interaction.message.id || (row.discord_channel_id && row.discord_channel_id !== interaction.channelId)) {
-      await interaction.message.edit({ components: [] });
+      await interaction.followUp({ content: 'رسالة الإجازة لا تطابق الطلب المسجل.', ephemeral: true });
       return;
     }
     let status = row.status;
@@ -585,6 +613,89 @@ client.on(Events.InteractionCreate, async (interaction) => {
     try { await interaction.followUp({ content: 'حصل خطأ أثناء مراجعة الطلب. حدّث الموقع وتحقق من حالة الطلب.', ephemeral: true }); } catch {}
   }
 });
+
+async function handleSubmissionButton(interaction, submissionId, targetStatus) {
+  if (String(interaction.channelId) !== SUBMISSION_REVIEW_CHANNEL_ID) {
+    try { await interaction.reply({ content: 'أزرار التسليمات دي شغالة في روم مراجعة المهمات فقط.', ephemeral: true }); } catch {}
+    return;
+  }
+  const reviewerId = interaction.user.id;
+  let authorized = MANAGER_IDS.has(reviewerId) || Boolean(interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator));
+  const roleIds = interaction.member?.roles?.cache ? [...interaction.member.roles.cache.keys()] : (Array.isArray(interaction.member?.roles) ? interaction.member.roles : []);
+  if (roleIds.includes(MANAGEMENT_STAFF_ROLE_ID) || roleIds.includes(MANAGEMENT_MAIN_ROLE_ID)) authorized = true;
+  if (!authorized) {
+    const mainMember = await client.guilds.fetch(MAIN_GUILD_ID).then((guild) => guild.members.fetch(reviewerId)).catch(() => null);
+    if (mainMember?.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID)) authorized = true;
+  }
+  if (!authorized) {
+    try { await interaction.reply({ content: 'مراجعة تسليمات المهمات للمسؤولين فقط.', ephemeral: true }); } catch {}
+    return;
+  }
+
+  try {
+    await interaction.deferUpdate();
+    const submission = db.prepare('SELECT * FROM submissions WHERE id = ?').get(submissionId);
+    if (!submission || String(submission.discord_message_id || '') !== String(interaction.message.id) || String(submission.discord_channel_id || '') !== String(interaction.channelId)) {
+      await interaction.followUp({ content: 'رسالة ديسكورد لا تطابق التسليم المسجل. قد تكون الرسالة قديمة أو أُنشئت من قاعدة بيانات أخرى.', ephemeral: true });
+      return;
+    }
+
+    const reviewerName = interaction.member?.displayName || interaction.user.globalName || interaction.user.username || reviewerId;
+    const finalize = db.transaction(() => {
+      const current = db.prepare('SELECT * FROM submissions WHERE id = ?').get(submissionId);
+      if (!current) throw new Error('التسليم غير موجود في قاعدة البيانات.');
+      let status = current.status;
+      let amount = 0;
+      let changed = false;
+      if (['submitted', 'pending'].includes(String(status))) {
+        if (targetStatus === 'approved') {
+          const pointsRow = db.prepare('SELECT COALESCE(SUM(t.points), 0) AS amount FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ?').get(submissionId);
+          amount = Math.round(Number(pointsRow?.amount || 0) * 100) / 100;
+        }
+        const update = db.prepare("UPDATE submissions SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ? AND status IN ('submitted','pending')").run(targetStatus, reviewerId, nowIso(), submissionId);
+        if (update.changes) {
+          status = targetStatus;
+          changed = true;
+          db.prepare('INSERT INTO submission_review_audit(submission_id, member_id, member_name, decision, reviewer_id, reviewer_name, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+            .run(submissionId, current.user_id, current.username, targetStatus, reviewerId, reviewerName, '', nowIso());
+          if (targetStatus === 'approved' && amount > 0) {
+            db.prepare("INSERT INTO staff_points(user_id, username, amount, reason, actor_id, actor_name, source, submission_id, created_at) VALUES (?, ?, ?, ?, ?, ?, 'task', ?, ?)")
+              .run(current.user_id, current.username, amount, `اعتماد تسليم #${submissionId}`, reviewerId, reviewerName, submissionId, nowIso());
+          }
+        }
+      }
+      if (!['approved', 'rejected'].includes(String(status))) throw new Error(`حالة التسليم غير متوقعة: ${status}`);
+      const totalAfter = Number(db.prepare('SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ?').get(current.user_id)?.total || 0);
+      const awarded = Number(db.prepare("SELECT COALESCE(SUM(amount),0) AS amount FROM staff_points WHERE submission_id = ? AND source = 'task'").get(submissionId)?.amount || 0);
+      return { current, status, changed, amount: status === 'approved' ? (changed ? amount : awarded) : 0, totalAfter, reviewer: current.reviewed_by || (changed ? reviewerId : reviewerId) };
+    });
+
+    const result = finalize();
+    const original = interaction.message.embeds?.[0];
+    const embed = original ? EmbedBuilder.from(original) : new EmbedBuilder().setTitle(`تسليم مهمة #${submissionId}`);
+    const approved = result.status === 'approved';
+    const existingFields = original?.fields || [];
+    const fields = existingFields.filter((field) => field.name !== '🛡️ قرار المراجعة');
+    fields.push({ name: '🛡️ قرار المراجعة', value: `${approved ? '✅ مقبول' : '❌ مرفوض'} بواسطة <@${result.reviewer}>${approved ? `\nالنقاط المضافة: +${fmtPointsMsg(result.amount)} · الرصيد: ${fmtPointsMsg(result.totalAfter)}` : ''}${!result.changed ? '\nتمت مراجعة التسليم سابقًا.' : ''}`, inline: false });
+    embed.setDescription(approved ? 'تم قبول التسليم وإضافة نقاطه.' : 'تم رفض التسليم ولم تتم إضافة نقاط.').setColor(approved ? 0x22c55e : 0xef4444).setTimestamp(new Date()).setFields(fields.slice(0, 25));
+    await interaction.message.edit({ embeds: [embed], components: [], allowedMentions: { parse: [] } });
+
+    if (result.changed) {
+      const logChannel = await client.channels.fetch(POINTS_LOG_CHANNEL_ID).catch(() => null);
+      if (logChannel?.isTextBased() && typeof logChannel.send === 'function') {
+        await logChannel.send({ embeds: [new EmbedBuilder().setTitle(approved ? '✅ اعتماد تسليم مهمة' : '❌ رفض تسليم مهمة').setDescription(`التسليم **#${submissionId}** — ${approved ? `تمت إضافة **+${fmtPointsMsg(result.amount)} نقطة**.` : 'لم تتم إضافة نقاط.'}`).setColor(approved ? 0x22c55e : 0xef4444).addFields({ name: '👤 العضو', value: `<@${result.current.user_id}>`, inline: true }, { name: '🛡️ المراجع', value: `<@${reviewerId}>`, inline: true }).setTimestamp(new Date())], allowedMentions: { parse: [] } }).catch((error) => console.warn('[submission points log]', error.message));
+      }
+      const memberUser = await client.users.fetch(result.current.user_id).catch(() => null);
+      if (memberUser) {
+        const dmEmbed = new EmbedBuilder().setTitle(approved ? '✅ تم قبول تسليم المهمة' : '❌ تم رفض تسليم المهمة').setDescription(approved ? `تم قبول التسليم #${submissionId} وإضافة **+${fmtPointsMsg(result.amount)} نقطة**. رصيدك الحالي: **${fmtPointsMsg(result.totalAfter)}** نقطة.` : `تم رفض التسليم #${submissionId}.`).setColor(approved ? 0x22c55e : 0xef4444);
+        await memberUser.send({ embeds: [dmEmbed] }).catch((error) => console.warn('[submission review DM]', error.message));
+      }
+    }
+  } catch (error) {
+    console.error('[submission button interaction]', error.stack || error.message || error);
+    try { await interaction.followUp({ content: `تعذر تنفيذ مراجعة التسليم: ${cleanText(error.message || 'خطأ غير معروف', 240)}`, ephemeral: true }); } catch {}
+  }
+}
 
 client.on('error', (error) => { botLastError = error.message; console.error('[discord] Client error:', error); });
 
@@ -622,6 +733,13 @@ function leaveReviewActionRow(id) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(`leave:approve:${id}`).setLabel('قبول الإجازة').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(`leave:reject:${id}`).setLabel('رفض الإجازة').setStyle(ButtonStyle.Danger),
+  );
+}
+
+function submissionReviewActionRow(id) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`submission:approve:${id}`).setLabel('✅ موافقة وإضافة النقاط').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`submission:reject:${id}`).setLabel('❌ رفض التسليم').setStyle(ButtonStyle.Danger),
   );
 }
 
@@ -1000,7 +1118,7 @@ app.post('/api/submissions', requireAuth, (req, res) => {
       if (!Array.isArray(taskIds)) taskIds = [];
       taskIds = [...new Set(taskIds.map(Number).filter((id) => Number.isInteger(id) && id > 0))].slice(0, 40);
       if (!taskIds.length) throw new Error('اختار مهمة واحدة على الأقل.');
-      const foundTasks = db.prepare(`SELECT id, title, required FROM tasks WHERE active = 1 AND id IN (${taskIds.map(() => '?').join(',')})`).all(...taskIds);
+      const foundTasks = db.prepare(`SELECT id, title, required, points FROM tasks WHERE active = 1 AND id IN (${taskIds.map(() => '?').join(',')})`).all(...taskIds);
       if (!foundTasks.length || foundTasks.length !== taskIds.length) throw new Error('في مهمة من اللي اخترتها مش موجودة أو اتقفلت. حدّث الصفحة وجرب تاني.');
 
       const linksText = cleanText(req.body.evidenceLinks, 12000);
@@ -1040,7 +1158,7 @@ app.post('/api/submissions', requireAuth, (req, res) => {
         const embed = new EmbedBuilder()
           .setColor(0x5865F2)
           .setTitle(`📨 دليل مهمة جديد #${submissionId}`)
-          .setDescription('وصل دليل جديد من عضو الاستاف، والتسليم بانتظار مراجعة المسؤولين.\n\n**تتم الموافقة أو الرفض من لوحة الموقع.**')
+          .setDescription('وصل دليل جديد من عضو الاستاف، والتسليم بانتظار مراجعة المسؤولين. استخدم زري الموافقة أو الرفض أدناه.')
           .addFields(
             { name: '👤 العضو', value: `<@${req.session.user.id}>\n\`${req.session.user.id}\``, inline: true },
             { name: '🧾 رقم التسليم', value: `#${submissionId}`, inline: true },
@@ -1052,7 +1170,8 @@ app.post('/api/submissions', requireAuth, (req, res) => {
           .setTimestamp(new Date())
           .setFooter({ text: 'إدارة البرج • مراجعة أدلة المهمات' });
         const attachable = files.filter((file) => file.size <= ATTACHMENT_LIMIT_MB * 1024 * 1024).map((file) => new AttachmentBuilder(file.path, { name: path.basename(file.originalname) }));
-        await channel.send({ embeds: [embed], files: attachable, allowedMentions: { parse: [] } });
+        const posted = await channel.send({ embeds: [embed], files: attachable, components: [submissionReviewActionRow(submissionId)], allowedMentions: { parse: [] } });
+        db.prepare('UPDATE submissions SET discord_message_id = ?, discord_channel_id = ? WHERE id = ?').run(String(posted.id), String(channel.id), submissionId);
         discordPosted = true;
       } catch (error) {
         warning = error.message;
