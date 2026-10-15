@@ -16,6 +16,9 @@ const state = {
   onlineUserIds: new Set(),
   dailyMessageStats: { dailyStats: [], dailyTotal: 0, dailyDate: null },
   staffStats: [],
+  notif: { items: [], unread: 0, maxId: null, open: false },
+  lbMetric: 'points',
+  audit: { entries: [], nextBefore: null, hasMore: false, loading: false },
   activeStaffProfileId: null,
 };
 
@@ -134,18 +137,23 @@ async function initialize() {
     if (state.user.canManage) {
       $('#task-manager').classList.remove('hidden');
       $$('.manager-only').forEach((element) => element.classList.remove('hidden'));
+      wireTaskInsights();
       $('#submissions-heading').textContent = 'آخر تسليمات الاستاف';
       $('#manager-leave-section').classList.remove('hidden');
       $('#manager-staff-request-section')?.classList.remove('hidden');
+      wireNotifications();
     }
-    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests(), loadStaffRequests(), loadStaffStats()]);
+    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests(), loadStaffRequests(), loadStaffStats(), loadNotifications(), ...(state.user.canManage ? [loadTaskInsights(), loadSubmissionAudit()] : [])]);
     startChatPolling();
     startPresenceHeartbeat();
-    setInterval(checkBotStatus, 30000);
-    setInterval(() => { if (state.user) loadStaffStats(); }, 45000);
+    // تخفيف الضغط على السيرفر: التحديثات الدورية بتقف لما التبويب يتخبى وبتتأخر شوية.
+    setInterval(() => { if (!document.hidden) checkBotStatus(); }, 120000);
+    setInterval(() => { if (state.user && !document.hidden) loadStaffStats(); }, 90000);
     setInterval(() => {
-      if ($('.page.active-page')?.id === 'page-tasks') loadTasks();
+      if (!document.hidden && $('.page.active-page')?.id === 'page-tasks') loadTasks();
     }, 60000);
+    setInterval(() => { if (!document.hidden) loadNotifications(); }, 60000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) loadNotifications(); });
   } catch (error) {
     showFatal(error.message || 'حصل خطأ أثناء تحميل الموقع.');
   }
@@ -162,7 +170,21 @@ function renderProfile() {
 
 function wireNavigation() {
   $('#staff-profile-back')?.addEventListener('click', () => { state.activeStaffProfileId = null; openPage('overview'); });
+  const chip = $('.profile-chip');
+  if (chip) { chip.style.cursor = 'pointer'; chip.title = 'افتح ملفي الكامل'; chip.addEventListener('click', () => state.user?.id && openStaffProfile(state.user.id)); }
   $$('.nav-tab').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.page)));
+  $('#personal-refresh-btn')?.addEventListener('click', () => loadPersonal(true));
+  $$('#lb-tabs [data-lb]').forEach((button) => button.addEventListener('click', () => {
+    state.lbMetric = button.dataset.lb;
+    $$('#lb-tabs [data-lb]').forEach((item) => item.classList.toggle('active', item === button));
+    renderLeaderboard();
+  }));
+  $('#audit-apply')?.addEventListener('click', () => loadAudit(true));
+  $('#audit-refresh')?.addEventListener('click', () => loadAudit(true));
+  $('#audit-more')?.addEventListener('click', () => loadAudit(false));
+  $('#audit-action')?.addEventListener('change', () => loadAudit(true));
+  $('#audit-user')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); loadAudit(true); } });
+  $('#audit-search')?.addEventListener('input', () => renderAudit());
   $$('[data-go]').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.go)));
   $('#logout-btn').addEventListener('click', async () => {
     try { await api('/api/auth/logout', { method: 'POST' }); }
@@ -172,6 +194,7 @@ function wireNavigation() {
 }
 function openPage(page) {
   if (page === 'management-chat' && !state.user?.canManage) return;
+  if (page === 'audit-log' && !state.user?.canManage) return;
   if (page === 'staff-profile' && !state.activeStaffProfileId) return;
   $$('.page').forEach((element) => element.classList.remove('active-page'));
   $(`#page-${page}`)?.classList.add('active-page');
@@ -179,6 +202,9 @@ function openPage(page) {
   if (page === 'staff-chat') loadChat('staff');
   if (page === 'management-chat') loadChat('management');
   if (page === 'staff-profile') loadStaffProfile(state.activeStaffProfileId);
+  if (page === 'personal') loadPersonal();
+  if (page === 'leaderboard') { renderLeaderboard(); loadStaffStats(); }
+  if (page === 'audit-log') loadAudit(true);
   if (page === 'tasks') {
     loadTasks();
     loadSubmissions();
@@ -202,7 +228,8 @@ async function loadTasks() {
     const result = await api('/api/tasks');
     state.tasks = result.tasks || [];
     const existingIds = new Set(state.tasks.map((task) => task.id));
-    state.selectedTaskIds = new Set([...state.selectedTaskIds].filter((id) => existingIds.has(id)));
+    const lockedIds = new Set(state.tasks.filter((task) => task.completedByMe || task.pendingByMe || task.rejectedByMe).map((task) => task.id));
+    state.selectedTaskIds = new Set([...state.selectedTaskIds].filter((id) => existingIds.has(id) && !lockedIds.has(id)));
     $('#stat-active').textContent = result.stats.active;
     $('#stat-required').textContent = result.stats.required;
     $('#stat-done-required').textContent = result.stats.completedRequired;
@@ -235,18 +262,19 @@ function renderTaskList() {
   }
   $('#task-list').innerHTML = tasks.map((task) => `
     <article class="task-row ${task.completedByMe ? 'task-complete' : ''}" data-task-card="${task.id}">
-      <input class="task-select" type="checkbox" data-select-task="${task.id}" aria-label="اختيار المهمة ${escapeHtml(task.title)}" ${state.selectedTaskIds.has(task.id) ? 'checked' : ''}>
+      <input class="task-select" type="checkbox" data-select-task="${task.id}" aria-label="اختيار المهمة ${escapeHtml(task.title)}" ${state.selectedTaskIds.has(task.id) ? 'checked' : ''} ${task.completedByMe || task.pendingByMe || task.rejectedByMe ? 'disabled' : ''}>
       <div class="task-row-body">
         <div class="task-row-title">${escapeHtml(task.title)}</div>
         <div class="task-row-desc">أُضيفت بواسطة ${escapeHtml(task.created_by_name || 'الإدارة')} · ${formatDate(task.created_at, { day: 'numeric', month: 'short' })}</div>
         <div class="task-row-meta">
           <span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? '● مهمة إجبارية' : '○ مهمة اختيارية'}</span>
           <span class="task-id">#${task.id} · ⭐ ${Number(task.points || 0)} نقطة</span>
-          ${task.completedByMe ? '<span class="task-tag completed">✓ تم تسليمها</span>' : ''}
+          ${task.deadline_at ? `<span class="task-tag task-deadline-tag">⏰ تنتهي ${escapeHtml(formatDate(task.deadline_at, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Cairo' }))}</span>` : ''}
+          ${task.redoRequiredByMe ? '<span class="task-tag required">🔁 الإدارة طلبت إعادة المهمة · تم خصم النقاط</span>' : task.completedByMe ? '<span class="task-tag completed">✓ انتهت</span>' : task.pendingByMe ? '<span class="task-tag optional">⏳ بانتظار المراجعة</span>' : task.rejectedByMe ? '<span class="task-tag required">✕ مرفوضة · اتقفلت</span>' : ''}
         </div>
       </div>
       <div class="task-row-actions">
-        ${task.completedByMe ? '<span class="task-complete-label">منجزة</span>' : ''}
+        ${task.redoRequiredByMe ? '<span class="task-complete-label">مطلوب إعادة تسليم المهمة</span>' : task.completedByMe ? '<span class="task-complete-label">انتهت · مينفعش تتسلم تاني</span>' : task.pendingByMe ? '<span class="task-complete-label">متسلمة بانتظار المراجعة</span>' : task.rejectedByMe ? '<span class="task-complete-label">اترفضت · مينفعش تتسلم تاني</span>' : ''}
       ${state.user.canManage ? `<label class="task-points-editor" title="تعديل نقاط المهمة">⭐ <input type="number" min="0" max="100000" step="0.01" value="${Number(task.points || 0)}" data-task-points="${task.id}" aria-label="نقاط المهمة ${task.id}"> <span>نقطة</span></label>` : ''}
       ${state.user.canManage ? `<label class="task-manager-toggle"><input type="checkbox" data-required-toggle="${task.id}" ${task.required ? 'checked' : ''}> إجبارية</label>` : ''}
 ${state.user.canManage ? `<button type="button" class="task-delete-button" data-delete-task="${task.id}" aria-label="حذف المهمة ${task.id}">🗑️ حذف</button>` : ''}
@@ -338,7 +366,7 @@ function wireTasks() {
     renderTaskList();
   }));
   $('#select-visible-btn').addEventListener('click', () => {
-    const visibleIds = getFilteredTasks().map((task) => task.id);
+    const visibleIds = getFilteredTasks().filter((task) => !task.completedByMe && !task.pendingByMe && !task.rejectedByMe).map((task) => task.id);
     const allSelected = visibleIds.length && visibleIds.every((id) => state.selectedTaskIds.has(id));
     visibleIds.forEach((id) => allSelected ? state.selectedTaskIds.delete(id) : state.selectedTaskIds.add(id));
     renderTaskList();
@@ -363,7 +391,10 @@ function queueCurrentTask() {
   const pointsRaw = $('#new-task-points').value.trim();
   const points = Number(pointsRaw);
   if (!pointsRaw || !Number.isFinite(points) || points < 0 || points > 100000 || Math.round(points * 100) / 100 !== points) return showToast('اكتب نقاطًا من 0 إلى 100000 وبحد أقصى منزلتين عشريتين، مثل 0.1 أو 0.25.', 'error');
-  state.queue.push({ key: state.queueNextId++, title, required: $('#new-task-required').value === '1', points: Math.round(points * 100) / 100 });
+  const deadlineRaw = $('#new-task-deadline')?.value || '';
+  const deadlineDate = deadlineRaw ? new Date(deadlineRaw) : null;
+  if (deadlineRaw && (!deadlineDate || !Number.isFinite(deadlineDate.getTime()) || deadlineDate.getTime() <= Date.now())) return showToast('موعد انتهاء المهمة لازم يكون في المستقبل.', 'error');
+  state.queue.push({ key: state.queueNextId++, title, required: $('#new-task-required').value === '1', points: Math.round(points * 100) / 100, deadlineAt: deadlineDate ? deadlineDate.toISOString() : null });
   input.value = '';
   $('#new-task-points').value = '1';
   input.focus();
@@ -380,7 +411,7 @@ function renderTaskQueue() {
   queue.innerHTML = state.queue.map((item) => `
     <div class="queued-task" data-queue-key="${item.key}">
       <span class="task-id">${String(state.queue.indexOf(item) + 1).padStart(2, '0')}</span>
-      <div class="queued-task-title">${escapeHtml(item.title)}</div>
+      <div class="queued-task-title">${escapeHtml(item.title)}${item.deadlineAt ? `<small class="queued-deadline">⏰ ${escapeHtml(formatDate(item.deadlineAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Cairo' }))}</small>` : ''}</div>
       <label class="queued-task-points" title="عدد نقاط هذه المهمة">⭐ <input type="number" min="0" max="100000" step="0.01" value="${Number(item.points)}" data-queue-points="${item.key}" aria-label="نقاط ${escapeHtml(item.title)}"> <span>نقطة</span></label>
       <select data-queue-required="${item.key}" aria-label="نوع المهمة"><option value="1" ${item.required ? 'selected' : ''}>إجبارية</option><option value="0" ${!item.required ? 'selected' : ''}>اختيارية</option></select>
       <button class="remove-queue-item" data-remove-queue="${item.key}" aria-label="حذف المهمة">×</button>
@@ -414,7 +445,7 @@ async function publishQueuedTasks() {
   try {
     const result = await api('/api/tasks', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tasks: state.queue.map(({ title, required, points }) => ({ title, required, points })) }),
+      body: JSON.stringify({ tasks: state.queue.map(({ title, required, points, deadlineAt }) => ({ title, required, points, deadlineAt })) }),
     });
     state.queue = [];
     renderTaskQueue();
@@ -432,8 +463,8 @@ function renderFileList() {
 }
 async function submitTasks(event) {
   event.preventDefault();
-  const taskIds = [...state.selectedTaskIds];
-  if (!taskIds.length) return showToast('حدد مهمة واحدة على الأقل قبل التسليم.', 'error');
+  const taskIds = [...state.selectedTaskIds].filter((id) => { const task = state.tasks.find((item) => item.id === id); return task && !task.completedByMe && !task.pendingByMe && !task.rejectedByMe; });
+  if (!taskIds.length) return showToast('حدد مهمة واحدة على الأقل قبل التسليم (المهمات المنتهية أو المرفوضة مينفعش تتسلم تاني).', 'error');
   const links = $('#evidence-links').value.trim();
   const files = [...$('#evidence-files').files];
   if (!links && !files.length) return showToast('ضيف رابط دليل أو ارفع صورة/فيديو.', 'error');
@@ -451,7 +482,9 @@ async function submitTasks(event) {
       const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-100) || 'evidence-file';
       const pathname = `evidence/${state.user.id}/${Date.now()}-${index}-${safeName}`;
       button.textContent = `جاري رفع الملف ${index + 1} من ${files.length}...`;
-      const blob = await uploadToBlob(pathname, file, {
+      let blob;
+      try {
+      blob = await uploadToBlob(pathname, file, {
         access: 'private',
         handleUploadUrl: '/api/uploads/token',
         multipart: file.size > 5 * 1024 * 1024,
@@ -461,6 +494,7 @@ async function submitTasks(event) {
           button.textContent = `رفع الملف ${index + 1}/${files.length} · ${percentage}%`;
         },
       });
+      } catch (uploadError) { throw new Error(await explainUploadError(uploadError, pathname)); }
       uploadedFiles.push({ pathname: blob.pathname, originalName: file.name, mimeType: file.type, size: file.size });
     }
     button.textContent = 'جاري تسجيل التسليم...';
@@ -483,6 +517,27 @@ async function submitTasks(event) {
   } catch (error) { showToast(error.message, 'error'); }
   finally { setButtonLoading(button, false); }
 }
+async function explainUploadError(error, pathname) {
+  const message = String(error?.message || '');
+  if (!/client token|upload/i.test(message)) return message || 'فشل رفع الملف.';
+  try {
+    const response = await fetch('/api/uploads/token', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'blob.generate-client-token', payload: { pathname, clientPayload: null, multipart: false } }),
+    });
+    const text = await response.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch { /* not json */ }
+    if (data?.error) return `فشل رفع الملف: ${data.error}`;
+    if (!response.ok) return `فشل رفع الملف: السيرفر رد بحالة ${response.status}. راجع Vercel → Logs.`;
+    if (!data?.clientToken) return 'فشل رفع الملف: رد السيرفر مش JSON صالح (غالبًا مسار /api/uploads/token مش واصل للـ API). أعد النشر وتأكد إن فولدر api/ مرفوع.';
+    return 'فشل رفع الملف مؤقتًا، جرّب تاني.';
+  } catch (probeError) {
+    return `فشل رفع الملف: تعذر الاتصال بالسيرفر (${probeError.message}).`;
+  }
+}
 async function loadSubmissions() {
   try {
     const result = await api('/api/submissions');
@@ -494,13 +549,80 @@ async function loadSubmissions() {
     $('#submissions-list').innerHTML = submissions.map((submission) => {
       const files = (submission.files || []).map((file) => `<a href="${escapeHtml(file.url)}" target="_blank" rel="noopener noreferrer">📎 ${escapeHtml(file.originalName || 'ملف مرفوع')}</a>`).join('');
       const links = (submission.evidenceLinks || []).map((link) => `<a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">↗ فتح رابط دليل</a>`).join('');
-      const tasks = (submission.tasks || []).map((task) => `<span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? 'إجباري' : 'اختياري'} · ${escapeHtml(task.title)}</span>`).join('');
-      return `<article class="submission-card"><div class="submission-top"><div class="submission-user"><img src="${escapeHtml(submission.avatarUrl || avatarFallback(submission.userId))}" alt=""><span>${escapeHtml(submission.username)}</span><span class="task-id">#${submission.id}</span><span class="task-tag ${submission.status === 'approved' ? 'completed' : submission.status === 'rejected' ? 'required' : 'optional'}">${submission.status === 'approved' ? 'تمت الموافقة' : submission.status === 'rejected' ? 'مرفوض' : 'بانتظار الموافقة'}</span></div><time class="submission-date">${formatDate(submission.submittedAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</time></div><div class="submission-task-list">${tasks}</div>${submission.note ? `<div class="submission-note">${escapeHtml(submission.note)}</div>` : ''}${files || links ? `<div class="submission-evidence">${files}${links}</div>` : ''}${state.user.canManage && submission.status === 'pending' ? `<div class="manager-actions"><button class="primary-button" data-review-submission="approve" data-id="${submission.id}">موافقة وإضافة النقاط</button><button class="secondary-button" data-review-submission="reject" data-id="${submission.id}">رفض التسليم</button></div>` : ''}</article>`;
+      const tasks = (submission.tasks || []).map((task) => {
+        const redoStatus = String(task.redoStatus || '');
+        const redoBadge = redoStatus === 'requested'
+          ? '<span class="task-tag required">🔁 مطلوب إعادة المهمة</span>'
+          : redoStatus === 'submitted'
+            ? '<span class="task-tag optional">🔁 تم إعادة التسليم</span>'
+            : '';
+        const redoButton = state.user.canManage && submission.status === 'approved' && task.canRequestRedo && !redoStatus
+          ? `<button type="button" class="task-redo-action" data-redo-task="${submission.id}" data-task-id="${task.id}" data-task-title="${escapeHtml(task.title)}">🔁 طلب إعادة المهمة</button>`
+          : '';
+        return `<span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? 'إجباري' : 'اختياري'} · ${escapeHtml(task.title)}</span>${redoBadge}${redoButton}`;
+      }).join('');
+      const duplicateWarning = state.user.canManage && (submission.duplicateImages || []).length ? `<div class="duplicate-image-warning"><b>⚠️ تنبيه: تم اكتشاف صورة مكررة</b>${submission.duplicateImages.map((duplicate) => `<div>${escapeHtml(duplicate.fileName)} — موجودة في ${duplicate.matches.slice(0, 5).map((match) => `التسليم #${match.submissionId} بواسطة ${escapeHtml(match.username)}`).join('، ')}</div>`).join('')}</div>` : '';
+      return `<article class="submission-card"><div class="submission-top"><div class="submission-user"><img src="${escapeHtml(submission.avatarUrl || avatarFallback(submission.userId))}" alt=""><span>${escapeHtml(submission.username)}</span><span class="task-id">#${submission.id}</span><span class="task-tag ${submission.status === 'approved' ? 'completed' : submission.status === 'rejected' ? 'required' : 'optional'}">${submission.status === 'approved' ? 'تمت الموافقة' : submission.status === 'rejected' ? 'مرفوض' : submission.status === 'reopened' ? 'أُعيد فتحه' : 'بانتظار الموافقة'}</span></div><time class="submission-date">${formatDate(submission.submittedAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</time></div><div class="submission-task-list">${tasks}</div>${submission.note ? `<div class="submission-note">${escapeHtml(submission.note)}</div>` : ''}${duplicateWarning}${files || links ? `<div class="submission-evidence">${files}${links}</div>` : ''}${state.user.canManage && submission.status === 'pending' ? `<div class="manager-actions"><button class="primary-button" data-review-submission="approve" data-id="${submission.id}">موافقة وإضافة النقاط</button><button class="secondary-button" data-review-submission="reject" data-id="${submission.id}">رفض التسليم</button></div>` : ''}${state.user.canManage && submission.status === 'rejected' ? `<div class="manager-actions"><button class="secondary-button" data-review-submission="reopen" data-id="${submission.id}">🔓 إعادة فتح المهمة للعضو</button></div>` : ''}</article>`;
     }).join('');
-    $$('[data-review-submission]').forEach(button => button.addEventListener('click', async () => { const action = button.dataset.reviewSubmission; const id = button.dataset.id; let reason = ''; if (action === 'reject') { reason = window.prompt('سبب رفض التسليم (اختياري):') || ''; } button.disabled = true; try { const result = await api(`/api/submissions/${id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }) }); showToast(action === 'approve' ? `تمت الموافقة وإضافة ${result.awarded} نقطة.` : 'تم رفض التسليم.', 'success'); await Promise.all([loadSubmissions(), loadMyPoints()]); } catch (error) { showToast(error.message, 'error'); button.disabled = false; } }));
+    $$('[data-review-submission]').forEach(button => button.addEventListener('click', async () => { const action = button.dataset.reviewSubmission; const id = button.dataset.id; let reason = ''; if (action === 'reject') { reason = window.prompt('سبب رفض التسليم (اختياري):') || ''; } if (action === 'reopen') { if (!window.confirm('هتفتح التسليم ده تاني، والعضو هيقدر يسلّم نفس المهام من جديد. متأكد؟')) return; reason = window.prompt('ملاحظة للعضو (اختياري):') || ''; } button.disabled = true; try { const result = await api(`/api/submissions/${id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason, note: reason }) }); showToast(result.message || (action === 'approve' ? `تمت الموافقة وإضافة ${result.awarded} نقطة.` : 'تم رفض التسليم.'), result.dmSent === false ? 'info' : 'success'); await Promise.all([loadSubmissions(), loadMyPoints(), loadTasks()]); } catch (error) { showToast(error.message, 'error'); button.disabled = false; } }));
+    $$('[data-redo-task]').forEach(button => button.addEventListener('click', async () => {
+      const submissionId = Number(button.dataset.redoTask);
+      const taskId = Number(button.dataset.taskId);
+      const title = button.dataset.taskTitle || `المهمة #${taskId}`;
+      if (!window.confirm(`طلب إعادة المهمة دي؟\n\n${title}\n\nهيتم خصم نقاط المهمة من رصيد العضو، وهيقدر يسلّمها مرة تانية.`)) return;
+      const reason = window.prompt('سبب طلب الإعادة (اختياري):') || '';
+      button.disabled = true;
+      try {
+        const result = await api(`/api/submissions/${submissionId}/redo-task`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ taskId, reason }) });
+        showToast(result.message || `تم طلب إعادة المهمة وخصم ${result.pointsDeducted} نقطة.`, result.dmSent === false ? 'info' : 'success');
+        await Promise.all([loadSubmissions(), loadMyPoints(), loadTasks()]);
+      } catch (error) { showToast(error.message || 'تعذر طلب إعادة المهمة.', 'error'); button.disabled = false; }
+    }));
   } catch (error) {
     $('#submissions-list').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
   }
+}
+
+function wireTaskInsights() {
+  $('#task-insights-refresh')?.addEventListener('click', () => loadTaskInsights(true));
+  $('#submission-audit-refresh')?.addEventListener('click', loadSubmissionAudit);
+  $('#submission-audit-export')?.addEventListener('click', () => { window.location.href = '/api/submission-audit.csv'; });
+}
+function renderMiniMemberList(items, mode) {
+  if (!items?.length) return '<div class="task-empty">لا توجد بيانات كافية حتى الآن.</div>';
+  return items.map((item, index) => {
+    const details = mode === 'active' ? `${Number(item.submissions || 0)} تسليم · ${Number(item.approved || 0)} مقبول · ${Number(item.rejected || 0)} مرفوض` : (item.lastSubmission ? `آخر تسليم: ${formatDate(item.lastSubmission, { day: 'numeric', month: 'short', year: 'numeric' })}` : 'لم يسجّل أي تسليم');
+    return `<div class="review-member-row"><span class="review-member-rank">${mode === 'active' ? `#${index + 1}` : '•'}</span><div><b>${escapeHtml(item.username || item.userId)}</b><small>${escapeHtml(details)}</small></div><code>${escapeHtml(item.userId)}</code></div>`;
+  }).join('');
+}
+async function loadTaskInsights(force = false) {
+  if (!state.user?.canManage) return;
+  const overview = $('#task-stats-overview');
+  if (force && overview) overview.innerHTML = '<div class="loading-state">جاري تحديث الإحصائيات...</div>';
+  try {
+    const result = await api('/api/task-stats');
+    const totals = result.totals || {};
+    if (overview) overview.innerHTML = [
+      ['إجمالي التسليمات', totals.total || 0], ['المقبولة', totals.approved || 0], ['المرفوضة', totals.rejected || 0], ['قيد المراجعة', totals.pending || 0],
+    ].map(([label, value]) => `<div class="task-stat-card"><small>${label}</small><b>${Number(value).toLocaleString('en-US')}</b></div>`).join('');
+    $('#task-most-active').innerHTML = renderMiniMemberList(result.mostActive, 'active');
+    $('#task-inactive-members').innerHTML = renderMiniMemberList(result.inactive, 'inactive');
+  } catch (error) {
+    if (overview) overview.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
+  }
+}
+async function loadSubmissionAudit() {
+  if (!state.user?.canManage) return;
+  const box = $('#submission-audit-list');
+  if (!box) return;
+  box.innerHTML = '<div class="loading-state">جاري تحميل سجل القرارات...</div>';
+  try {
+    const result = await api('/api/submission-audit');
+    const entries = result.entries || [];
+    if (!entries.length) { box.innerHTML = '<div class="task-empty">لسه مفيش قرارات محفوظة.</div>'; return; }
+    const labels = { approved: '✅ موافقة', rejected: '❌ رفض', reopened: '🔓 إعادة فتح' };
+    box.innerHTML = entries.map((entry) => `<article class="submission-audit-row"><div><b>${escapeHtml(labels[entry.decision] || entry.decision)} · التسليم #${entry.submissionId}</b><small>العضو: ${escapeHtml(entry.memberName)} (${escapeHtml(entry.memberId)}) · الأدمن: ${escapeHtml(entry.reviewerName)} (${escapeHtml(entry.reviewerId)})</small>${entry.reason ? `<p>${escapeHtml(entry.reason)}</p>` : ''}</div><time>${escapeHtml(formatDate(entry.createdAt, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Cairo' }))}</time></article>`).join('');
+  } catch (error) { box.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`; }
 }
 
 async function loadMyPoints() {
@@ -556,10 +678,10 @@ function startPresenceHeartbeat() {
   const beat = async () => {
     if (!state.user) return;
     try { await api('/api/presence', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch { /* Retry on the next heartbeat. */ }
-    await refreshPresence();
+    if (!document.hidden) await refreshPresence();
   };
   beat();
-  setInterval(beat, 30000);
+  setInterval(beat, 60000);
 }
 function renderRoster() {
   const query = $('#roster-search').value.trim().toLocaleLowerCase('ar');
@@ -666,6 +788,7 @@ async function loadStaffStats() {
     state.dailyMessageStats.dailyTotal = state.dailyMessageStats.dailyStats.reduce((sum, row) => sum + row.count, 0);
     renderDailyMessageStats();
     renderAdminOverview();
+    renderLeaderboard();
   } catch (error) {
     const node = $('#admin-overview-cards');
     if (node && !state.staffStats.length) node.innerHTML = `<div class="loading-state">${escapeHtml(error.message)}</div>`;
@@ -674,6 +797,7 @@ async function loadStaffStats() {
 function findStaffProfileMember(userId) {
   return flattenRoster().find((item) => String(item.id) === String(userId)) || (() => {
     const stats = (state.staffStats || []).find((item) => String(item.userId) === String(userId));
+    if (state.user && String(state.user.id) === String(userId)) return { id: String(userId), username: state.user.username || String(userId), handle: state.user.handle || String(userId), avatarUrl: state.user.avatarUrl || avatarFallback(userId), roleName: 'عضو الاستاف', roles: [], isAdmin: Boolean(state.user.isAdmin) };
     return stats ? { id: String(userId), username: stats.username || String(userId), handle: String(userId), avatarUrl: avatarFallback(userId), roleName: 'عضو غير موجود حاليًا في قائمة الاستاف', roles: [], isAdmin: false } : null;
   })();
 }
@@ -706,19 +830,219 @@ async function loadStaffProfile(userId, providedMember = null) {
   try {
     const response = await api(`/api/staff-stats/${encodeURIComponent(userId)}`);
     if (String(state.activeStaffProfileId) !== String(userId)) return;
-    renderStaffProfile(member, response.stats || {}, response.recentSubmissions || [], response.recentLeaves || []);
+    renderStaffProfile(member, response);
   } catch (error) {
     $('#staff-profile-content').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
   }
 }
-function renderStaffProfile(member, stats, submissions, leaves) {
-  const roles = (member.roles || []).map((role) => `<span class="profile-role-chip">${escapeHtml(role.name)}</span>`).join('') || '<span class="muted">لا توجد رتب إضافية</span>';
+const LB_METRICS = {
+  points: { field: 'totalPoints', unit: 'نقطة' },
+  messages: { field: 'totalMessages', unit: 'رسالة' },
+  today: { field: 'dailyMessages', unit: 'رسالة اليوم' },
+  approved: { field: 'approvedSubmissions', unit: 'تسليم مقبول' },
+};
+function renderLeaderboard() {
+  const podium = $('#lb-podium');
+  const list = $('#lb-list');
+  if (!podium || !list) return;
+  const metric = LB_METRICS[state.lbMetric] || LB_METRICS.points;
+  const roster = new Map(flattenRoster().map((member) => [String(member.id), member]));
+  const num = (value) => Number(value || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
+  const rows = (state.staffStats || [])
+    .map((item) => ({ item, value: Number(item[metric.field]) || 0 }))
+    .filter((row) => row.value > 0)
+    .sort((a, b) => b.value - a.value)
+    .map((row, index) => {
+      const member = roster.get(String(row.item.userId));
+      return { rank: index + 1, id: String(row.item.userId), value: row.value, name: member?.username || row.item.username || String(row.item.userId), avatar: member?.avatarUrl || avatarFallback(row.item.userId), role: member?.roleName || '' };
+    });
+  if (!rows.length) {
+    podium.innerHTML = '';
+    list.innerHTML = '<div class="task-empty">لسه مفيش بيانات كفاية للترتيب ده.</div>';
+    return;
+  }
+  const medals = ['🥇', '🥈', '🥉'];
+  const mineId = String(state.user?.id || '');
+  const card = (row) => `<button type="button" class="lb-podium-card rank-${row.rank}${row.id === mineId ? ' is-me' : ''}" data-open-staff-profile="${escapeHtml(row.id)}"><span class="lb-medal">${medals[row.rank - 1]}</span><img src="${escapeHtml(row.avatar)}" alt=""><b>${escapeHtml(row.name)}</b><small>${escapeHtml(row.role)}</small><strong>${num(row.value)}</strong><em>${metric.unit}</em></button>`;
+  const top = rows.slice(0, 3);
+  // ترتيب العرض: الثاني - الأول - الثالث عشان الأول يبقى في النص
+  const display = top.length === 3 ? [top[1], top[0], top[2]] : top;
+  podium.innerHTML = display.map(card).join('');
+  const rest = rows.slice(3);
+  list.innerHTML = rest.map((row) => `<button type="button" class="lb-row${row.id === mineId ? ' is-me' : ''}" data-open-staff-profile="${escapeHtml(row.id)}"><span class="lb-rank">#${row.rank}</span><img src="${escapeHtml(row.avatar)}" alt=""><div class="lb-name"><b>${escapeHtml(row.name)}${row.id === mineId ? ' <i>(أنت)</i>' : ''}</b><small>${escapeHtml(row.role)}</small></div><div class="lb-value"><strong>${num(row.value)}</strong><small>${metric.unit}</small></div></button>`).join('');
+  [...$$('[data-open-staff-profile]', podium), ...$$('[data-open-staff-profile]', list)].forEach((button) => button.addEventListener('click', () => openStaffProfile(button.dataset.openStaffProfile)));
+}
+
+async function loadAudit(reset = true) {
+  const box = $('#audit-list');
+  const more = $('#audit-more');
+  if (!box || !state.user?.canManage || state.audit.loading) return;
+  if (reset) { state.audit = { entries: [], nextBefore: null, hasMore: false, loading: true }; box.innerHTML = '<div class="loading-state">جاري تحميل سجل السيرفر...</div>'; }
+  else state.audit.loading = true;
+  if (more) more.disabled = true;
+  try {
+    const params = new URLSearchParams();
+    const actionType = $('#audit-action')?.value;
+    const userId = ($('#audit-user')?.value || '').trim();
+    if (actionType) params.set('actionType', actionType);
+    if (/^\d{15,22}$/.test(userId)) params.set('userId', userId);
+    if (!reset && state.audit.nextBefore) params.set('before', state.audit.nextBefore);
+    const result = await api(`/api/audit-log${params.toString() ? `?${params}` : ''}`);
+    state.audit.entries = state.audit.entries.concat(result.entries || []);
+    state.audit.nextBefore = result.nextBefore || null;
+    state.audit.hasMore = Boolean(result.hasMore);
+    renderAudit();
+  } catch (error) {
+    if (!state.audit.entries.length) box.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
+    else showToast(error.message, 'error');
+  } finally {
+    state.audit.loading = false;
+    if (more) { more.disabled = false; more.classList.toggle('hidden', !state.audit.hasMore); }
+  }
+}
+function renderAudit() {
+  const box = $('#audit-list');
+  if (!box) return;
+  const query = ($('#audit-search')?.value || '').trim().toLowerCase();
+  const toneClass = { danger: 'required', create: 'completed', edit: 'optional' };
+  const entries = state.audit.entries.filter((entry) => !query || [entry.label, entry.actor?.username, entry.targetName, entry.targetId, entry.reason, ...(entry.changes || []).map((change) => `${change.key} ${change.oldValue} ${change.newValue}`)].join(' ').toLowerCase().includes(query));
+  if (!entries.length) {
+    box.innerHTML = `<div class="task-empty">${state.audit.entries.length ? 'مفيش نتائج مطابقة للبحث.' : 'مفيش أحداث في السجل بالفلتر ده.'}</div>`;
+    return;
+  }
+  box.innerHTML = entries.map((entry) => {
+    const target = entry.targetName
+      ? `<span class="audit-target">${entry.targetAvatarUrl ? `<img src="${escapeHtml(entry.targetAvatarUrl)}" alt="">` : ''}${escapeHtml(entry.targetName)}</span>`
+      : entry.targetId ? `<span class="audit-target"><code>${escapeHtml(entry.targetId)}</code></span>` : '';
+    const extra = [entry.count > 1 ? `× ${entry.count}` : '', entry.channelId ? `روم <code>${escapeHtml(entry.channelId)}</code>` : ''].filter(Boolean).join(' · ');
+    const changes = (entry.changes || []).length
+      ? `<details class="audit-changes"><summary>التفاصيل (${entry.changes.length})</summary>${entry.changes.map((change) => `<div><code>${escapeHtml(change.key)}</code>: <span class="old">${escapeHtml(change.oldValue)}</span> ← <span class="new">${escapeHtml(change.newValue)}</span></div>`).join('')}</details>`
+      : '';
+    return `<article class="audit-entry tone-${escapeHtml(entry.tone)}"><img class="audit-avatar" src="${escapeHtml(entry.actor?.avatarUrl || avatarFallback(entry.actor?.id))}" alt=""><div class="audit-main"><div class="audit-line"><b>${escapeHtml(entry.actor?.username || 'غير معروف')}</b><span class="task-tag ${toneClass[entry.tone] || 'optional'}">${escapeHtml(entry.label)}</span>${target}${extra ? `<small class="muted">${extra}</small>` : ''}</div>${entry.reason ? `<p class="audit-reason">السبب: ${escapeHtml(entry.reason)}</p>` : ''}${changes}<time class="audit-time">${escapeHtml(formatDate(entry.createdAt, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}</time></div></article>`;
+  }).join('');
+}
+
+async function loadPersonal(force = false) {
+  const me = state.user;
+  const box = $('#personal-content');
+  if (!me?.id || !box) return;
+  if (force || !box.querySelector('.pf-hero')) box.innerHTML = '<div class="loading-state">جاري تحميل إحصائياتك...</div>';
+  try {
+    const response = await api(`/api/staff-stats/${encodeURIComponent(me.id)}`);
+    if (!$('#page-personal')?.classList.contains('active-page')) return;
+    const member = findStaffProfileMember(me.id) || { id: String(me.id), username: me.username || String(me.id), handle: me.handle || String(me.id), avatarUrl: me.avatarUrl || avatarFallback(me.id), roleName: 'عضو الاستاف', roles: [], isAdmin: Boolean(me.isAdmin) };
+    renderStaffProfile(member, response, '#personal-content');
+  } catch (error) {
+    box.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
+  }
+}
+function snowflakeDate(id) {
+  try { return new Date(Number((BigInt(id) >> 22n) + 1420070400000n)); } catch { return null; }
+}
+function hourLabel(hour) {
+  if (hour === null || hour === undefined) return '—';
+  return hour === 0 ? '12 ص' : hour < 12 ? `${hour} ص` : hour === 12 ? '12 م' : `${hour - 12} م`;
+}
+function renderStaffProfile(member, response = {}, target = '#staff-profile-content') {
+  const root = $(target);
+  if (!root) return;
+  const stats = response.stats || {};
+  const mp = response.messageProfile || { total: 0, today: 0, week: 0, month: 0, avgPerDay: 0, activeDays: 0, activity: [], hours: [] };
+  const ranks = response.ranks || {};
+  const submissions = response.recentSubmissions || [];
+  const leaves = response.recentLeaves || [];
+  const points = response.recentPoints || [];
+  const requests = response.recentRequests || [];
+  const restricted = Boolean(response.restricted);
   const online = state.onlineUserIds.has(String(member.id));
-  const statCard = (label, value, note = '') => { const displayValue = typeof value === 'string' && !/^\d+(?:\.\d+)?$/.test(value) ? escapeHtml(value) : Number(value || 0).toLocaleString('en-US'); return `<article class="staff-detail-stat"><small>${label}</small><strong>${displayValue}</strong>${note ? `<span>${note}</span>` : ''}</article>`; };
-  const statusText = { approved: 'تمت الموافقة', submitted: 'بانتظار المراجعة', pending: 'بانتظار المراجعة', rejected: 'مرفوض' };
-  const submissionsHtml = submissions.length ? submissions.map((item) => `<article class="profile-history-row"><div><b>تسليم #${Number(item.id)}</b><small>${escapeHtml(formatDate(item.submittedAt, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}</small>${item.note ? `<p>${escapeHtml(item.note)}</p>` : ''}</div><span class="task-tag ${item.status === 'approved' ? 'completed' : item.status === 'rejected' ? 'required' : 'optional'}">${statusText[item.status] || escapeHtml(item.status)}</span></article>`).join('') : '<div class="task-empty">لا توجد تسليمات مسجلة لهذا العضو.</div>';
-  const leavesHtml = leaves.length ? leaves.map((item) => `<article class="profile-history-row"><div><b>طلب إجازة #${Number(item.id)}</b><small>${escapeHtml(item.startDate)} — ${escapeHtml(item.endDate)}</small><p>${escapeHtml(item.reason)}</p></div><span class="task-tag ${item.status === 'approved' ? 'completed' : item.status === 'rejected' ? 'required' : 'optional'}">${statusText[item.status] || 'بانتظار المراجعة'}</span></article>`).join('') : '<div class="task-empty">لا توجد طلبات إجازة.</div>';
-  $('#staff-profile-content').innerHTML = `<div class="staff-profile-hero"><img class="staff-profile-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="staff-profile-identity"><span class="tiny-label">${member.isAdmin ? 'ADMINISTRATOR PROFILE' : 'STAFF MEMBER PROFILE'}</span><h1>${escapeHtml(member.username)}</h1><p>@${escapeHtml(member.handle || member.id)} · <code>${escapeHtml(member.id)}</code></p><div class="staff-profile-status"><span class="online-pill ${online ? 'online' : 'offline'}"><i></i>${online ? 'متصل بالموقع الآن' : 'غير متصل بالموقع'}</span><span class="manager-badge">${escapeHtml(member.roleName || 'عضو الاستاف')}</span></div></div></div><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">PERMISSIONS</span><h2>الرتب والصلاحيات</h2></div></div><div class="staff-profile-roles">${roles}</div></section><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">ACTIVITY OVERVIEW</span><h2>إحصائيات العضو</h2></div><small class="muted">تاريخ الإحصائيات: ${escapeHtml(state.dailyMessageStats.dailyDate || 'اليوم')}</small></div><div class="staff-detail-grid">${statCard('رسائل اليوم', stats.dailyMessages, 'في شات الاستاف')}${statCard('إجمالي الرسائل', stats.totalMessages, 'كل الرسائل المسجلة')}${statCard('إجمالي التسليمات', stats.totalSubmissions)}${statCard('التسليمات المقبولة', stats.approvedSubmissions)}${statCard('التسليمات المعلقة', stats.pendingSubmissions)}${statCard('النقاط المسجلة', stats.totalPoints)}${statCard('طلبات الإجازة', stats.leaveRequests)}${statCard('الطلبات الإدارية', stats.adminRequests)}${statCard('حالة الاتصال', online ? 'متصل' : 'أوفلاين', 'حالة الاتصال الحالية')}</div></section><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">SUBMISSION HISTORY</span><h2>آخر التسليمات</h2></div></div><div class="profile-history-list">${submissionsHtml}</div></section><section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">LEAVE HISTORY</span><h2>طلبات الإجازة</h2></div></div><div class="profile-history-list">${leavesHtml}</div></section>`;
+  const num = (value) => Number(value || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
+  const dateOnly = (value) => (value ? escapeHtml(formatDate(value, { day: 'numeric', month: 'long', year: 'numeric' })) : '—');
+  const dateTime = (value) => (value ? escapeHtml(formatDate(value, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })) : '—');
+  const color = /^#[0-9a-f]{6}$/i.test(member.roleColor || '') ? member.roleColor : '#8972fb';
+  const roles = (member.roles || []).map((role) => `<span class="profile-role-chip" style="${/^#[0-9a-f]{6}$/i.test(role.color) ? `border-color:${role.color}66;color:${role.color}` : ''}">${escapeHtml(role.name)}</span>`).join('') || '<span class="muted">لا توجد رتب إضافية</span>';
+  const created = snowflakeDate(member.id);
+  const statusText = { approved: 'تمت الموافقة', submitted: 'بانتظار المراجعة', pending: 'بانتظار المراجعة', rejected: 'مرفوض', reopened: 'أُعيد فتحه' };
+  const statusClass = (status) => (status === 'approved' ? 'completed' : status === 'rejected' ? 'required' : 'optional');
+  const typeText = { permission: 'طلب إذن / غياب', technical: 'مشكلة تقنية', 'data-change': 'تعديل بيانات', complaint: 'شكوى أو ملاحظة', other: 'طلب إداري آخر' };
+
+  const rankBadge = (icon, label, info) => (info?.rank ? `<span class="pf-rank"><b>${icon} #${info.rank}</b><small>${label} · من ${info.of}</small></span>` : `<span class="pf-rank muted-rank"><b>${icon} —</b><small>${label}</small></span>`);
+  const kpi = (label, value, note = '', accent = false) => `<article class="pf-kpi${accent ? ' accent' : ''}"><small>${label}</small><strong>${typeof value === 'string' ? escapeHtml(value) : num(value)}</strong>${note ? `<span>${note}</span>` : ''}</article>`;
+
+  const maxDay = Math.max(1, ...(mp.activity || []).map((item) => item.count));
+  const activityBars = (mp.activity || []).map((item) => {
+    const height = item.count ? Math.max(6, Math.round((item.count / maxDay) * 100)) : 2;
+    const label = escapeHtml(formatDate(`${item.date}T12:00:00Z`, { day: 'numeric', month: 'numeric', timeZone: 'UTC' }));
+    return `<div class="pf-bar" title="${escapeHtml(item.date)} — ${item.count} رسالة"><em>${item.count || ''}</em><i class="${item.count ? '' : 'empty'}" style="height:${height}%"></i><span>${label}</span></div>`;
+  }).join('');
+  const maxHour = Math.max(1, ...(mp.hours || []).map((item) => item.count));
+  const hourBars = (mp.hours || []).map((item) => `<div class="pf-hour${item.hour === mp.busiestHour ? ' top' : ''}" title="${hourLabel(item.hour)} — ${item.count} رسالة"><i style="height:${item.count ? Math.max(8, Math.round((item.count / maxHour) * 100)) : 3}%"></i>${item.hour % 6 === 0 ? `<span>${hourLabel(item.hour)}</span>` : '<span></span>'}</div>`).join('');
+
+  const totalSub = Number(stats.totalSubmissions) || 0;
+  const approvedSub = Number(stats.approvedSubmissions) || 0;
+  const approvalRate = totalSub ? Math.round((approvedSub / totalSub) * 100) : 0;
+  const pointsHtml = points.length ? points.map((item) => `<article class="profile-history-row"><div><b>${escapeHtml(item.reason || 'بدون سبب')}</b><small>${dateTime(item.createdAt)}${item.source && item.source !== 'manual' ? ` · ${escapeHtml(item.source)}` : ''}</small></div><span class="pf-points ${item.amount >= 0 ? 'plus' : 'minus'}">${item.amount >= 0 ? '+' : '−'}${num(Math.abs(item.amount))}</span></article>`).join('') : '<div class="task-empty">لا توجد حركات نقاط لهذا العضو.</div>';
+  const submissionsHtml = submissions.length ? submissions.map((item) => `<article class="profile-history-row"><div><b>تسليم #${Number(item.id)}</b><small>${dateTime(item.submittedAt)}</small>${item.note ? `<p>${escapeHtml(item.note)}</p>` : ''}</div><span class="task-tag ${statusClass(item.status)}">${statusText[item.status] || escapeHtml(item.status)}</span></article>`).join('') : '<div class="task-empty">لا توجد تسليمات مسجلة لهذا العضو.</div>';
+  const leavesHtml = leaves.length ? leaves.map((item) => `<article class="profile-history-row"><div><b>طلب إجازة #${Number(item.id)}</b><small>${escapeHtml(item.startDate)} — ${escapeHtml(item.endDate)}</small><p>${escapeHtml(item.reason)}</p></div><span class="task-tag ${statusClass(item.status)}">${statusText[item.status] || 'بانتظار المراجعة'}</span></article>`).join('') : '<div class="task-empty">لا توجد طلبات إجازة.</div>';
+  const requestsHtml = requests.length ? requests.map((item) => `<article class="profile-history-row"><div><b>${escapeHtml(item.subject)}</b><small>${escapeHtml(typeText[item.requestType] || item.requestType)} · ${dateTime(item.createdAt)}</small></div><span class="task-tag ${statusClass(item.status)}">${statusText[item.status] || 'بانتظار المراجعة'}</span></article>`).join('') : '<div class="task-empty">لا توجد طلبات إدارية.</div>';
+
+  root.innerHTML = `
+    <div class="pf-hero" style="--pf-accent:${color}">
+      <div class="pf-cover"></div>
+      <div class="pf-hero-body">
+        <img class="pf-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt="">
+        <div class="pf-identity">
+          <span class="tiny-label">${member.isAdmin ? 'ADMINISTRATOR PROFILE' : 'STAFF MEMBER PROFILE'}</span>
+          <h1>${escapeHtml(member.username)}</h1>
+          <p>@${escapeHtml(member.handle || member.id)} · <code>${escapeHtml(member.id)}</code> <button type="button" class="pf-copy" data-copy-id="${escapeHtml(member.id)}">نسخ ID</button></p>
+          <div class="staff-profile-status"><span class="online-pill ${online ? 'online' : 'offline'}"><i></i>${online ? 'متصل بالموقع الآن' : 'غير متصل بالموقع'}</span><span class="manager-badge">${escapeHtml(member.roleName || 'عضو الاستاف')}</span></div>
+        </div>
+        <div class="pf-ranks">${rankBadge('💬', 'ترتيب الرسائل', ranks.messages)}${rankBadge('⭐', 'ترتيب النقاط', ranks.points)}</div>
+      </div>
+      <div class="pf-facts">
+        ${member.joinedAt ? `<div><small>دخل سيرفر الاستاف</small><b>${dateOnly(member.joinedAt)}</b></div>` : ''}
+        ${member.mainJoinedAt ? `<div><small>دخل السيرفر الأساسي</small><b>${dateOnly(member.mainJoinedAt)}</b></div>` : ''}
+        <div><small>تاريخ إنشاء الحساب</small><b>${dateOnly(created)}</b></div>
+        <div><small>أعلى رتبة</small><b>${escapeHtml(member.roleName || 'عضو الاستاف')}</b></div>
+      </div>
+    </div>
+
+    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">MESSAGES</span><h2>الرسائل</h2></div><small class="muted">رسائل الروم المحسوبة فقط · التاريخ ${escapeHtml(state.dailyMessageStats.dailyDate || 'اليوم')}</small></div>
+      <div class="pf-kpis">
+        ${kpi('إجمالي الرسائل', mp.total, 'كل رسائله الموجودة في الروم', true)}
+        ${kpi('رسائل اليوم', mp.today)}
+        ${kpi('آخر 7 أيام', mp.week)}
+        ${kpi('آخر 30 يوم', mp.month)}
+        ${kpi('متوسط الرسائل يوميًا', mp.avgPerDay, `${num(mp.activeDays)} يوم نشاط`)}
+        ${kpi('أنشط وقت', hourLabel(mp.busiestHour), mp.busiestDay ? `أنشط يوم: ${dateOnly(`${mp.busiestDay.date}T12:00:00Z`)} (${num(mp.busiestDay.count)})` : 'لا يوجد نشاط')}
+      </div>
+      <div class="pf-charts">
+        <div class="pf-chart-card"><h3>نشاط آخر 14 يوم</h3><div class="pf-bars">${activityBars}</div></div>
+        <div class="pf-chart-card"><h3>توزيع الرسائل على ساعات اليوم <small>(توقيت القاهرة)</small></h3><div class="pf-hours">${hourBars}</div></div>
+      </div>
+      <div class="pf-facts slim"><div><small>أول رسالة</small><b>${dateTime(mp.firstAt)}</b></div><div><small>آخر رسالة</small><b>${dateTime(mp.lastAt)}</b></div></div>
+    </section>
+
+    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">PERFORMANCE</span><h2>الأداء والمهمات</h2></div></div>
+      <div class="pf-kpis">
+        ${kpi('النقاط المسجلة', stats.totalPoints, '', true)}
+        ${restricted ? '' : kpi('إجمالي التسليمات', totalSub)}
+        ${kpi('التسليمات المقبولة', approvedSub)}
+        ${restricted ? '' : kpi('بانتظار المراجعة', stats.pendingSubmissions)}
+        ${restricted ? '' : kpi('المرفوضة', stats.rejectedSubmissions)}
+        ${restricted ? '' : kpi('طلبات الإجازة', stats.leaveRequests, `${num(stats.adminRequests)} طلب إداري`)}
+      </div>
+      <div class="pf-rate${restricted ? ' hidden' : ''}"><div class="pf-rate-top"><b>نسبة قبول التسليمات</b><span>${totalSub ? `${approvalRate}%` : '—'}</span></div><div class="pf-rate-track"><i style="width:${approvalRate}%"></i></div></div>
+    </section>
+
+    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">PERMISSIONS</span><h2>الرتب والصلاحيات</h2></div></div><div class="staff-profile-roles">${roles}</div></section>
+    ${restricted ? '<section class="staff-profile-section"><p class="muted small-copy">🔒 السجل التفصيلي (حركات النقاط، التسليمات، الإجازات، الطلبات الإدارية) متاح لصاحب الحساب والمسؤولين فقط.</p></section>' : `<section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">POINTS HISTORY</span><h2>آخر حركات النقاط</h2></div></div><div class="profile-history-list">${pointsHtml}</div></section>
+    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">SUBMISSION HISTORY</span><h2>آخر التسليمات</h2></div></div><div class="profile-history-list">${submissionsHtml}</div></section>
+    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">LEAVE HISTORY</span><h2>طلبات الإجازة</h2></div></div><div class="profile-history-list">${leavesHtml}</div></section>
+    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">ADMIN REQUESTS</span><h2>الطلبات الإدارية</h2></div></div><div class="profile-history-list">${requestsHtml}</div></section>`}`;
+  $('[data-copy-id]', root)?.addEventListener('click', async (event) => {
+    const id = event.currentTarget.dataset.copyId;
+    try { await navigator.clipboard.writeText(id); showToast(`تم نسخ Discord ID: ${id}`, 'success'); } catch { showToast(id, 'info'); }
+  });
 }
 
 function wireStaffRequests() {
@@ -830,14 +1154,17 @@ function startChatPolling() {
   // Vercel serves the UI statically while the API runs on a persistent backend.
   // Poll only the currently visible chat so the interface works without a WebSocket proxy.
   setInterval(async () => {
+    if (document.hidden) return;
     const activePage = $('.page.active-page')?.id;
     const room = activePage === 'page-staff-chat' ? 'staff'
       : activePage === 'page-management-chat' && state.user?.canManage ? 'management'
       : null;
-    if (!room) return;
+    if (!room || !state.chatLoaded[room]) return;
     try {
-      const result = await api(`/api/chat/${room}`);
-      if (room === 'staff') updateDailyMessageStats(result);
+      // نطلب الرسائل الأحدث من آخر رسالة معروفة فقط (بدل آخر 100 رسالة كل مرة).
+      const lastId = state.chatMessages[room].reduce((max, message) => Math.max(max, Number(message.id) || 0), 0);
+      const result = await api(`/api/chat/${room}?after=${lastId}`);
+      if (room === 'staff' && !result.incremental) updateDailyMessageStats(result);
       let added = false;
       for (const message of (result.messages || [])) {
         if (!state.chatMessageIds[room].has(message.id)) {
@@ -847,7 +1174,7 @@ function startChatPolling() {
       }
       if (added) renderChat(room);
     } catch { /* Keep the current chat visible during brief network errors. */ }
-  }, 4000);
+  }, 6000);
 }
 function wireChats() {
   $('#staff-chat-form').addEventListener('submit', (event) => sendChat(event, 'staff'));
@@ -923,5 +1250,81 @@ $$('.chat-composer textarea').forEach((textarea) => textarea.addEventListener('i
   textarea.style.height = 'auto';
   textarea.style.height = `${Math.min(textarea.scrollHeight, 130)}px`;
 }));
+
+// ───────── إشعارات داخل الموقع للمسؤولين ─────────
+const NOTIF_TARGETS = {
+  submission: { page: 'tasks', selector: '#submissions-list', reload: () => loadSubmissions() },
+  leave: { page: 'overview', selector: '#manager-leave-section', reload: () => loadLeaveRequests() },
+  'staff-request': { page: 'overview', selector: '#manager-staff-request-section', reload: () => loadStaffRequests() },
+};
+const BASE_TITLE = document.title;
+function wireNotifications() {
+  const button = $('#notif-btn');
+  const panel = $('#notif-panel');
+  if (!button || !panel) return;
+  const close = () => { state.notif.open = false; panel.classList.add('hidden'); button.setAttribute('aria-expanded', 'false'); };
+  button.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    if (state.notif.open) return close();
+    state.notif.open = true;
+    panel.classList.remove('hidden');
+    button.setAttribute('aria-expanded', 'true');
+    await loadNotifications();
+    renderNotifications();
+    markNotificationsRead();
+  });
+  $('#notif-mark-read')?.addEventListener('click', (event) => { event.stopPropagation(); markNotificationsRead(); });
+  document.addEventListener('click', (event) => { if (state.notif.open && !event.target.closest('.notif-wrap')) close(); });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && state.notif.open) close(); });
+  $('#notif-list')?.addEventListener('click', (event) => {
+    const row = event.target.closest('[data-notif-type]');
+    if (!row) return;
+    const target = NOTIF_TARGETS[row.dataset.notifType];
+    close();
+    if (!target) return;
+    openPage(target.page);
+    target.reload();
+    setTimeout(() => $(target.selector)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 120);
+  });
+}
+function renderNotificationBadge() {
+  const badge = $('#notif-badge');
+  const unread = state.notif.unread;
+  if (badge) { badge.textContent = unread > 99 ? '99+' : String(unread); badge.classList.toggle('hidden', unread < 1); }
+  document.title = unread > 0 ? `(${unread > 99 ? '99+' : unread}) ${BASE_TITLE}` : BASE_TITLE;
+}
+function renderNotifications() {
+  const list = $('#notif-list');
+  if (!list) return;
+  if (!state.notif.items.length) { list.innerHTML = '<div class="task-empty">لا توجد إشعارات حتى الآن.</div>'; return; }
+  list.innerHTML = state.notif.items.map((item) => `<button type="button" class="notif-item${item.unread ? ' unread' : ''}" data-notif-type="${escapeHtml(item.type)}"><b>${escapeHtml(item.title)}</b>${item.body ? `<span>${escapeHtml(item.body)}</span>` : ''}<time>${escapeHtml(formatDate(item.createdAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</time></button>`).join('');
+}
+async function loadNotifications() {
+  if (!state.user?.canManage) return;
+  try {
+    const result = await api('/api/notifications');
+    const items = Array.isArray(result.items) ? result.items : [];
+    const previousMax = state.notif.maxId;
+    const fresh = previousMax === null ? [] : items.filter((item) => item.unread && item.id > previousMax);
+    state.notif.items = items;
+    state.notif.unread = Number(result.unread) || 0;
+    state.notif.maxId = items.reduce((max, item) => Math.max(max, item.id), previousMax ?? 0);
+    renderNotificationBadge();
+    if (state.notif.open) renderNotifications();
+    // إشعار جديد وصل أثناء فتح الموقع: نعرضه ونحدّث القائمة المرتبطة بيه تلقائيًا.
+    for (const item of fresh.slice(0, 3).reverse()) showToast(`${item.title}${item.body ? ` — ${item.body}` : ''}`, 'info');
+    for (const type of new Set(fresh.map((item) => item.type))) NOTIF_TARGETS[type]?.reload();
+  } catch { /* الإشعارات مش حرجة؛ نحاول تاني في الدورة الجاية */ }
+}
+async function markNotificationsRead() {
+  if (!state.notif.unread && !state.notif.items.some((item) => item.unread)) return;
+  try {
+    await api('/api/notifications/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    state.notif.unread = 0;
+    renderNotificationBadge();
+    // نسيب علامة "جديد" ظاهرة جوه اللوحة لحد ما تتقفل، بعدها تختفي.
+    if (!state.notif.open) { state.notif.items = state.notif.items.map((item) => ({ ...item, unread: false })); }
+  } catch (error) { showToast(error.message, 'error'); }
+}
 
 initialize();

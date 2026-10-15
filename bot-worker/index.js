@@ -2,9 +2,10 @@
 // يرد على رسالة «نقاطي» (أو mypoints) بدون بريفكس. لازم يشتغل 24/7 على استضافة Node عادية
 // (Railway / Render / VPS ...) لأن Vercel Functions مش بتحافظ على اتصال Gateway.
 // المتغيرات المطلوبة: DISCORD_BOT_TOKEN و DATABASE_URL (نفس قاعدة بيانات الموقع).
-const { Client, GatewayIntentBits, Partials, Events, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, Events, EmbedBuilder, AttachmentBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
 const { neon } = require('@neondatabase/serverless');
-const { buildSubmissionNotifications } = require('../lib/submission-notifications.js');
+const { buildSubmissionNotifications, mergeSubmissionDecisionEmbed } = require('../lib/submission-notifications.js');
+const { loadSubmissionEvidence, appendEvidenceLinks } = require('../lib/submission-evidence.js');
 
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DB_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || process.env.DATABASE_URL_UNPOOLED || process.env.POSTGRES_PRISMA_URL;
@@ -59,28 +60,28 @@ async function getSubmissionMessage(submission) {
   if (!channel || !channel.isTextBased() || !channel.messages) throw new Error('تعذر الوصول إلى روم مراجعة التسليمات.');
   return channel.messages.fetch(messageId);
 }
-async function updateSubmissionMessage(message, submission, status, reviewerId, reason, amount, totalAfter) {
+async function updateSubmissionMessage(message, submission, status, reviewerId, reason, amount, totalAfter, taskRows = []) {
   const prior = message.embeds?.[0];
-  const embed = prior ? EmbedBuilder.from(prior) : new EmbedBuilder().setTitle(`تسليم مهمة #${submission.id}`);
-  const approved = status === 'approved';
-  const fields = (prior?.fields || []).filter((field) => field.name !== '🛡️ قرار المراجعة');
-  fields.push({
-    name: '🛡️ قرار المراجعة',
-    value: `${approved ? '✅ مقبول' : '❌ مرفوض'} بواسطة <@${reviewerId}>${reason ? `\nالسبب: ${clean(reason, 400)}` : ''}${approved ? `\nالنقاط المضافة: +${fmt(amount)} · الرصيد: ${fmt(totalAfter)}` : '\nلم تتم إضافة نقاط.'}`.slice(0, 1024),
-    inline: false,
+  const notification = buildSubmissionNotifications({
+    submissionId: submission.id,
+    sub: submission,
+    reviewerId,
+    status,
+    taskRows,
+    amount,
+    totalAfter,
+    reason,
   });
-  embed.setTitle(prior?.title || `${approved ? '✅' : '❌'} تسليم مهمة #${submission.id}`)
-    .setDescription(approved ? 'تم قبول التسليم وإضافة نقاطه.' : 'تم رفض التسليم ولم تتم إضافة نقاط.')
-    .setColor(approved ? 0x22c55e : 0xef4444)
-    .setTimestamp(new Date())
-    .setFields(fields.slice(0, 25));
-  await message.edit({ embeds: [embed], components: [], allowedMentions: { parse: [] } });
+  const embedData = mergeSubmissionDecisionEmbed(notification.logEmbed, prior);
+  await message.edit({ embeds: [EmbedBuilder.from(embedData)], components: [], allowedMentions: { parse: [] } });
 }
+
 async function processSubmissionReview(interaction, submissionId, status, reason = '') {
   await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS discord_message_id TEXT`;
   await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS discord_channel_id TEXT`;
   await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS reviewed_by TEXT`;
   await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE submission_tasks ADD COLUMN IF NOT EXISTS points_awarded NUMERIC(10,2)`;
   await sql`CREATE TABLE IF NOT EXISTS submission_review_audit (id BIGSERIAL PRIMARY KEY, submission_id BIGINT NOT NULL, member_id TEXT NOT NULL, member_name TEXT NOT NULL, decision TEXT NOT NULL CHECK (decision IN ('approved','rejected','reopened')), reviewer_id TEXT NOT NULL, reviewer_name TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
   const rows = await sql`SELECT * FROM submissions WHERE id = ${submissionId} LIMIT 1`;
   if (!rows.length) throw new Error('التسليم غير موجود في قاعدة البيانات.');
@@ -89,7 +90,11 @@ async function processSubmissionReview(interaction, submissionId, status, reason
   if (!['pending', 'submitted'].includes(String(sub.status))) throw new Error(`تمت مراجعة التسليم مسبقًا؛ حالته الحالية: ${sub.status}.`);
 
   const message = await getSubmissionMessage(sub);
-  const taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${submissionId} ORDER BY t.id`;
+  if (status === 'approved') {
+    // Match the website: freeze each task's point value at the moment it is approved.
+    await sql`UPDATE submission_tasks st SET points_awarded = t.points FROM tasks t WHERE st.task_id = t.id AND st.submission_id = ${submissionId} AND st.points_awarded IS NULL`;
+  }
+  const taskRows = await sql`SELECT t.id, t.title, COALESCE(st.points_awarded, t.points) AS points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${submissionId} ORDER BY t.id`;
   let amount = 0;
   if (status === 'approved') {
     amount = Math.round(taskRows.reduce((sum, task) => sum + Number(task.points || 0), 0) * 100) / 100;
@@ -104,12 +109,20 @@ async function processSubmissionReview(interaction, submissionId, status, reason
   }
   const totals = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${sub.user_id}`;
   const totalAfter = Number(totals[0]?.total || 0);
-  await updateSubmissionMessage(message, sub, status, reviewerId, reason, amount, totalAfter);
+  await updateSubmissionMessage(message, sub, status, reviewerId, reason, amount, totalAfter, taskRows);
 
   const notification = buildSubmissionNotifications({ submissionId, sub, reviewerId, status, taskRows, amount, totalAfter, reason });
   try {
     const decisionChannel = await client.channels.fetch(TASK_APPROVED_CHANNEL_ID);
-    if (decisionChannel?.isTextBased()) await decisionChannel.send({ content: notification.announcementContent, allowedMentions: { parse: [] } });
+    if (decisionChannel?.isTextBased()) {
+      const evidence = await loadSubmissionEvidence(sub);
+      const content = appendEvidenceLinks(notification.announcementContent, evidence.linkOnly);
+      await decisionChannel.send({
+        content,
+        ...(evidence.attachments.length ? { files: evidence.attachments.map((file) => new AttachmentBuilder(file.data, { name: file.name })) } : {}),
+        allowedMentions: { parse: [] },
+      });
+    }
   } catch (error) { console.error('[review decision announcement]', error.message); }
   try {
     const logChannel = await client.channels.fetch(POINTS_LOG_CHANNEL_ID);

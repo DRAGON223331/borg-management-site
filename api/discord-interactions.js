@@ -15,7 +15,8 @@ const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
 const MESSAGE_COUNT_CHANNEL_ID = (process.env.MESSAGE_COUNT_CHANNEL_ID || '1552049641913065552').trim();
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY || '';
-const { buildSubmissionNotifications } = require('../lib/submission-notifications.js');
+const { buildSubmissionNotifications, mergeSubmissionDecisionEmbed } = require('../lib/submission-notifications.js');
+const { loadSubmissionEvidence, appendEvidenceLinks } = require('../lib/submission-evidence.js');
 
 function send(res, payload, status = 200) {
   res.statusCode = status;
@@ -61,6 +62,27 @@ async function getSql() {
   if (!connectionString) throw new Error('قاعدة البيانات غير مضبوطة.');
   const { neon } = await import('@neondatabase/serverless');
   return neon(connectionString);
+}
+
+async function postSubmissionDecisionAnnouncement(submission, announcementContent) {
+  const evidence = await loadSubmissionEvidence(submission);
+  const content = appendEvidenceLinks(announcementContent, evidence.linkOnly);
+  const payload = { content, allowed_mentions: { parse: [] } };
+  if (!evidence.attachments.length) {
+    return discordApi(`/channels/${TASK_APPROVED_CHANNEL_ID}/messages`, { method: 'POST', body: JSON.stringify(payload) });
+  }
+  const form = new FormData();
+  form.append('payload_json', JSON.stringify({ ...payload, attachments: evidence.attachments.map((file, index) => ({ id: index, filename: file.name })) }));
+  evidence.attachments.forEach((file, index) => form.append(`files[${index}]`, new Blob([file.data], { type: file.type }), file.name));
+  const response = await fetch(`${DISCORD_API}/channels/${TASK_APPROVED_CHANNEL_ID}/messages`, {
+    method: 'POST',
+    headers: { Authorization: `Bot ${BOT_TOKEN}` },
+    body: form,
+  });
+  let result = null;
+  try { result = await response.json(); } catch { result = null; }
+  if (!response.ok) throw new Error(cleanText(result?.message || `Discord attachment upload HTTP ${response.status}`, 180));
+  return result;
 }
 async function discordApi(route, options = {}) {
   if (!BOT_TOKEN) throw new Error('توكن البوت غير مضبوط.');
@@ -352,36 +374,16 @@ async function handleSubmissionReview(interaction, res, { action, submissionId, 
       reply({ type: 4, data: { content: 'حالة التسليم الحالية غير قابلة للمراجعة. حدّث الموقع وتحقق من السجل.', flags: 64 } });
       return;
     }
-    // Keep the original evidence/task fields, but use the same review details and wording
-    // as the website's updateDiscordSubmissionReview() path.
-    const fields = Array.isArray(old.fields) ? old.fields.filter((field) => field.name !== '🛡️ قرار المراجعة') : [];
-    const taskDetails = taskRows.map((task) => `• ${cleanText(task.title, 180)} — ${fmtPoints(task.points)} نقطة`).join('\n').slice(0, 900) || 'لا توجد مهمات مرتبطة بالتسليم.';
-    fields.push({ name: '📋 تفاصيل المهمات والنقاط', value: taskDetails, inline: false });
-    fields.push({ name: '👤 العضو', value: `<@${sub.user_id}>`, inline: true });
-    if (finalStatus === 'approved') fields.push({ name: '💎 النقاط المضافة', value: `**+${fmtPoints(amount)} نقطة**`, inline: true });
-    fields.push({ name: '📊 الرصيد بعد المراجعة', value: `**${fmtPoints(totalAfter)} نقطة**`, inline: true });
-    fields.push({ name: '🛡️ المسؤول', value: `<@${finalReviewer}>`, inline: true });
-    if (finalNote) fields.push({ name: finalStatus === 'approved' ? '📝 ملاحظة' : '📝 سبب الرفض', value: cleanText(finalNote, 400), inline: false });
-    if (!changed) fields.push({ name: 'ℹ️ الحالة', value: 'تمت مراجعة التسليم سابقًا.', inline: false });
-    const cleanEmbed = {
-      title: finalStatus === 'approved' ? '✅ اعتماد تسليم مهمة وإضافة النقاط' : '❌ تم رفض تسليم مهمة',
-      description: `تمت مراجعة التسليم **#${submissionId}** ${finalStatus === 'approved' ? 'واعتماده.' : 'ورفضه.'}`,
-      color: finalStatus === 'approved' ? 0x22c55e : 0xef4444,
-      fields: fields.slice(0, 25),
-      timestamp: new Date().toISOString(),
-      ...(old.footer?.text ? { footer: { text: old.footer.text } } : { footer: { text: 'Borg Management • Task Review' } }),
-      ...(old.thumbnail?.url ? { thumbnail: { url: old.thumbnail.url } } : {}),
-      ...(old.image?.url ? { image: { url: old.image.url } } : {}),
-      ...(old.author ? { author: old.author } : {}),
-    };
+    // Use the exact same detailed decision embed as the website and points log.
+    const notification = buildSubmissionNotifications({ submissionId, sub, reviewerId: finalReviewer, status: finalStatus, taskRows, amount, totalAfter, reason: finalNote });
+    const cleanEmbed = mergeSubmissionDecisionEmbed(notification.logEmbed, old);
     const messageData = { embeds: [cleanEmbed], components: [], allowed_mentions: { parse: [] } };
 
     // Deliver secondary notices without making the review itself depend on them.
     if (changed) {
-      const notification = buildSubmissionNotifications({ submissionId, sub, reviewerId: finalReviewer, status: finalStatus, taskRows, amount, totalAfter, reason: finalNote });
       const sideJobs = [
         require('./_lib/notify.js').notifyReview({ token: BOT_TOKEN, userId: sub.user_id, kind: 'submission', status: finalStatus, id: submissionId, reviewerId: finalReviewer, note: finalNote, fields: finalStatus === 'approved' ? [{ name: '💎 النقاط المضافة', value: `+${fmtPoints(amount)} نقطة`, inline: true }, { name: '📊 رصيدك الحالي', value: `${fmtPoints(totalAfter)} نقطة`, inline: true }] : [] }),
-        discordApi(`/channels/${TASK_APPROVED_CHANNEL_ID}/messages`, { method: 'POST', body: JSON.stringify({ content: notification.announcementContent, allowed_mentions: { parse: [] } }) }),
+        postSubmissionDecisionAnnouncement(sub, notification.announcementContent),
         discordApi(`/channels/${POINTS_LOG_CHANNEL_ID}/messages`, { method: 'POST', body: JSON.stringify({ embeds: [notification.logEmbed], allowed_mentions: { parse: [] } }) }),
       ];
       const sideWork = Promise.allSettled(sideJobs).then((results) => results.forEach((result) => { if (result.status === 'rejected') console.error('[submission review side job]', cleanText(result.reason?.message || result.reason, 180)); }));

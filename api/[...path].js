@@ -3,7 +3,7 @@
 const crypto = require('node:crypto');
 const { Readable } = require('node:stream');
 const { notifyReview } = require('./_lib/notify.js');
-const { buildSubmissionNotifications } = require('../lib/submission-notifications.js');
+const { buildSubmissionNotifications, mergeSubmissionDecisionEmbed } = require('../lib/submission-notifications.js');
 
 const DISCORD_API = 'https://discord.com/api/v10';
 const COOKIE_NAME = 'borg.sid';
@@ -1191,28 +1191,28 @@ async function updateDiscordSubmissionReview(sub, status, reviewer, reason = '',
   try {
     const prior = await discordApi(`/channels/${sub.discord_channel_id}/messages/${sub.discord_message_id}`);
     const source = (prior.embeds || [])[0] || {};
-    const approved = status === 'approved';
-    const rejected = status === 'rejected';
-    const reopened = status === 'reopened';
-    const priorFields = Array.isArray(source.fields) ? source.fields.filter((f) => f.name !== '🛡️ قرار المراجعة') : [];
-    const decisionField = {
-      name: '🛡️ قرار المراجعة',
-      value: `${approved ? '✅ مقبول' : rejected ? '❌ مرفوض' : '🔓 أُعيد فتحه'} بواسطة <@${reviewer}>${reason ? `\n${reopened ? 'ملاحظة' : 'السبب'}: ${cleanText(reason, 300)}` : ''}${approved ? `\nالنقاط المضافة: +${formatPoints(amount)} · الرصيد: ${formatPoints(totalAfter)}` : rejected ? '\nلم تتم إضافة نقاط.' : ''}`.slice(0, 1024),
-      inline: false,
-    };
-    // Discord returns response-only keys (type/provider/proxy URLs) that are not accepted on PATCH.
-    const updated = {
-      title: source.title || `${approved ? '✅' : rejected ? '❌' : '🔓'} تسليم مهمة #${sub.id}`,
-      description: approved ? 'تم قبول التسليم وإضافة نقاطه.' : rejected ? 'تم رفض التسليم ولم تتم إضافة نقاط.' : 'تمت إعادة فتح التسليم ويمكن للعضو التسليم مرة أخرى.',
-      color: approved ? 0x22c55e : rejected ? 0xef4444 : 0xf59e0b,
-      timestamp: new Date().toISOString(),
-      ...(source.url ? { url: source.url } : {}),
-      fields: [...priorFields.map((f) => ({ name: String(f.name || '').slice(0, 256), value: String(f.value || '').slice(0, 1024), inline: Boolean(f.inline) })), decisionField].slice(0, 25),
-      ...(source.footer?.text ? { footer: { text: String(source.footer.text).slice(0, 2048), ...(source.footer.icon_url ? { icon_url: source.footer.icon_url } : {}) } } : {}),
-      ...(source.author?.name ? { author: { name: String(source.author.name).slice(0, 256), ...(source.author.url ? { url: source.author.url } : {}), ...(source.author.icon_url ? { icon_url: source.author.icon_url } : {}) } } : {}),
-      ...(source.thumbnail?.url ? { thumbnail: { url: source.thumbnail.url } } : {}),
-      ...(source.image?.url ? { image: { url: source.image.url } } : {}),
-    };
+    if (status === 'reopened') {
+      const reopened = {
+        title: '🔓 إعادة فتح تسليم مهمة',
+        description: `تمت إعادة فتح التسليم #${Number(sub.id)} ويمكن للعضو تسليمه مرة أخرى.`,
+        color: 0xf59e0b,
+        fields: [
+          { name: '👤 العضو', value: `<@${sub.user_id}>`, inline: true },
+          { name: '🛡️ المسؤول', value: `<@${reviewer}>`, inline: true },
+          ...(reason ? [{ name: '📝 ملاحظة', value: cleanText(reason, 400), inline: false }] : []),
+        ],
+        footer: { text: 'Borg Management • Task Review' },
+        timestamp: new Date().toISOString(),
+      };
+      if (source.thumbnail?.url) reopened.thumbnail = { url: source.thumbnail.url };
+      if (source.image?.url) reopened.image = { url: source.image.url };
+      await discordApi(`/channels/${sub.discord_channel_id}/messages/${sub.discord_message_id}`, { method: 'PATCH', body: JSON.stringify({ embeds: [reopened], components: [], allowed_mentions: { parse: [] } }) });
+      return true;
+    }
+    const taskRows = await sql`SELECT t.id, t.title, COALESCE(st.points_awarded, t.points) AS points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${Number(sub.id)} ORDER BY t.id`;
+    const notification = buildSubmissionNotifications({ submissionId: sub.id, sub, reviewerId: reviewer, status, taskRows, amount, totalAfter, reason });
+    // Match the exact acceptance/rejection embed used by the website and Discord buttons.
+    const updated = mergeSubmissionDecisionEmbed(notification.logEmbed, source);
     await discordApi(`/channels/${sub.discord_channel_id}/messages/${sub.discord_message_id}`, { method: 'PATCH', body: JSON.stringify({ embeds: [updated], components: [], allowed_mentions: { parse: [] } }) });
     return true;
   } catch (error) { console.error('[submission discord message update]', cleanText(error.message, 180)); return false; }

@@ -11,7 +11,7 @@ const multer = require('multer');
 const helmet = require('helmet');
 const { rateLimit } = require('express-rate-limit');
 const { Server } = require('socket.io');
-const { buildSubmissionNotifications } = require('./lib/submission-notifications.js');
+const { buildSubmissionNotifications, mergeSubmissionDecisionEmbed } = require('./lib/submission-notifications.js');
 const {
   Client,
   GatewayIntentBits,
@@ -106,6 +106,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS submission_tasks (
     submission_id INTEGER NOT NULL,
     task_id INTEGER NOT NULL,
+    points_awarded REAL,
     PRIMARY KEY (submission_id, task_id),
     FOREIGN KEY (submission_id) REFERENCES submissions(id) ON DELETE CASCADE,
     FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
@@ -192,6 +193,7 @@ for (const statement of [
   'ALTER TABLE submissions ADD COLUMN discord_channel_id TEXT',
   'ALTER TABLE submissions ADD COLUMN reviewed_by TEXT',
   'ALTER TABLE submissions ADD COLUMN reviewed_at TEXT',
+  'ALTER TABLE submission_tasks ADD COLUMN points_awarded REAL',
   'ALTER TABLE tasks ADD COLUMN points REAL NOT NULL DEFAULT 1',
 ]) {
   try { db.exec(statement); } catch (error) { if (!/duplicate column name/i.test(error.message)) throw error; }
@@ -652,7 +654,8 @@ async function handleSubmissionButton(interaction, submissionId, targetStatus) {
       let changed = false;
       if (['submitted', 'pending'].includes(String(status))) {
         if (targetStatus === 'approved') {
-          const pointsRow = db.prepare('SELECT COALESCE(SUM(t.points), 0) AS amount FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ?').get(submissionId);
+          db.prepare('UPDATE submission_tasks SET points_awarded = (SELECT points FROM tasks WHERE tasks.id = submission_tasks.task_id) WHERE submission_id = ? AND points_awarded IS NULL').run(submissionId);
+          const pointsRow = db.prepare('SELECT COALESCE(SUM(COALESCE(st.points_awarded, t.points)), 0) AS amount FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ?').get(submissionId);
           amount = Math.round(Number(pointsRow?.amount || 0) * 100) / 100;
         }
         const update = db.prepare("UPDATE submissions SET status = ?, reviewed_by = ?, reviewed_at = ? WHERE id = ? AND status IN ('submitted','pending')").run(targetStatus, reviewerId, nowIso(), submissionId);
@@ -675,17 +678,12 @@ async function handleSubmissionButton(interaction, submissionId, targetStatus) {
 
     const result = finalize();
     const original = interaction.message.embeds?.[0];
-    const embed = original ? EmbedBuilder.from(original) : new EmbedBuilder().setTitle(`تسليم مهمة #${submissionId}`);
-    const approved = result.status === 'approved';
-    const existingFields = original?.fields || [];
-    const fields = existingFields.filter((field) => field.name !== '🛡️ قرار المراجعة');
-    fields.push({ name: '🛡️ قرار المراجعة', value: `${approved ? '✅ مقبول' : '❌ مرفوض'} بواسطة <@${result.reviewer}>${approved ? `\nالنقاط المضافة: +${fmtPointsMsg(result.amount)} · الرصيد: ${fmtPointsMsg(result.totalAfter)}` : '\nلم تتم إضافة نقاط.'}${!result.changed ? '\nتمت مراجعة التسليم سابقًا.' : ''}`, inline: false });
-    embed.setDescription(approved ? 'تم قبول التسليم وإضافة نقاطه.' : 'تم رفض التسليم ولم تتم إضافة نقاط.').setColor(approved ? 0x22c55e : 0xef4444).setTimestamp(new Date()).setFields(fields.slice(0, 25));
-    await interaction.message.edit({ embeds: [embed], components: [], allowedMentions: { parse: [] } });
+    const taskRows = db.prepare('SELECT t.id, t.title, COALESCE(st.points_awarded, t.points) AS points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ? ORDER BY t.id').all(submissionId);
+    const notification = buildSubmissionNotifications({ submissionId, sub: result.current, reviewerId: result.reviewer || reviewerId, status: result.status, taskRows, amount: result.amount, totalAfter: result.totalAfter });
+    const decisionEmbed = mergeSubmissionDecisionEmbed(notification.logEmbed, original);
+    await interaction.message.edit({ embeds: [EmbedBuilder.from(decisionEmbed)], components: [], allowedMentions: { parse: [] } });
 
     if (result.changed) {
-      const taskRows = db.prepare('SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ? ORDER BY t.id').all(submissionId);
-      const notification = buildSubmissionNotifications({ submissionId, sub: result.current, reviewerId: result.reviewer || reviewerId, status: result.status, taskRows, amount: result.amount, totalAfter: result.totalAfter });
       const decisionChannel = await client.channels.fetch(TASK_APPROVED_CHANNEL_ID).catch(() => null);
       if (decisionChannel?.isTextBased() && typeof decisionChannel.send === 'function') {
         await decisionChannel.send({ content: notification.announcementContent, allowedMentions: { parse: [] } }).catch((error) => console.warn('[submission decision announcement]', error.message));

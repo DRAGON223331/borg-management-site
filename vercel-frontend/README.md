@@ -29,3 +29,8 @@ The project includes explicit API wrappers for nested task, chat, submission-rev
 - أضف متغير `DISCORD_PUBLIC_KEY` إلى Vercel من **General Information → Public Key** في Discord Developer Portal.
 - اضبط **Interactions Endpoint URL** إلى `https://رابط-موقعك/api/discord-interactions` بالدومين الفعلي المنشور، ثم أعد النشر.
 - بعد النشر سجّل الخروج من الموقع ثم ادخل مرة أخرى لتحديث صلاحيات رتب الإدارة. لازم يكون متغير `DISCORD_BOT_TOKEN` مضبوطًا، والبوت عنده صلاحية عرض وإرسال الرسائل وتعديل رسائله في روم الإجازات.
+
+## تحديث v37 — توحيد رسائل مراجعة المهمات
+- تمت مزامنة نسخة `vercel-frontend` مع مسارات الـAPI الرئيسية؛ قبول/رفض الموقع وأزرار ديسكورد يستخدمون الآن قالبًا مشتركًا واحدًا لرسالة سجل النقاط.
+- قالب القرار يعرض العضو، النقاط المضافة أو عدم الإضافة، الرصيد بعد القرار، المسؤول، تفاصيل المهمات، وسبب الرفض إن وُجد.
+- عند استخدام اتصال Discord Gateway، يجب إعادة نشر/تشغيل `bot-worker/index.js` أو `server.js` المحدث على الاستضافة التي تشغّل البوت؛ نشر Vercel وحده لا يحدّث عملية بوت منفصلة.

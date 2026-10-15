@@ -47,10 +47,20 @@
       <nav class="top-nav" aria-label="التنقل الرئيسي">
         <button class="nav-tab active" data-page="overview"><span>⌂</span> الرئيسية</button>
         <button class="nav-tab" data-page="tasks"><span>✓</span> المهمات</button>
+        <button class="nav-tab" data-page="leaderboard"><span>★</span> ليدر بورد</button>
+        <button class="nav-tab" data-page="personal"><span>☺</span> شخصي</button>
         <button class="nav-tab" data-page="staff-chat"><span>☷</span> شات الاستاف</button>
         <button class="nav-tab manager-only hidden" data-page="management-chat"><span>♧</span> شات المسؤولين</button>
+        <button class="nav-tab manager-only hidden" data-page="audit-log"><span>≣</span> سجل السيرفر</button>
       </nav>
       <div class="user-tools">
+        <div class="notif-wrap manager-only hidden">
+          <button type="button" id="notif-btn" class="icon-button notif-btn" title="الإشعارات" aria-label="الإشعارات" aria-haspopup="true" aria-expanded="false">🔔<span id="notif-badge" class="notif-badge hidden">0</span></button>
+          <div id="notif-panel" class="notif-panel hidden" role="dialog" aria-label="الإشعارات">
+            <div class="notif-head"><b>الإشعارات</b><button type="button" id="notif-mark-read" class="text-button">تحديد الكل كمقروء</button></div>
+            <div id="notif-list" class="notif-list"><div class="loading-state">جاري التحميل...</div></div>
+          </div>
+        </div>
         <div class="connection-pill" id="bot-status"><span class="status-dot"></span><span>جاري فحص البوت</span></div>
         <div class="profile-chip">
           <img id="top-avatar" alt="صورة الحساب" src="">
@@ -90,7 +100,7 @@
             <article class="stat-card"><div class="stat-icon blue">↗</div><div><span>إنجازاتك المسجلة</span><strong id="stat-done">0</strong></div><div class="stat-foot">مهمات عليها تسليم منك</div></article>
           </div>
 
-          <section id="admin-overview-section" class="admin-overview-section">
+          <section id="admin-overview-section" class="admin-overview-section manager-only hidden">
             <div class="section-title-row"><div><span class="tiny-label">MANAGEMENT ANALYTICS</span><h2>إحصائيات المسؤولين</h2><p class="muted small-copy">اضغط على أي مسؤول لفتح ملفه الكامل وإحصائياته.</p></div></div>
             <div id="admin-overview-cards" class="admin-overview-cards"><div class="loading-state">جاري تحميل إحصائيات الإدارة...</div></div>
           </section>
@@ -160,6 +170,7 @@
               <select id="new-task-required" aria-label="نوع المهمة"><option value="1">إجبارية</option><option value="0">اختيارية</option></select>
               <input id="new-task-points" type="number" min="0" max="100000" step="0.01" value="1" aria-label="نقاط المهمة" title="نقاط المهمة" style="max-width:110px"><button id="queue-task-btn" class="secondary-button">+ إضافة للقائمة</button>
             </div>
+            <div class="task-deadline-setting"><label for="new-task-deadline">⏰ موعد انتهاء المهمة <span class="muted">(اختياري)</span></label><input id="new-task-deadline" type="datetime-local" aria-label="موعد انتهاء المهمة"><small>سيتم تذكير الأعضاء بالخاص قبل الموعد خلال 24 ساعة، وستُغلق المهمة تلقائيًا عند انتهاء المهلة.</small></div>
             <div id="task-queue" class="task-queue"><div class="empty-inline">لسه مفيش مهمات في قائمة النشر.</div></div>
             <div class="manager-actions"><span id="queue-count" class="muted small-copy">0 مهمات جاهزة للنشر</span><button id="publish-tasks-btn" class="primary-button" disabled>نشر المهمات في ديسكورد ↗</button></div>
             <div class="task-create-row" style="margin-top:14px"><input id="manual-points-user" type="text" placeholder="Discord ID للعضو"><input id="manual-points-amount" type="number" step="0.01" placeholder="+/- النقاط"><input id="manual-points-reason" type="text" maxlength="300" placeholder="سبب التعديل"><button id="manual-points-btn" class="secondary-button" type="button">إضافة/خصم نقاط</button></div>
@@ -191,11 +202,66 @@
             <div class="section-title-row"><div><span class="tiny-label">SUBMISSION HISTORY</span><h2 id="submissions-heading">آخر تسليماتي</h2></div><button id="refresh-submissions-btn" class="text-button">تحديث ↻</button></div>
             <div id="submissions-list" class="submissions-list"><div class="loading-state">جاري تحميل سجل التسليم...</div></div>
           </section>
+          <section id="task-review-manager" class="manager-task-box manager-only hidden">
+            <div class="section-title-row"><div><span class="tiny-label">TASK PERFORMANCE</span><h2>إحصائيات المهمات والتسليمات</h2></div><button id="task-insights-refresh" class="text-button" type="button">تحديث الإحصائيات ↻</button></div>
+            <div id="task-stats-overview" class="task-stats-overview"><div class="loading-state">جاري حساب الإحصائيات...</div></div>
+            <div class="review-insights-grid">
+              <div class="review-insight-panel"><h3>🏆 الأكثر نشاطًا</h3><div id="task-most-active" class="review-insight-list"><div class="loading-state">جاري التحميل...</div></div></div>
+              <div class="review-insight-panel"><h3>💤 لم يسلّموا منذ فترة</h3><p class="muted small-copy">يظهر هنا من لم يسلّم منذ 14 يومًا أو لم يسلّم أي مهمة من قبل.</p><div id="task-inactive-members" class="review-insight-list"><div class="loading-state">جاري التحميل...</div></div></div>
+            </div>
+            <div class="section-title-row submission-audit-heading"><div><span class="tiny-label">ADMIN DECISIONS</span><h2>سجل قرارات الأدمن</h2><p class="muted small-copy">من وافق أو رفض، والعضو، والسبب، ووقت القرار.</p></div><div class="audit-export-actions"><button id="submission-audit-export" class="secondary-button" type="button">تصدير CSV ↓</button><button id="submission-audit-refresh" class="text-button" type="button">تحديث السجل ↻</button></div></div>
+            <div id="submission-audit-list" class="submission-audit-list"><div class="loading-state">جاري تحميل سجل القرارات...</div></div>
+          </section>
         </section>
 
         <section id="page-staff-profile" class="page staff-profile-page">
           <div class="staff-profile-toolbar"><button id="staff-profile-back" type="button" class="secondary-button">→ الرجوع للرئيسية</button><span class="tiny-label">FULL STAFF PROFILE</span></div>
           <div id="staff-profile-content"><div class="loading-state">اختار عضوًا من قائمة الاستاف لفتح ملفه.</div></div>
+        </section>
+
+        <section id="page-leaderboard" class="page">
+          <div class="page-heading">
+            <div><div class="eyebrow">LEADERBOARD</div><h1>ليدر بورد</h1><p>ترتيب الاستاف حسب النقاط والنشاط. اضغط على أي عضو لفتح ملفه.</p></div>
+            <div class="page-heading-badge"><span class="status-dot"></span> بيتحدث تلقائيًا</div>
+          </div>
+          <div class="task-toolbar"><div class="filter-tabs" id="lb-tabs">
+            <button class="filter-tab active" data-lb="points" type="button">⭐ النقاط</button>
+            <button class="filter-tab" data-lb="messages" type="button">💬 إجمالي الرسائل</button>
+            <button class="filter-tab" data-lb="today" type="button">🔥 رسائل اليوم</button>
+            <button class="filter-tab" data-lb="approved" type="button">✓ التسليمات المقبولة</button>
+          </div></div>
+          <div id="lb-podium" class="lb-podium"></div>
+          <div id="lb-list" class="lb-list"><div class="loading-state">جاري تحميل الترتيب...</div></div>
+        </section>
+
+        <section id="page-audit-log" class="page">
+          <div class="page-heading">
+            <div><div class="eyebrow">MAIN SERVER AUDIT LOG</div><h1>سجل السيرفر</h1><p>كل الإجراءات الإدارية في السيرفر الأساسي من سجل ديسكورد: حظر، طرد، رتب، رومات، حذف رسائل وغيرها.</p></div>
+            <div class="chat-page-icon manager-chat-icon">≣</div>
+          </div>
+          <div class="private-note"><span>🔒</span><div><b>للمسؤولين فقط</b><p>البيانات بتتجاب مباشرة من Discord Audit Log، وديسكورد بيحتفظ بآخر 45 يوم بس.</p></div></div>
+          <div class="audit-toolbar">
+            <select id="audit-action" aria-label="نوع الإجراء">
+              <option value="">كل الإجراءات</option>
+              <option value="22">حظر عضو</option><option value="23">فك حظر</option><option value="20">طرد عضو</option>
+              <option value="24">تعديل عضو (تايم أوت / اسم)</option><option value="25">تعديل رتب عضو</option>
+              <option value="72">حذف رسالة</option><option value="73">حذف رسائل جماعي</option>
+              <option value="10">إنشاء روم</option><option value="11">تعديل روم</option><option value="12">حذف روم</option>
+              <option value="30">إنشاء رتبة</option><option value="31">تعديل رتبة</option><option value="32">حذف رتبة</option>
+              <option value="40">إنشاء دعوة</option><option value="28">إضافة بوت</option><option value="1">تعديل إعدادات السيرفر</option>
+            </select>
+            <input id="audit-user" type="text" inputmode="numeric" maxlength="22" placeholder="Discord ID للمنفّذ (اختياري)" aria-label="Discord ID للمنفّذ">
+            <input id="audit-search" type="search" placeholder="بحث في النتائج المعروضة..." aria-label="بحث في النتائج">
+            <button id="audit-apply" class="secondary-button" type="button">تطبيق</button>
+            <button id="audit-refresh" class="text-button" type="button">تحديث ↻</button>
+          </div>
+          <div id="audit-list" class="audit-list"><div class="loading-state">جاري تحميل سجل السيرفر...</div></div>
+          <div class="manager-actions"><button id="audit-more" class="secondary-button hidden" type="button">عرض المزيد ↓</button></div>
+        </section>
+
+        <section id="page-personal" class="page staff-profile-page">
+          <div class="staff-profile-toolbar"><span class="tiny-label">MY PERSONAL STATS</span><button id="personal-refresh-btn" type="button" class="text-button">تحديث ↻</button></div>
+          <div id="personal-content"><div class="loading-state">جاري تحميل إحصائياتك...</div></div>
         </section>
 
         <section id="page-staff-chat" class="page chat-page">
