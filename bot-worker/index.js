@@ -2,7 +2,7 @@
 // يرد على رسالة «نقاطي» (أو mypoints) بدون بريفكس. لازم يشتغل 24/7 على استضافة Node عادية
 // (Railway / Render / VPS ...) لأن Vercel Functions مش بتحافظ على اتصال Gateway.
 // المتغيرات المطلوبة: DISCORD_BOT_TOKEN و DATABASE_URL (نفس قاعدة بيانات الموقع).
-const { Client, GatewayIntentBits, Partials, Events, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, Events, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
 const { neon } = require('@neondatabase/serverless');
 
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
@@ -12,6 +12,13 @@ if (!DB_URL) throw new Error('DATABASE_URL غير مضبوط.');
 const sql = neon(DB_URL);
 
 const TRIGGER = /^(?:نقاطي|نقاطى|mypoints|my points)$/i;
+const REVIEW_CHANNEL_ID = process.env.SUBMISSION_REVIEW_CHANNEL_ID || '1556945732957765722';
+const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
+const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID || '883871561474539630';
+const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
+const MANAGEMENT_MAIN_ROLE_ID = process.env.MANAGEMENT_MAIN_ROLE_ID || '1538623033806168135';
+const MANAGEMENT_STAFF_ROLE_ID = process.env.MANAGEMENT_STAFF_ROLE_ID || '1559628523809804288';
+const MANAGER_IDS = new Set((process.env.MANAGER_IDS || '1286035404323164172,1525203473262706821,848304089057460254,1475483362536980552').split(',').map((x) => x.trim()).filter(Boolean));
 const cooldown = new Map();
 const normalize = (text) => String(text || '').replace(/[\u064B-\u065F\u0670\u0640]/g, '').replace(/[!؟?.،,\s]+$/g, '').replace(/\s+/g, ' ').trim();
 const fmt = (n) => (Math.round(Number(n || 0) * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 });
@@ -20,6 +27,144 @@ const clean = (v, max) => String(v ?? '').replace(/[\u0000-\u001F\u007F]/g, '').
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
   partials: [Partials.Channel],
+});
+
+function isReviewManager(interaction) {
+  const member = interaction.member;
+  const userId = String(interaction.user?.id || '');
+  if (MANAGER_IDS.has(userId)) return true;
+  if (member?.permissions?.has?.('Administrator')) return true;
+  const roleIds = Array.isArray(member?.roles) ? member.roles.map((role) => typeof role === 'string' ? role : role.id) : [];
+  return roleIds.includes(MANAGEMENT_MAIN_ROLE_ID) || roleIds.includes(MANAGEMENT_STAFF_ROLE_ID);
+}
+async function isReviewManagerAnywhere(interaction) {
+  if (isReviewManager(interaction)) return true;
+  const userId = String(interaction.user?.id || '');
+  for (const guildId of [MAIN_GUILD_ID, STAFF_GUILD_ID]) {
+    try {
+      const guild = await client.guilds.fetch(guildId);
+      const member = await guild.members.fetch(userId);
+      if (member.permissions.has('Administrator') || member.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID) || member.roles.cache.has(MANAGEMENT_STAFF_ROLE_ID)) return true;
+    } catch { /* البوت قد لا يكون عضوًا في السيرفر أو لا يملك صلاحية جلب الأعضاء */ }
+  }
+  return false;
+}
+async function getSubmissionMessage(submission) {
+  const channelId = String(submission.discord_channel_id || REVIEW_CHANNEL_ID);
+  const messageId = String(submission.discord_message_id || '');
+  if (!messageId) throw new Error('رسالة ديسكورد غير مرتبطة بالتسليم.');
+  const channel = await client.channels.fetch(channelId);
+  if (!channel || !channel.isTextBased() || !channel.messages) throw new Error('تعذر الوصول إلى روم مراجعة التسليمات.');
+  return channel.messages.fetch(messageId);
+}
+async function updateSubmissionMessage(message, submission, status, reviewerId, reason, amount, totalAfter) {
+  const prior = message.embeds?.[0];
+  const embed = prior ? EmbedBuilder.from(prior) : new EmbedBuilder().setTitle(`تسليم مهمة #${submission.id}`);
+  const approved = status === 'approved';
+  const fields = (prior?.fields || []).filter((field) => field.name !== '🛡️ قرار المراجعة');
+  fields.push({
+    name: '🛡️ قرار المراجعة',
+    value: `${approved ? '✅ مقبول' : '❌ مرفوض'} بواسطة <@${reviewerId}>${reason ? `\nالسبب: ${clean(reason, 400)}` : ''}${approved ? `\nالنقاط المضافة: +${fmt(amount)} · الرصيد: ${fmt(totalAfter)}` : ''}`.slice(0, 1024),
+    inline: false,
+  });
+  embed.setTitle(prior?.title || `${approved ? '✅' : '❌'} تسليم مهمة #${submission.id}`)
+    .setDescription(approved ? 'تم قبول التسليم وإضافة نقاطه.' : 'تم رفض التسليم ولم تتم إضافة نقاط.')
+    .setColor(approved ? 0x22c55e : 0xef4444)
+    .setTimestamp(new Date())
+    .setFields(fields.slice(0, 25));
+  await message.edit({ embeds: [embed], components: [], allowedMentions: { parse: [] } });
+}
+async function processSubmissionReview(interaction, submissionId, status, reason = '') {
+  await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS discord_message_id TEXT`;
+  await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS discord_channel_id TEXT`;
+  await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS reviewed_by TEXT`;
+  await sql`ALTER TABLE submissions ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ`;
+  await sql`CREATE TABLE IF NOT EXISTS submission_review_audit (id BIGSERIAL PRIMARY KEY, submission_id BIGINT NOT NULL, member_id TEXT NOT NULL, member_name TEXT NOT NULL, decision TEXT NOT NULL CHECK (decision IN ('approved','rejected','reopened')), reviewer_id TEXT NOT NULL, reviewer_name TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
+  const rows = await sql`SELECT * FROM submissions WHERE id = ${submissionId} LIMIT 1`;
+  if (!rows.length) throw new Error('التسليم غير موجود في قاعدة البيانات.');
+  const sub = rows[0];
+  if (String(sub.discord_channel_id || REVIEW_CHANNEL_ID) !== REVIEW_CHANNEL_ID) throw new Error('التسليم مرتبط بروم مراجعة مختلفة.');
+  if (!['pending', 'submitted'].includes(String(sub.status))) throw new Error(`تمت مراجعة التسليم مسبقًا؛ حالته الحالية: ${sub.status}.`);
+
+  const message = await getSubmissionMessage(sub);
+  let amount = 0;
+  if (status === 'approved') {
+    const taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${submissionId}`;
+    amount = Math.round(taskRows.reduce((sum, task) => sum + Number(task.points || 0), 0) * 100) / 100;
+  }
+  const reviewerId = String(interaction.user.id);
+  const reviewerName = clean(interaction.user.globalName || interaction.user.username || reviewerId, 120);
+  const updated = await sql`UPDATE submissions SET status = ${status}, reviewed_by = ${reviewerId}, reviewed_at = NOW() WHERE id = ${submissionId} AND status IN ('pending','submitted') RETURNING *`;
+  if (!updated.length) throw new Error('تمت مراجعة التسليم من مسؤول آخر بالفعل.');
+  await sql`INSERT INTO submission_review_audit(submission_id, member_id, member_name, decision, reviewer_id, reviewer_name, reason, created_at) VALUES (${submissionId}, ${sub.user_id}, ${sub.username}, ${status}, ${reviewerId}, ${reviewerName}, ${reason}, NOW())`;
+  if (status === 'approved' && amount > 0) {
+    await sql`INSERT INTO staff_points(user_id, username, amount, reason, actor_id, actor_name, source, submission_id, created_at) VALUES (${sub.user_id}, ${sub.username}, ${amount}, ${`اعتماد تسليم #${submissionId}`}, ${reviewerId}, ${reviewerName}, 'task', ${submissionId}, NOW())`;
+  }
+  const totals = await sql`SELECT COALESCE(SUM(amount),0) AS total FROM staff_points WHERE user_id = ${sub.user_id}`;
+  const totalAfter = Number(totals[0]?.total || 0);
+  await updateSubmissionMessage(message, sub, status, reviewerId, reason, amount, totalAfter);
+
+  try {
+    const logChannel = await client.channels.fetch(POINTS_LOG_CHANNEL_ID);
+    if (logChannel?.isTextBased()) {
+      const embed = new EmbedBuilder()
+        .setTitle(status === 'approved' ? '✅ اعتماد تسليم مهمة' : '❌ رفض تسليم مهمة')
+        .setDescription(`التسليم **#${submissionId}** — ${status === 'approved' ? `تمت إضافة **+${fmt(amount)} نقطة**.` : 'لم تتم إضافة نقاط.'}`)
+        .setColor(status === 'approved' ? 0x22c55e : 0xef4444)
+        .addFields({ name: '👤 العضو', value: `<@${sub.user_id}>`, inline: true }, { name: '🛡️ المراجع', value: `<@${reviewerId}>`, inline: true }, ...(reason ? [{ name: '📝 السبب', value: clean(reason, 1000), inline: false }] : []))
+        .setTimestamp(new Date());
+      await logChannel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+    }
+  } catch (error) { console.error('[review points log]', error.message); }
+  try {
+    const user = await client.users.fetch(String(sub.user_id));
+    const dm = new EmbedBuilder().setTitle(status === 'approved' ? '✅ تم قبول تسليم المهمة' : '❌ تم رفض تسليم المهمة')
+      .setDescription(status === 'approved' ? `تم قبول التسليم #${submissionId} وإضافة **+${fmt(amount)} نقطة**. رصيدك الحالي: **${fmt(totalAfter)}** نقطة.` : `تم رفض التسليم #${submissionId}.${reason ? `\nالسبب: ${clean(reason, 400)}` : ''}`)
+      .setColor(status === 'approved' ? 0x22c55e : 0xef4444);
+    await user.send({ embeds: [dm] });
+  } catch (error) { console.error('[review DM]', error.message); }
+  return { status, amount, totalAfter };
+}
+client.on(Events.InteractionCreate, async (interaction) => {
+  const customId = String(interaction.customId || '');
+  const buttonMatch = customId.match(/^submission:(approve|reject):(\d+)$/);
+  const modalMatch = customId.match(/^submission:rejectmodal:(\d+)$/);
+  if (!buttonMatch && !modalMatch) return;
+  try {
+    const fromModal = Boolean(modalMatch);
+    const submissionId = Number((buttonMatch || modalMatch)[2]);
+    if (interaction.channelId && interaction.channelId !== REVIEW_CHANNEL_ID) {
+      const reply = { content: 'أزرار مراجعة التسليمات شغالة في روم مراجعة المهمات فقط.', ephemeral: true };
+      if (interaction.replied || interaction.deferred) return interaction.followUp(reply);
+      return interaction.reply(reply);
+    }
+    if (!(await isReviewManagerAnywhere(interaction))) {
+      const reply = { content: 'مراجعة تسليمات المهمات للمسؤولين فقط.', ephemeral: true };
+      if (interaction.replied || interaction.deferred) return interaction.followUp(reply);
+      return interaction.reply(reply);
+    }
+    if (buttonMatch && buttonMatch[1] === 'reject') {
+      const modal = new ModalBuilder().setCustomId(`submission:rejectmodal:${submissionId}`).setTitle(`رفض التسليم #${submissionId}`)
+        .addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('reason').setLabel('سبب الرفض (اختياري)').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(400).setPlaceholder('اكتب سبب الرفض هنا')));
+      return interaction.showModal(modal);
+    }
+    if (fromModal) await interaction.deferReply({ ephemeral: true });
+    else await interaction.deferUpdate();
+    const reason = fromModal ? clean(interaction.fields.getTextInputValue('reason') || '', 400) : '';
+    const result = await processSubmissionReview(interaction, submissionId, fromModal ? 'rejected' : 'approved', reason);
+    const success = result.status === 'approved'
+      ? `تم قبول التسليم #${submissionId} وإضافة ${fmt(result.amount)} نقطة. الرصيد الحالي: ${fmt(result.totalAfter)}.`
+      : `تم رفض التسليم #${submissionId}${reason ? `؛ السبب: ${reason}` : ''}.`;
+    if (fromModal) await interaction.editReply({ content: success });
+  } catch (error) {
+    console.error('[submission review interactionCreate]', error.stack || error.message || error);
+    const message = `تعذر تنفيذ المراجعة: ${clean(error.message || 'خطأ غير معروف', 300)}`;
+    try {
+      if (interaction.deferred && interaction.isModalSubmit()) await interaction.editReply({ content: message });
+      else if (interaction.deferred || interaction.replied) await interaction.followUp({ content: message, ephemeral: true });
+      else await interaction.reply({ content: message, ephemeral: true });
+    } catch (replyError) { console.error('[submission review reply]', replyError.message); }
+  }
 });
 
 client.once(Events.ClientReady, () => console.log(`[points-worker] connected as ${client.user.tag}`));

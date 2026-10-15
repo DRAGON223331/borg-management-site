@@ -1892,10 +1892,10 @@ async function handleApi(parts, req, res) {
     const rows = await sql`SELECT * FROM submissions WHERE id = ${id} LIMIT 1`;
     if (!rows.length) return sendError(res, 404, 'التسليم غير موجود.');
     const sub = rows[0];
-    if (sub.status !== 'pending') return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
+    if (!['pending', 'submitted'].includes(String(sub.status))) return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
     if (parts[2] === 'reject') {
       const reason = cleanText(req.body?.reason, 300);
-      const rejected = await sql`UPDATE submissions SET status = 'rejected', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id`;
+      const rejected = await sql`UPDATE submissions SET status = 'rejected', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status IN ('pending','submitted') RETURNING id`;
       if (!rejected.length) return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
       await sql`INSERT INTO submission_review_audit(submission_id, member_id, member_name, decision, reviewer_id, reviewer_name, reason, created_at) VALUES (${id}, ${sub.user_id}, ${sub.username}, 'rejected', ${user.id}, ${user.username}, ${reason}, NOW())`;
       const dmPromise = notifyReview({ token: BOT_TOKEN, userId: sub.user_id, kind: 'submission', status: 'rejected', id, reviewerId: user.id, note: reason });
@@ -1919,7 +1919,7 @@ async function handleApi(parts, req, res) {
     }
     const taskRows = await sql`SELECT t.id, t.title, t.points FROM submission_tasks st JOIN tasks t ON t.id = st.task_id WHERE st.submission_id = ${id}`;
     const amount = Math.round(taskRows.reduce((sum, t) => sum + Number(t.points || 0), 0) * 100) / 100;
-    const marked = await sql`UPDATE submissions SET status = 'approved', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status = 'pending' RETURNING id`;
+    const marked = await sql`UPDATE submissions SET status = 'approved', reviewed_by = ${user.id}, reviewed_at = NOW() WHERE id = ${id} AND status IN ('pending','submitted') RETURNING id`;
     if (!marked.length) return sendError(res, 409, 'تمت مراجعة التسليم بالفعل.');
     await sql`INSERT INTO submission_review_audit(submission_id, member_id, member_name, decision, reviewer_id, reviewer_name, reason, created_at) VALUES (${id}, ${sub.user_id}, ${sub.username}, 'approved', ${user.id}, ${user.username}, ${cleanText(req.body?.reason || req.body?.note, 300)}, NOW())`;
     if (amount > 0) await sql`INSERT INTO staff_points(user_id, username, amount, reason, actor_id, actor_name, source, submission_id, created_at) VALUES (${sub.user_id}, ${sub.username}, ${amount}, ${`اعتماد تسليم #${id}`}, ${user.id}, ${user.username}, 'task', ${id}, NOW())`;

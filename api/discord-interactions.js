@@ -196,7 +196,7 @@ function reviewAuthorized(interaction) {
   return MANAGER_IDS.has(reviewerId) || isAdministrator(interaction.member?.permissions) || roles.includes(MANAGEMENT_MAIN_ROLE_ID) || roles.includes(MANAGEMENT_STAFF_ROLE_ID);
 }
 async function handleSubmissionReview(interaction, res, { action, submissionId, isModal }) {
-  if (String(interaction.channel_id || '') !== SUBMISSION_REVIEW_CHANNEL_ID) return send(res, { type: 4, data: { content: 'أزرار مراجعة التسليمات شغالة في روم مراجعة المهمات فقط.', flags: 64 } });
+  if (interaction.channel_id && String(interaction.channel_id) !== SUBMISSION_REVIEW_CHANNEL_ID) return send(res, { type: 4, data: { content: 'أزرار مراجعة التسليمات شغالة في روم مراجعة المهمات فقط.', flags: 64 } });
   const reviewerId = String(interaction.member?.user?.id || interaction.user?.id || '');
   let authorized = reviewAuthorized(interaction);
   if (!authorized && BOT_TOKEN) {
@@ -224,16 +224,16 @@ async function handleSubmissionReview(interaction, res, { action, submissionId, 
     const sub = found[0];
     const targetMessageId = messageId || String(sub.discord_message_id || '');
     targetMessageIdForErrors = targetMessageId;
-    if (!targetMessageId || (messageId && String(sub.discord_message_id || '') !== messageId) || String(sub.discord_channel_id || '') !== String(interaction.channel_id || '')) throw new Error('رسالة ديسكورد لا تطابق التسليم المسجل.');
+    if (!targetMessageId || (messageId && String(sub.discord_message_id || '') !== messageId) || String(sub.discord_channel_id || '') !== SUBMISSION_REVIEW_CHANNEL_ID || (interaction.channel_id && String(sub.discord_channel_id || '') !== String(interaction.channel_id))) throw new Error('رسالة ديسكورد لا تطابق التسليم المسجل.');
     const sourceMessage = interaction.message || await discordApi(`/channels/${sub.discord_channel_id}/messages/${targetMessageId}`);
-    if (sub.status !== 'pending') {
+    if (!['pending', 'submitted'].includes(String(sub.status))) {
       const oldEmbed = sourceMessage?.embeds?.[0] || {};
       const doneEmbed = { title: oldEmbed.title || `مراجعة التسليم #${submissionId}`, description: `تمت مراجعة التسليم مسبقًا. الحالة الحالية: ${sub.status === 'approved' ? 'مقبول ✅' : 'مرفوض ❌'}.`, color: sub.status === 'approved' ? 0x22c55e : 0xef4444, timestamp: new Date().toISOString() };
       await discordApi(`/channels/${SUBMISSION_REVIEW_CHANNEL_ID}/messages/${targetMessageId}`, { method: 'PATCH', body: JSON.stringify({ embeds: [doneEmbed], components: [], allowed_mentions: { parse: [] } }) });
       return;
     }
     const finalStatus = action === 'approve' ? 'approved' : 'rejected';
-    const updated = await sql`UPDATE submissions SET status = ${finalStatus}, reviewed_by = ${reviewerId}, reviewed_at = NOW() WHERE id = ${submissionId} AND status = 'pending' RETURNING *`;
+    const updated = await sql`UPDATE submissions SET status = ${finalStatus}, reviewed_by = ${reviewerId}, reviewed_at = NOW() WHERE id = ${submissionId} AND status IN ('pending','submitted') RETURNING *`;
     if (!updated.length) throw new Error('تمت مراجعة التسليم من مسؤول آخر بالفعل.');
     await sql`INSERT INTO submission_review_audit(submission_id, member_id, member_name, decision, reviewer_id, reviewer_name, reason, created_at) VALUES (${submissionId}, ${sub.user_id}, ${sub.username}, ${finalStatus}, ${reviewerId}, ${String(interaction.member?.user?.global_name || interaction.member?.user?.username || interaction.user?.username || reviewerId)}, ${note}, NOW())`;
     let amount = 0; let totalAfter = 0; let taskRows = [];
@@ -261,7 +261,7 @@ async function handleSubmissionReview(interaction, res, { action, submissionId, 
     } catch (error) { console.error('[submission review log]', cleanText(error.message, 160)); }
   } catch (error) {
     console.error('[submission review interaction]', cleanText(error?.message || error, 200));
-    if (targetMessageIdForErrors) { try { await discordApi(`/channels/${SUBMISSION_REVIEW_CHANNEL_ID}/messages/${targetMessageIdForErrors}`, { method: 'PATCH', body: JSON.stringify({ content: `⚠️ تعذر إنهاء مراجعة التسليم #${submissionId}: ${cleanText(error?.message || error, 160)}`, components: [], allowed_mentions: { parse: [] } }) }); } catch { /* no further action */ } }
+    if (targetMessageIdForErrors) { try { await discordApi(`/channels/${SUBMISSION_REVIEW_CHANNEL_ID}/messages/${targetMessageIdForErrors}`, { method: 'PATCH', body: JSON.stringify({ content: `⚠️ تعذر إنهاء مراجعة التسليم #${submissionId}: ${cleanText(error?.message || error, 160)} — يمكن إعادة المحاولة بعد إصلاح السبب.`, allowed_mentions: { parse: [] } }) }); } catch (patchError) { console.error('[submission review error notice]', cleanText(patchError?.message || patchError, 180)); } }
   }
 }
 
