@@ -336,15 +336,24 @@ async function handleSubmissionReview(interaction, res, { action, submissionId, 
       reply({ type: 4, data: { content: 'حالة التسليم الحالية غير قابلة للمراجعة. حدّث الموقع وتحقق من السجل.', flags: 64 } });
       return;
     }
+    // Keep the original evidence/task fields, but use the same review details and wording
+    // as the website's updateDiscordSubmissionReview() path.
     const fields = Array.isArray(old.fields) ? old.fields.filter((field) => field.name !== '🛡️ قرار المراجعة') : [];
-    fields.push({ name: '🛡️ قرار المراجعة', value: `${finalStatus === 'approved' ? '✅ مقبول' : '❌ مرفوض'} بواسطة <@${finalReviewer}>${finalNote ? `\nالسبب: ${finalNote}` : ''}${finalStatus === 'approved' ? `\nالنقاط المضافة: +${fmtPoints(amount)} · الرصيد: ${fmtPoints(totalAfter)}` : '\nلم تتم إضافة نقاط.'}${!changed ? '\nتمت مراجعة التسليم سابقًا.' : ''}`.slice(0, 1024), inline: false });
+    const taskDetails = taskRows.map((task) => `• ${cleanText(task.title, 180)} — ${fmtPoints(task.points)} نقطة`).join('\n').slice(0, 900) || 'لا توجد مهمات مرتبطة بالتسليم.';
+    fields.push({ name: '📋 تفاصيل المهمات والنقاط', value: taskDetails, inline: false });
+    fields.push({ name: '👤 العضو', value: `<@${sub.user_id}>`, inline: true });
+    if (finalStatus === 'approved') fields.push({ name: '💎 النقاط المضافة', value: `**+${fmtPoints(amount)} نقطة**`, inline: true });
+    fields.push({ name: '📊 الرصيد بعد المراجعة', value: `**${fmtPoints(totalAfter)} نقطة**`, inline: true });
+    fields.push({ name: '🛡️ المسؤول', value: `<@${finalReviewer}>`, inline: true });
+    if (finalNote) fields.push({ name: finalStatus === 'approved' ? '📝 ملاحظة' : '📝 سبب الرفض', value: cleanText(finalNote, 400), inline: false });
+    if (!changed) fields.push({ name: 'ℹ️ الحالة', value: 'تمت مراجعة التسليم سابقًا.', inline: false });
     const cleanEmbed = {
-      title: old.title || `${finalStatus === 'approved' ? '✅' : '❌'} تسليم مهمة #${submissionId}`,
-      description: finalStatus === 'approved' ? 'تم قبول التسليم وإضافة نقاطه.' : 'تم رفض التسليم ولم تتم إضافة نقاط.',
+      title: finalStatus === 'approved' ? '✅ اعتماد تسليم مهمة وإضافة النقاط' : '❌ تم رفض تسليم مهمة',
+      description: `تمت مراجعة التسليم **#${submissionId}** ${finalStatus === 'approved' ? 'واعتماده.' : 'ورفضه.'}`,
       color: finalStatus === 'approved' ? 0x22c55e : 0xef4444,
       fields: fields.slice(0, 25),
       timestamp: new Date().toISOString(),
-      ...(old.footer?.text ? { footer: { text: old.footer.text } } : {}),
+      ...(old.footer?.text ? { footer: { text: old.footer.text } } : { footer: { text: 'Borg Management • Task Review' } }),
       ...(old.thumbnail?.url ? { thumbnail: { url: old.thumbnail.url } } : {}),
       ...(old.image?.url ? { image: { url: old.image.url } } : {}),
       ...(old.author ? { author: old.author } : {}),
