@@ -31,8 +31,76 @@ const fmt = (n) => (Math.round(Number(n || 0) * 100) / 100).toLocaleString('en-U
 const clean = (v, max) => String(v ?? '').replace(/[\u0000-\u001F\u007F]/g, '').trim().slice(0, max);
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildPresences,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
   partials: [Partials.Message, Partials.Channel],
+});
+
+let presenceSchemaPromise;
+let presenceSnapshotReady = false;
+const validPresenceStatuses = new Set(['online', 'idle', 'dnd', 'offline']);
+function normalizePresenceStatus(status) {
+  return validPresenceStatuses.has(status) ? status : 'offline';
+}
+async function ensureDiscordPresenceSchema() {
+  if (!presenceSchemaPromise) {
+    presenceSchemaPromise = (async () => {
+      await sql`CREATE TABLE IF NOT EXISTS discord_presence (
+        guild_id TEXT NOT NULL, user_id TEXT NOT NULL, username TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'offline' CHECK (status IN ('online','idle','dnd','offline')),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (guild_id, user_id)
+      )`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_discord_presence_guild_status ON discord_presence(guild_id, status)`;
+      await sql`CREATE TABLE IF NOT EXISTS discord_presence_meta (guild_id TEXT PRIMARY KEY, last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
+    })().catch((error) => { presenceSchemaPromise = null; throw error; });
+  }
+  return presenceSchemaPromise;
+}
+async function syncStaffPresenceSnapshot() {
+  await ensureDiscordPresenceSchema();
+  const guild = await client.guilds.fetch(STAFF_GUILD_ID);
+  const members = await guild.members.fetch({ withPresences: true });
+  const rows = [...members.values()]
+    .filter((member) => member.user && !member.user.bot)
+    .map((member) => ({
+      user_id: String(member.id),
+      username: String(member.user.globalName || member.user.username || member.id).slice(0, 100),
+      status: normalizePresenceStatus(member.presence?.status),
+    }));
+  await sql`DELETE FROM discord_presence WHERE guild_id = ${STAFF_GUILD_ID}`;
+  if (rows.length) {
+    await sql`INSERT INTO discord_presence(guild_id, user_id, username, status, updated_at)
+      SELECT ${STAFF_GUILD_ID}, r.user_id, r.username, r.status, NOW()
+      FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS r(user_id text, username text, status text)
+      ON CONFLICT (guild_id, user_id) DO UPDATE SET username = EXCLUDED.username, status = EXCLUDED.status, updated_at = NOW()`;
+  }
+  await sql`INSERT INTO discord_presence_meta(guild_id, last_seen) VALUES (${STAFF_GUILD_ID}, NOW())
+    ON CONFLICT (guild_id) DO UPDATE SET last_seen = NOW()`;
+  presenceSnapshotReady = true;
+  console.log(`[presence] synced ${rows.length} staff members`);
+}
+async function saveDiscordPresence(presence) {
+  if (!presence || String(presence.guild?.id || '') !== STAFF_GUILD_ID) return;
+  const member = presence.member;
+  const user = presence.user || member?.user;
+  if (!user || user.bot) return;
+  try {
+    await ensureDiscordPresenceSchema();
+    await sql`INSERT INTO discord_presence(guild_id, user_id, username, status, updated_at)
+      VALUES (${STAFF_GUILD_ID}, ${String(user.id)}, ${String(user.globalName || user.username || user.id).slice(0, 100)}, ${normalizePresenceStatus(presence.status)}, NOW())
+      ON CONFLICT (guild_id, user_id) DO UPDATE SET username = EXCLUDED.username, status = EXCLUDED.status, updated_at = NOW()`;
+  } catch (error) { console.error('[presence update]', error.message); }
+}
+client.on(Events.PresenceUpdate, (_oldPresence, newPresence) => { void saveDiscordPresence(newPresence); });
+client.on(Events.GuildMemberRemove, async (member) => {
+  if (String(member.guild?.id || '') !== STAFF_GUILD_ID) return;
+  try { await ensureDiscordPresenceSchema(); await sql`DELETE FROM discord_presence WHERE guild_id = ${STAFF_GUILD_ID} AND user_id = ${String(member.id)}`; }
+  catch (error) { console.error('[presence member leave]', error.message); }
 });
 
 function isReviewManager(interaction) {
@@ -234,6 +302,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 client.once(Events.ClientReady, () => {
   console.log(`[points-worker] connected as ${client.user.tag}`);
+  syncStaffPresenceSnapshot().catch((error) => console.error('[presence startup sync]', error.message));
+  setInterval(() => {
+    if (client.isReady()) syncStaffPresenceSnapshot().catch((error) => console.error('[presence periodic sync]', error.message));
+  }, 5 * 60 * 1000).unref();
+  setInterval(async () => {
+    if (!client.isReady() || !presenceSnapshotReady) return;
+    try {
+      await sql`INSERT INTO discord_presence_meta(guild_id, last_seen) VALUES (${STAFF_GUILD_ID}, NOW())
+        ON CONFLICT (guild_id) DO UPDATE SET last_seen = NOW()`;
+    } catch (error) { console.error('[presence heartbeat]', error.message); }
+  }, 60 * 1000).unref();
   runTaskMessageSync().catch((error) => console.error('[task message sync startup]', error.message));
   setInterval(() => runTaskMessageSync(), 5 * 60 * 1000).unref();
 });

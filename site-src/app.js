@@ -14,6 +14,8 @@ const state = {
   chatMessageIds: { staff: new Set(), management: new Set() },
   chatLoaded: { staff: false, management: false },
   onlineUserIds: new Set(),
+  discordStatuses: {},
+  discordPresenceAvailable: false,
   dailyMessageStats: { dailyStats: [], dailyTotal: 0, dailyDate: null },
   staffStats: [],
   notif: { items: [], unread: 0, maxId: null, open: false },
@@ -696,11 +698,16 @@ async function refreshPresence() {
   try {
     const result = await api('/api/presence');
     state.onlineUserIds = new Set((result.online || []).map(item => String(item.userId)));
-    renderRoster();
-    renderAdminOverview();
-    const footer = $('.roster-footer');
-    if (footer) footer.innerHTML = `<span class="status-dot"></span> ${state.onlineUserIds.size} متصل الآن · التحديث مباشر`;
-  } catch { /* Presence is optional if the endpoint is temporarily unavailable. */ }
+  } catch { /* Website presence is optional. */ }
+  try {
+    const discord = await api('/api/discord-presence');
+    state.discordStatuses = discord.statuses || {};
+    state.discordPresenceAvailable = Boolean(discord.available);
+  } catch { state.discordPresenceAvailable = false; }
+  renderRoster();
+  renderAdminOverview();
+  const footer = $('.roster-footer');
+  if (footer) footer.innerHTML = `<span class="status-dot"></span> ${state.discordPresenceAvailable ? Object.values(state.discordStatuses).filter(status => status !== 'offline').length + ' أونلاين على ديسكورد' : 'حالة ديسكورد غير متاحة — راجع إعدادات البوت'} · تحديث مباشر`;
 }
 function startPresenceHeartbeat() {
   const beat = async () => {
@@ -724,7 +731,7 @@ function renderRoster() {
   $('#roster-content').innerHTML = groups.map((group) => `
     <section class="roster-group">
       <div class="roster-role-heading"><span class="role-pin" style="background:${/^#[0-9a-f]{6}$/i.test(group.color) ? group.color : '#64748b'}"></span><span>${escapeHtml(group.name)}</span><span class="role-line"></span></div>
-      ${group.members.map((member) => `<div class="member-row" role="button" tabindex="0" data-user-id="${escapeHtml(member.id)}" title="${escapeHtml(member.username)} — اضغط لفتح الملف، وكلك يمين لنسخ ID"><div class="member-avatar-wrap"><img class="member-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><span class="member-state ${state.onlineUserIds.has(String(member.id)) ? 'is-online' : 'is-offline'}"></span></div><div style="min-width:0"><div class="member-row-name">${escapeHtml(member.username)}${member.isAdmin ? '<span class="member-admin-tag">إدارة</span>' : ''}</div><div class="member-row-handle">@${escapeHtml(member.handle)}</div></div><span class="member-rank-dot" style="background:${/^#[0-9a-f]{6}$/i.test(member.roleColor) ? member.roleColor : '#64748b'}"></span></div>`).join('')}
+      ${group.members.map((member) => `<div class="member-row" role="button" tabindex="0" data-user-id="${escapeHtml(member.id)}" title="${escapeHtml(member.username)} — اضغط لفتح الملف، وكلك يمين لنسخ ID"><div class="member-avatar-wrap"><img class="member-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><span class="member-state ${['online','idle','dnd'].includes(state.discordStatuses[String(member.id)]) ? 'is-online' : 'is-offline'}" title="${state.discordPresenceAvailable ? ({online:'متصل على ديسكورد',idle:'خامل على ديسكورد',dnd:'عدم الإزعاج على ديسكورد',offline:'أوفلاين أو مخفي على ديسكورد'}[state.discordStatuses[String(member.id)] || 'offline']) : 'حالة ديسكورد غير متاحة'}"></span></div><div style="min-width:0"><div class="member-row-name">${escapeHtml(member.username)}${member.isAdmin ? '<span class="member-admin-tag">إدارة</span>' : ''}</div><div class="member-row-handle">@${escapeHtml(member.handle)}</div></div><span class="member-rank-dot" style="background:${/^#[0-9a-f]{6}$/i.test(member.roleColor) ? member.roleColor : '#64748b'}"></span></div>`).join('')}
     </section>
   `).join('');
 }
@@ -840,8 +847,10 @@ function renderAdminOverview() {
   }
   container.innerHTML = admins.map((member) => {
     const stats = statsById.get(String(member.id)) || {};
-    const online = state.onlineUserIds.has(String(member.id));
-    return `<button type="button" class="admin-overview-card" data-open-staff-profile="${escapeHtml(member.id)}"><div class="admin-overview-top"><img src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="admin-overview-name"><b>${escapeHtml(member.username)}</b><small>${escapeHtml(member.roleName || 'مسؤول')}</small></div><span class="online-pill ${online ? 'online' : 'offline'}"><i></i>${online ? 'أونلاين' : 'أوفلاين'}</span></div><div class="admin-overview-metrics"><span><b>${Number(stats.dailyMessages || 0).toLocaleString('en-US')}</b><small>رسائل اليوم</small></span><span><b>${Number(stats.totalSubmissions || 0).toLocaleString('en-US')}</b><small>تسليمات</small></span><span><b>${Number(stats.totalPoints || 0).toLocaleString('en-US')}</b><small>نقاط</small></span><span><b>${Number(stats.adminRequests || 0).toLocaleString('en-US')}</b><small>طلبات إدارية</small></span></div><span class="admin-overview-link">فتح الملف الكامل ←</span></button>`;
+    const discordStatus = state.discordStatuses[String(member.id)] || 'offline';
+    const online = ['online', 'idle', 'dnd'].includes(discordStatus);
+    const statusLabel = !state.discordPresenceAvailable ? 'غير متاح' : ({online:'أونلاين',idle:'خامل',dnd:'عدم الإزعاج',offline:'أوفلاين / مخفي'}[discordStatus] || 'أوفلاين / مخفي');
+    return `<button type="button" class="admin-overview-card" data-open-staff-profile="${escapeHtml(member.id)}"><div class="admin-overview-top"><img src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="admin-overview-name"><b>${escapeHtml(member.username)}</b><small>${escapeHtml(member.roleName || 'مسؤول')}</small></div><span class="online-pill ${state.discordPresenceAvailable ? (online ? 'online' : 'offline') : 'offline'}"><i></i>${statusLabel}</span></div><div class="admin-overview-metrics"><span><b>${Number(stats.dailyMessages || 0).toLocaleString('en-US')}</b><small>رسائل اليوم</small></span><span><b>${Number(stats.totalSubmissions || 0).toLocaleString('en-US')}</b><small>تسليمات</small></span><span><b>${Number(stats.totalPoints || 0).toLocaleString('en-US')}</b><small>نقاط</small></span><span><b>${Number(stats.adminRequests || 0).toLocaleString('en-US')}</b><small>طلبات إدارية</small></span></div><span class="admin-overview-link">فتح الملف الكامل ←</span></button>`;
   }).join('');
   $$('[data-open-staff-profile]', container).forEach((button) => button.addEventListener('click', () => openStaffProfile(button.dataset.openStaffProfile)));
 }
@@ -1357,11 +1366,19 @@ async function markNotificationsRead() {
 
 async function runIntroThenInitialize() {
   const splash = $('#boot-splash');
+  const card = $('.boot-splash-card', splash || document);
   const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
-  // Intro animation completes first; only then do we start authentication and page data requests.
-  await new Promise((resolve) => setTimeout(resolve, reducedMotion ? 120 : 2050));
+  // The card contains shorter child animations whose animationend events bubble.
+  // Use a duration longer than boot-card-reveal (3.8s) so those child events
+  // cannot dismiss the splash before the main animation completes.
+  if (!reducedMotion && splash && card) {
+    await new Promise((resolve) => setTimeout(resolve, 4200));
+    await new Promise((resolve) => setTimeout(resolve, 700));
+  } else {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
   splash?.classList.add('boot-splash-exit');
-  await new Promise((resolve) => setTimeout(resolve, reducedMotion ? 0 : 340));
+  await new Promise((resolve) => setTimeout(resolve, reducedMotion ? 0 : 420));
   splash?.remove();
   await initialize();
 }

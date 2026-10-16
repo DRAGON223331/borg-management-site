@@ -70,9 +70,9 @@
 1. افتح https://discord.com/developers/applications واختر التطبيق الصحيح.
 2. اذهب إلى OAuth2 وأضف الرابط نفسه الموجود في `DISCORD_REDIRECT_URI` إلى Redirects.
 3. تأكد أن الـClient Secret في Vercel من نفس التطبيق.
-4. في قسم Bot، فعّل **Server Members Intent** إذا لم تكن مفعّلة، حتى يتمكن الموقع من جلب أعضاء سيرفر الاستاف وقائمة الرتب.
+4. في قسم Bot، فعّل **Server Members Intent** حتى يتمكن الموقع من جلب أعضاء سيرفر الاستاف، وفعّل **Presence Intent** لقراءة حالات الأعضاء من `bot-worker/`.
 5. تأكد أن البوت موجود في سيرفر الاستاف والسيرفر الأساسي، ولديه صلاحيات عرض القنوات وقراءة/إرسال الرسائل في روم المهمات وروم التسليم.
-6. لأنه يستخدم REST API بدل Gateway، لا يحتاج إلى تشغيل عملية `client.login()` أو خادم دائم. وقد لا يعرض Discord حالة Presence كـOnline؛ المهم أن طلبات API وصلاحيات القنوات تعمل.
+6. على Vercel، الموقع نفسه يستخدم REST API، لكن قراءة حالة Discord الحقيقية تحتاج تشغيل `bot-worker/` على استضافة Node دائمة مع نفس `DISCORD_BOT_TOKEN` و`DATABASE_URL`. فعّل **Presence Intent** و**Server Members Intent**؛ وإذا توقف الـworker لأكثر من 3 دقائق ستظهر الحالة كغير متاحة بدل عرض بيانات قديمة.
 
 ## 7) أعد النشر واختبر
 
@@ -150,7 +150,7 @@ To improve compatibility with Vercel route resolution, the project includes dedi
 
 - **لو بتشغّل `server.js`** (اتصال Gateway دائم): الأمر شغال تلقائيًا.
 - **لو على Vercel**: Vercel Functions مش بتقدر تسمع رسائل عادية، فشغّل مجلد `bot-worker/` على استضافة Node دائمة (Railway / Render / VPS) بالمتغيرين `DISCORD_BOT_TOKEN` و`DATABASE_URL` (نفس قاعدة بيانات الموقع)، بالأمر `npm install && npm start`.
-- في الحالتين لازم تفعّل **Message Content Intent** من Discord Developer Portal ← Bot ← Privileged Gateway Intents.
+- لازم تفعّل **Message Content Intent**. ولحالة Discord الحقيقية، فعّل **Presence Intent** و**Server Members Intent** من Discord Developer Portal ← Bot ← Privileged Gateway Intents، ثم أعد تشغيل `bot-worker`. حالة Offline لا تميّز تقنيًا بين الانقطاع الفعلي ووضع Invisible.
 - الرد بيكون في نفس الروم (رسائل ديسكورد العادية مفيش فيها رد خاص زي الـslash). الأمر السلاش الوحيد هو `/mypoints` (بيتسجل تلقائيًا).
 
 ## تحديثات v21 — خصوصية، أداء، إشعارات، وتصدير CSV

@@ -42,7 +42,7 @@ let lastMessageSyncAt = 0;
 let messageSyncPromise;
 
 // ───────── تخفيف الضغط: كاش في الذاكرة + حد للطلبات ─────────
-const SCHEMA_VERSION = 6; // ارفعه كل ما تضيف جدول/عمود جديد في ensureSchema
+const SCHEMA_VERSION = 7; // ارفعه كل ما تضيف جدول/عمود جديد في ensureSchema
 const PRESENCE_WINDOW_SECONDS = 150; // مدة اعتبار العضو "متصل" بعد آخر نبضة (النبضة كل 60 ثانية)
 const MESSAGE_SYNC_MIN_MS = Math.max(15, Number(process.env.MESSAGE_SYNC_MIN_SECONDS || 45)) * 1000;
 const memCache = new Map();
@@ -302,6 +302,13 @@ async function ensureSchema() {
     )`;
     await sql`CREATE TABLE IF NOT EXISTS site_presence (user_id TEXT PRIMARY KEY, username TEXT NOT NULL, avatar_url TEXT, last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
     await sql`CREATE INDEX IF NOT EXISTS idx_site_presence_last_seen ON site_presence(last_seen DESC)`;
+    await sql`CREATE TABLE IF NOT EXISTS discord_presence (
+      guild_id TEXT NOT NULL, user_id TEXT NOT NULL, username TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'offline' CHECK (status IN ('online','idle','dnd','offline')),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (guild_id, user_id)
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_discord_presence_guild_status ON discord_presence(guild_id, status)`;
+    await sql`CREATE TABLE IF NOT EXISTS discord_presence_meta (guild_id TEXT PRIMARY KEY, last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
     await sql`CREATE TABLE IF NOT EXISTS notification_state (notification_key TEXT PRIMARY KEY, last_sent_at TIMESTAMPTZ NOT NULL DEFAULT '1970-01-01T00:00:00Z')`;
     await sql`CREATE TABLE IF NOT EXISTS leave_requests (
       id BIGSERIAL PRIMARY KEY,
@@ -2113,6 +2120,26 @@ async function handleApi(parts, req, res) {
     if (room === 'staff') await syncChannelMessageCounts(sql, { budgetMs: 4000 });
     const dailyStats = room === 'staff' ? await getDailyStaffMessageStats(sql) : {};
     return sendJson(res, 200, { messages: rows.map(mapMessage), ...dailyStats });
+  }
+  if (route === 'discord-presence' && parts.length === 1 && req.method === 'GET') {
+    if (!user) return sendError(res, 401, 'سجّل الدخول الأول.');
+    if (rateLimited(req, res, user, 'discord-presence-get', 30)) return;
+    await ensureSchema();
+    const result = await cached(`discord-presence:${STAFF_GUILD_ID}`, 10_000, async () => {
+      const sql = await getSql();
+      const metaRows = await sql`SELECT last_seen AS "lastSeen" FROM discord_presence_meta WHERE guild_id = ${STAFF_GUILD_ID} LIMIT 1`;
+      const lastSeen = metaRows.length ? new Date(metaRows[0].lastSeen).getTime() : 0;
+      // A recent worker heartbeat confirms this is live Gateway data, not a stale snapshot.
+      if (!lastSeen || !Number.isFinite(lastSeen) || Date.now() - lastSeen > 180_000) {
+        return { available: false, statuses: {} };
+      }
+      const rows = await sql`SELECT user_id AS "userId", status FROM discord_presence WHERE guild_id = ${STAFF_GUILD_ID}`;
+      const validStatuses = new Set(['online', 'idle', 'dnd', 'offline']);
+      const statuses = {};
+      for (const row of rows) statuses[String(row.userId)] = validStatuses.has(row.status) ? row.status : 'offline';
+      return { available: true, statuses };
+    });
+    return sendJson(res, 200, result);
   }
   if (route === 'presence' && parts.length === 1 && req.method === 'POST') {
     if (rateLimited(req, res, user, 'presence-post', 20)) return;

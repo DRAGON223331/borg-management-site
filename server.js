@@ -290,6 +290,7 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildPresences,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
@@ -1378,6 +1379,24 @@ app.post('/api/staff-requests/:id/:action', requireAuth, async (req, res) => {
     await channel.send({ embeds: [new EmbedBuilder().setColor(status === 'approved' ? 0x22c55e : 0xef4444).setTitle(status === 'approved' ? `✅ تمت الموافقة على الطلب الإداري #${id}` : `❌ تم رفض الطلب الإداري #${id}`).setDescription(`نوع الطلب: ${item.request_type}\nالعنوان: ${item.subject}\nمقدم الطلب: <@${item.user_id}>\nالمراجع: <@${user.id}>${note ? `\nملاحظة: ${note}` : ''}`).setTimestamp(new Date())], allowedMentions: { parse: [] } });
   } catch (error) { console.error('[staff request review log]', error.message); }
   res.json({ ok: true, status, message: status === 'approved' ? 'تمت الموافقة على الطلب الإداري.' : 'تم رفض الطلب الإداري.' });
+});
+
+app.get('/api/discord-presence', requireAuth, async (req, res) => {
+  try {
+    if (!botReady) return res.json({ available: false, statuses: {} });
+    const guild = await client.guilds.fetch(STAFF_GUILD_ID);
+    const members = await guild.members.fetch({ withPresences: true });
+    const statuses = {};
+    for (const member of members.values()) {
+      if (member.user.bot) continue;
+      statuses[member.id] = member.presence?.status || 'offline';
+    }
+    res.set('Cache-Control', 'no-store');
+    res.json({ available: true, statuses });
+  } catch (error) {
+    console.error('[discord presence]', error.message);
+    res.json({ available: false, statuses: {} });
+  }
 });
 
 app.post('/api/presence', requireAuth, (req, res) => {
