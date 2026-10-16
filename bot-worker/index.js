@@ -45,15 +45,16 @@ let presenceSchemaPromise;
 let presenceSnapshotReady = false;
 const validPresenceStatuses = new Set(['online', 'idle', 'dnd', 'offline']);
 function normalizePresenceStatus(status) {
-  return validPresenceStatuses.has(status) ? status : 'offline';
+  // Missing data is not proof that a member is offline.
+  return validPresenceStatuses.has(status) ? status : null;
 }
 function getMemberPresenceStatus(guild, member) {
-  // A PresenceUpdate can arrive while a bulk member snapshot is being built.
-  // Prefer the member-attached value, then the live guild presence cache.
-  const memberStatus = member?.presence?.status;
-  if (validPresenceStatuses.has(memberStatus)) return memberStatus;
+  // The live cache wins: a PresenceUpdate may arrive while a bulk snapshot is loading.
+  // A missing presence stays unknown instead of being guessed as Offline.
   const cachedStatus = guild?.presences?.cache?.get(String(member?.id))?.status;
-  return normalizePresenceStatus(cachedStatus);
+  if (validPresenceStatuses.has(cachedStatus)) return cachedStatus;
+  const memberStatus = member?.presence?.status;
+  return normalizePresenceStatus(memberStatus);
 }
 async function ensureDiscordPresenceSchema() {
   if (!presenceSchemaPromise) {
@@ -71,29 +72,40 @@ async function ensureDiscordPresenceSchema() {
 }
 async function syncStaffPresenceSnapshot() {
   await ensureDiscordPresenceSchema();
+  // Timestamp at snapshot start so an in-flight PresenceUpdate always wins over this snapshot.
+  const snapshotAt = new Date().toISOString();
   const guild = await client.guilds.fetch(STAFF_GUILD_ID);
   const members = await guild.members.fetch({ withPresences: true });
-  const rows = [...members.values()]
+  const snapshot = [...members.values()]
     .filter((member) => member.user && !member.user.bot)
     .map((member) => ({
       user_id: String(member.id),
       username: String(member.user.globalName || member.user.username || member.id).slice(0, 100),
       status: getMemberPresenceStatus(guild, member),
+      updated_at: snapshotAt,
     }));
-  // Upsert the snapshot instead of deleting all rows first. Deleting creates a race
-  // where a fresh PresenceUpdate can be overwritten by an older snapshot. Members
-  // who leave are removed by the GuildMemberRemove handler below.
+  const rows = snapshot.filter((row) => row.status);
+  const missingIds = snapshot.filter((row) => !row.status).map((row) => ({ user_id: row.user_id }));
+  // Upsert known statuses. Missing Gateway presence data must not be converted into
+  // Offline; remove any older value for those members so the UI can show "unknown".
   if (rows.length) {
     await sql`INSERT INTO discord_presence(guild_id, user_id, username, status, updated_at)
-      SELECT ${STAFF_GUILD_ID}, r.user_id, r.username, r.status, NOW()
-      FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS r(user_id text, username text, status text)
-      ON CONFLICT (guild_id, user_id) DO UPDATE SET username = EXCLUDED.username, status = EXCLUDED.status, updated_at = NOW()`;
+      SELECT ${STAFF_GUILD_ID}, r.user_id, r.username, r.status, r.updated_at::timestamptz
+      FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) AS r(user_id text, username text, status text, updated_at text)
+      ON CONFLICT (guild_id, user_id) DO UPDATE SET username = EXCLUDED.username, status = EXCLUDED.status, updated_at = EXCLUDED.updated_at
+      WHERE discord_presence.updated_at <= EXCLUDED.updated_at`;
+  }
+  if (missingIds.length) {
+    await sql`DELETE FROM discord_presence AS p
+      USING jsonb_to_recordset(${JSON.stringify(missingIds)}::jsonb) AS missing(user_id text)
+      WHERE p.guild_id = ${STAFF_GUILD_ID} AND p.user_id = missing.user_id
+        AND p.updated_at <= ${snapshotAt}::timestamptz`;
   }
   await sql`INSERT INTO discord_presence_meta(guild_id, last_seen) VALUES (${STAFF_GUILD_ID}, NOW())
     ON CONFLICT (guild_id) DO UPDATE SET last_seen = NOW()`;
   presenceSnapshotReady = true;
   const counts = rows.reduce((result, row) => { result[row.status] = (result[row.status] || 0) + 1; return result; }, {});
-  console.log(`[presence] synced ${rows.length} staff members: ${JSON.stringify(counts)}`);
+  console.log(`[presence] synced snapshot=${snapshot.length} known=${rows.length} unknown=${missingIds.length}: ${JSON.stringify(counts)}`);
 }
 async function saveDiscordPresence(presence) {
   if (!presence || String(presence.guild?.id || '') !== STAFF_GUILD_ID) return;
@@ -102,8 +114,13 @@ async function saveDiscordPresence(presence) {
   if (!user || user.bot) return;
   try {
     await ensureDiscordPresenceSchema();
+    const status = normalizePresenceStatus(presence.status);
+    if (!status) {
+      await sql`DELETE FROM discord_presence WHERE guild_id = ${STAFF_GUILD_ID} AND user_id = ${String(user.id)}`;
+      return;
+    }
     await sql`INSERT INTO discord_presence(guild_id, user_id, username, status, updated_at)
-      VALUES (${STAFF_GUILD_ID}, ${String(user.id)}, ${String(user.globalName || user.username || user.id).slice(0, 100)}, ${normalizePresenceStatus(presence.status)}, NOW())
+      VALUES (${STAFF_GUILD_ID}, ${String(user.id)}, ${String(user.globalName || user.username || user.id).slice(0, 100)}, ${status}, NOW())
       ON CONFLICT (guild_id, user_id) DO UPDATE SET username = EXCLUDED.username, status = EXCLUDED.status, updated_at = NOW()`;
   } catch (error) { console.error('[presence update]', error.message); }
 }
@@ -356,4 +373,11 @@ client.on(Events.MessageCreate, async (message) => {
   } catch (error) { console.error('[points-worker]', error.message); }
 });
 client.on('error', (error) => console.error('[points-worker] client error:', error.message));
-client.login(TOKEN);
+client.login(TOKEN).catch((error) => {
+  const message = String(error?.message || error || 'Unknown Discord login error');
+  console.error('[points-worker] Discord Gateway login failed:', message);
+  if (/disallowed.?intents|4014|privileged intent/i.test(message)) {
+    console.error('[presence] افتح Discord Developer Portal → Bot → Privileged Gateway Intents وفعّل Server Members Intent وPresence Intent، ثم أعد تشغيل الـ worker.');
+  }
+  process.exitCode = 1;
+});

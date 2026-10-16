@@ -1479,7 +1479,7 @@ app.get('/api/discord-presence', requireAuth, async (req, res) => {
     const statuses = {};
     for (const member of members.values()) {
       if (member.user.bot) continue;
-      statuses[member.id] = member.presence?.status || 'offline';
+      if (['online', 'idle', 'dnd', 'offline'].includes(member.presence?.status)) statuses[member.id] = member.presence.status;
     }
     res.set('Cache-Control', 'no-store');
     res.json({ available: true, statuses, lastSeenAt: nowIso(), ageSeconds: 0 });

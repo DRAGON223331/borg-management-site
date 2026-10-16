@@ -2180,14 +2180,22 @@ async function handleApi(parts, req, res) {
       const metaRows = await sql`SELECT last_seen AS "lastSeen" FROM discord_presence_meta WHERE guild_id = ${STAFF_GUILD_ID} LIMIT 1`;
       const lastSeen = metaRows.length ? new Date(metaRows[0].lastSeen).getTime() : 0;
       // A recent worker heartbeat confirms this is live Gateway data, not a stale snapshot.
-      if (!lastSeen || !Number.isFinite(lastSeen) || Date.now() - lastSeen > 180_000) {
-        return { available: false, statuses: {}, lastSeenAt: metaRows.length ? new Date(lastSeen).toISOString() : null, ageSeconds: lastSeen ? Math.max(0, Math.floor((Date.now() - lastSeen) / 1000)) : null };
+      const ageSeconds = lastSeen && Number.isFinite(lastSeen) ? Math.max(0, Math.floor((Date.now() - lastSeen) / 1000)) : null;
+      if (!lastSeen || !Number.isFinite(lastSeen) || ageSeconds > 180) {
+        return {
+          available: false,
+          reason: lastSeen ? 'stale-heartbeat' : 'no-heartbeat',
+          statuses: {},
+          lastSeenAt: metaRows.length && Number.isFinite(lastSeen) ? new Date(lastSeen).toISOString() : null,
+          ageSeconds,
+        };
       }
       const rows = await sql`SELECT user_id AS "userId", status FROM discord_presence WHERE guild_id = ${STAFF_GUILD_ID}`;
       const validStatuses = new Set(['online', 'idle', 'dnd', 'offline']);
       const statuses = {};
-      for (const row of rows) statuses[String(row.userId)] = validStatuses.has(row.status) ? row.status : 'offline';
-      return { available: true, statuses, lastSeenAt: new Date(lastSeen).toISOString(), ageSeconds: Math.max(0, Math.floor((Date.now() - lastSeen) / 1000)) };
+      // Missing status rows intentionally remain absent; the client labels those as unknown.
+      for (const row of rows) if (validStatuses.has(row.status)) statuses[String(row.userId)] = row.status;
+      return { available: true, statuses, storedCount: Object.keys(statuses).length, lastSeenAt: new Date(lastSeen).toISOString(), ageSeconds };
     });
     return sendJson(res, 200, result);
   }

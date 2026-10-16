@@ -72,7 +72,7 @@
 3. تأكد أن الـClient Secret في Vercel من نفس التطبيق.
 4. في قسم Bot، فعّل **Server Members Intent** حتى يتمكن الموقع من جلب أعضاء سيرفر الاستاف، وفعّل **Presence Intent** لقراءة حالات الأعضاء من `bot-worker/`.
 5. تأكد أن البوت موجود في سيرفر الاستاف والسيرفر الأساسي، ولديه صلاحيات عرض القنوات وقراءة/إرسال الرسائل في روم المهمات وروم التسليم.
-6. على Vercel، الموقع نفسه يستخدم REST API، لكن قراءة حالة Discord الحقيقية تحتاج تشغيل `bot-worker/` على استضافة Node دائمة مع نفس `DISCORD_BOT_TOKEN` و`DATABASE_URL`. فعّل **Presence Intent** و**Server Members Intent**؛ وإذا توقف الـworker لأكثر من 3 دقائق ستظهر الحالة كغير متاحة بدل عرض بيانات قديمة.
+6. على Vercel، الموقع نفسه يستخدم REST API، لكن قراءة حالة Discord الحقيقية تحتاج تشغيل `bot-worker/` على استضافة Node دائمة مع نفس `DISCORD_BOT_TOKEN` و`DATABASE_URL`. فعّل **Presence Intent** و**Server Members Intent**؛ وإذا توقف الـworker لأكثر من 3 دقائق ستظهر الحالة كغير متاحة بدل عرض بيانات قديمة. **موافقة OAuth أثناء تسجيل الدخول لا تمنح الموقع صلاحية Presence بحد ذاتها**؛ القراءة تتم عبر البوت، ولأعضاء السيرفر المحدد في `STAFF_GUILD_ID` فقط.
 
 ## 7) أعد النشر واختبر
 
@@ -238,4 +238,4 @@ To improve compatibility with Vercel route resolution, the project includes dedi
 - لازم تنشر مجلد `bot-worker` بعد كل تحديث، وتشغّله باستمرار بنفس `DATABASE_URL` و`DISCORD_BOT_TOKEN` المستخدمين للموقع. تحديث الواجهة وحدها لا يحدّث حالة Discord.
 - فعّل `Guild Members Intent` و`Guild Presences Intent` من Discord Developer Portal ثم أعد تشغيل الـ worker.
 - قيمة `dnd` معناها **عدم الإزعاج** وليست Offline. الـ worker يطبع الآن توزيع الحالات في السجل برسالة تبدأ بـ `[presence] synced`؛ لو الشخص ظاهر `dnd` في السجل لكن الموقع يعرض غير ذلك، راجع نشر الواجهة وامسح كاش المتصفح.
-- لو المستخدم غير موجود في خريطة الحالات، ستعرض الواجهة **الحالة غير مستلمة** بدل ما تفترض أنه Offline. أما Offline وInvisible فلا يمكن التمييز بينهما عبر Presence في Discord.
+- لو Discord لم يرسل Presence لعضو، لا نحوله تلقائيًا إلى Offline؛ سيظهر **الحالة غير مستلمة**. أما Offline وInvisible فلا يمكن التمييز بينهما عبر Presence في Discord. موافقة العضو على تسجيل الدخول للموقع لا تغني عن تفعيل intents وتشغيل الـ worker، كما أن البوت لا يستطيع قراءة حالة مستخدم لا ينتمي إلى سيرفر الاستاف المحدد.
