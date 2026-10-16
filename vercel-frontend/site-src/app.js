@@ -726,7 +726,7 @@ async function refreshPresence() {
   renderRoster();
   renderAdminOverview();
   const footer = $('.roster-footer');
-  if (footer) footer.innerHTML = `<span class="status-dot"></span> ${state.discordPresenceAvailable ? Object.values(state.discordStatuses).filter(status => status !== 'offline').length + ' أونلاين على ديسكورد' : 'حالة ديسكورد غير متاحة — راجع إعدادات البوت'} · تحديث مباشر`;
+  if (footer) footer.innerHTML = `<span class="status-dot"></span> ${state.discordPresenceAvailable ? Object.values(state.discordStatuses).filter(status => ['online', 'idle', 'dnd'].includes(status)).length + ' متصلون على ديسكورد' : 'حالة ديسكورد غير متاحة — راجع إعدادات البوت'} · تحديث مباشر`;
 }
 function startPresenceHeartbeat() {
   const beat = async () => {
@@ -750,7 +750,7 @@ function renderRoster() {
   $('#roster-content').innerHTML = groups.map((group) => `
     <section class="roster-group">
       <div class="roster-role-heading"><span class="role-pin" style="background:${/^#[0-9a-f]{6}$/i.test(group.color) ? group.color : '#64748b'}"></span><span>${escapeHtml(group.name)}</span><span class="role-line"></span></div>
-      ${group.members.map((member) => `<div class="member-row" role="button" tabindex="0" data-user-id="${escapeHtml(member.id)}" title="${escapeHtml(member.username)} — اضغط لفتح الملف، وكلك يمين لنسخ ID"><div class="member-avatar-wrap"><img class="member-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><span class="member-state ${['online','idle','dnd'].includes(state.discordStatuses[String(member.id)]) ? 'is-online' : 'is-offline'}" title="${state.discordPresenceAvailable ? ({online:'متصل على ديسكورد',idle:'خامل على ديسكورد',dnd:'عدم الإزعاج على ديسكورد',offline:'أوفلاين أو مخفي على ديسكورد'}[state.discordStatuses[String(member.id)] || 'offline']) : 'حالة ديسكورد غير متاحة'}"></span></div><div style="min-width:0"><div class="member-row-name">${escapeHtml(member.username)}${member.isAdmin ? '<span class="member-admin-tag">إدارة</span>' : ''}</div><div class="member-row-handle">@${escapeHtml(member.handle)}</div></div><span class="member-rank-dot" style="background:${/^#[0-9a-f]{6}$/i.test(member.roleColor) ? member.roleColor : '#64748b'}"></span></div>`).join('')}
+      ${group.members.map((member) => `<div class="member-row" role="button" tabindex="0" data-user-id="${escapeHtml(member.id)}" title="${escapeHtml(member.username)} — اضغط لفتح الملف، وكلك يمين لنسخ ID"><div class="member-avatar-wrap"><img class="member-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><span class="member-state ${['online','idle','dnd'].includes(state.discordStatuses[String(member.id)]) ? 'is-online' : (state.discordPresenceAvailable && !state.discordStatuses[String(member.id)] ? 'is-unknown' : 'is-offline')}" title="${state.discordPresenceAvailable ? ({online:'متصل على ديسكورد',idle:'خامل على ديسكورد',dnd:'عدم الإزعاج على ديسكورد',offline:'أوفلاين أو مخفي على ديسكورد',unknown:'حالة Discord لم تصل من البوت'}[state.discordStatuses[String(member.id)] || 'unknown']) : 'حالة ديسكورد غير متاحة'}"></span></div><div style="min-width:0"><div class="member-row-name">${escapeHtml(member.username)}${member.isAdmin ? '<span class="member-admin-tag">إدارة</span>' : ''}</div><div class="member-row-handle">@${escapeHtml(member.handle)}</div></div><span class="member-rank-dot" style="background:${/^#[0-9a-f]{6}$/i.test(member.roleColor) ? member.roleColor : '#64748b'}"></span></div>`).join('')}
     </section>
   `).join('');
 }
@@ -866,10 +866,10 @@ function renderAdminOverview() {
   }
   container.innerHTML = admins.map((member) => {
     const stats = statsById.get(String(member.id)) || {};
-    const discordStatus = state.discordStatuses[String(member.id)] || 'offline';
+    const discordStatus = state.discordStatuses[String(member.id)] || 'unknown';
     const online = ['online', 'idle', 'dnd'].includes(discordStatus);
-    const statusLabel = !state.discordPresenceAvailable ? 'غير متاح' : ({online:'أونلاين',idle:'خامل',dnd:'عدم الإزعاج',offline:'أوفلاين / مخفي'}[discordStatus] || 'أوفلاين / مخفي');
-    return `<button type="button" class="admin-overview-card" data-open-staff-profile="${escapeHtml(member.id)}"><div class="admin-overview-top"><img src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="admin-overview-name"><b>${escapeHtml(member.username)}</b><small>${escapeHtml(member.roleName || 'مسؤول')}</small></div><span class="online-pill ${state.discordPresenceAvailable ? (online ? 'online' : 'offline') : 'offline'}"><i></i>${statusLabel}</span></div><div class="admin-overview-metrics"><span><b>${Number(stats.dailyMessages || 0).toLocaleString('en-US')}</b><small>رسائل اليوم</small></span><span><b>${Number(stats.totalSubmissions || 0).toLocaleString('en-US')}</b><small>تسليمات</small></span><span><b>${Number(stats.totalPoints || 0).toLocaleString('en-US')}</b><small>نقاط</small></span><span><b>${Number(stats.adminRequests || 0).toLocaleString('en-US')}</b><small>طلبات إدارية</small></span></div><span class="admin-overview-link">فتح الملف الكامل ←</span></button>`;
+    const statusLabel = !state.discordPresenceAvailable ? 'غير متاح' : ({online:'أونلاين',idle:'خامل',dnd:'عدم الإزعاج',offline:'أوفلاين / مخفي',unknown:'الحالة غير مستلمة'}[discordStatus] || 'الحالة غير مستلمة');
+    return `<button type="button" class="admin-overview-card" data-open-staff-profile="${escapeHtml(member.id)}"><div class="admin-overview-top"><img src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="admin-overview-name"><b>${escapeHtml(member.username)}</b><small>${escapeHtml(member.roleName || 'مسؤول')}</small></div><span class="online-pill ${!state.discordPresenceAvailable || discordStatus === 'unknown' ? 'unknown' : (online ? 'online' : 'offline')}"><i></i>${statusLabel}</span></div><div class="admin-overview-metrics"><span><b>${Number(stats.dailyMessages || 0).toLocaleString('en-US')}</b><small>رسائل اليوم</small></span><span><b>${Number(stats.totalSubmissions || 0).toLocaleString('en-US')}</b><small>تسليمات</small></span><span><b>${Number(stats.totalPoints || 0).toLocaleString('en-US')}</b><small>نقاط</small></span><span><b>${Number(stats.adminRequests || 0).toLocaleString('en-US')}</b><small>طلبات إدارية</small></span></div><span class="admin-overview-link">فتح الملف الكامل ←</span></button>`;
   }).join('');
   $$('[data-open-staff-profile]', container).forEach((button) => button.addEventListener('click', () => openStaffProfile(button.dataset.openStaffProfile)));
 }
@@ -905,7 +905,7 @@ function monitorAgo(value) {
 }
 function monitorStatusLabel(status, available = true) {
   if (!available) return 'غير متاح';
-  return ({ online: 'أونلاين', idle: 'خامل', dnd: 'عدم الإزعاج', offline: 'أوفلاين / مخفي' })[status] || 'أوفلاين / مخفي';
+  return ({ online: 'أونلاين', idle: 'خامل', dnd: 'عدم الإزعاج', offline: 'أوفلاين / مخفي', unknown: 'الحالة غير مستلمة' })[status] || 'الحالة غير مستلمة';
 }
 function monitorSetStatusCard(title, detail, stateName, icon) {
   const labels = { ok: 'سليم', warn: 'تحذير', bad: 'متعطل', unknown: 'غير معروف' };
@@ -977,10 +977,10 @@ function renderAdminMonitoring(failures = []) {
   // لا نستعمل Presence قديمة من حالة الواجهة كأنها فحص جديد، ولا نحوّل فشل المصدر إلى Offline.
   const discord = monitor.presence || { available: false, statuses: {} };
   const statuses = discord.available ? (discord.statuses || {}) : {};
-  const statCounts = { online: null, idle: null, dnd: null, offline: null };
+  const statCounts = { online: null, idle: null, dnd: null, offline: null, unknown: null };
   if (discord.available) {
     Object.keys(statCounts).forEach((key) => { statCounts[key] = 0; });
-    members.forEach((member) => { const status = statuses[String(member.id)] || 'offline'; statCounts[status] = (statCounts[status] || 0) + 1; });
+    members.forEach((member) => { const status = statuses[String(member.id)] || 'unknown'; statCounts[statCounts.hasOwnProperty(status) ? status : 'unknown'] += 1; });
   }
   const hasSummary = Boolean(monitor.summary?.generatedAt);
   const webOnline = hasSummary ? siteRows.filter((item) => Number.isFinite(new Date(item.lastSeen).getTime()) && Date.now() - new Date(item.lastSeen).getTime() < 150000) : null;
@@ -1020,7 +1020,7 @@ function renderAdminMonitoring(failures = []) {
   if (presNote) presNote.textContent = presenceFresh ? `آخر تحديث من البوت: ${formatDate(monitor.presence?.lastSeenAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })}. Offline / Invisible بيظهروا بنفس الحالة لدى Discord.` : 'Presence غير متاح: راجع تشغيل bot-worker وPresence Intent؛ لن يتم اعتبار غياب البيانات دليلًا على أن الأعضاء Offline.';
   const presenceStats = $('#monitor-presence-stats');
   if (presenceStats) presenceStats.innerHTML = [
-    ['Online', statCounts.online, 'online'], ['Idle', statCounts.idle, 'idle'], ['Do Not Disturb', statCounts.dnd, 'dnd'], ['Offline / Invisible', statCounts.offline, 'offline'],
+    ['Online', statCounts.online, 'online'], ['Idle', statCounts.idle, 'idle'], ['Do Not Disturb', statCounts.dnd, 'dnd'], ['Offline / Invisible', statCounts.offline, 'offline'], ['حالة غير مستلمة', statCounts.unknown, 'unknown'],
   ].map(([label, count, status]) => `<article class="monitor-presence-card status-${status}${count === null ? ' status-unknown' : ''}"><span class="monitor-presence-dot"></span><b>${count === null ? '—' : monitorFormatNumber(count)}</b><small>${label}</small></article>`).join('');
   const activityBox = $('#monitor-top-active');
   const topActive = [...members].map((member) => ({ member, stats: statsById.get(String(member.id)) || {} })).sort((a, b) => Number(b.stats.dailyMessages || 0) - Number(a.stats.dailyMessages || 0)).filter((row) => Number(row.stats.dailyMessages || 0) > 0).slice(0, 8);
@@ -1099,7 +1099,7 @@ function renderMonitorMembers(resetLimit = false) {
   const selectedRole = roleSelect?.value || '';
   const filtered = members.filter((member) => {
     const id = String(member.id); const stats = statsById.get(id) || {}; const site = siteById.get(id);
-    const status = statuses[id] || 'offline'; const siteOnline = Boolean(site && Date.now() - new Date(site.lastSeen).getTime() < 150000);
+    const status = statuses[id] || 'unknown'; const siteOnline = Boolean(site && Date.now() - new Date(site.lastSeen).getTime() < 150000);
     const roles = (member.roles || []).map((role) => role.name).join(' ');
     const searchText = `${member.username} ${member.handle} ${id} ${member.roleName || ''} ${roles}`.toLocaleLowerCase('ar');
     if (query && !searchText.includes(query)) return false;
@@ -1115,8 +1115,8 @@ function renderMonitorMembers(resetLimit = false) {
   if (!shown.length) body.innerHTML = '<tr><td colspan="10" class="loading-state">مفيش أعضاء مطابقين للفلاتر.</td></tr>';
   else body.innerHTML = shown.map((member) => {
     const id = String(member.id); const stats = statsById.get(id) || {}; const site = siteById.get(id);
-    const status = statuses[id] || 'offline'; const siteOnline = Boolean(site && Date.now() - new Date(site.lastSeen).getTime() < 150000);
-    const statusTone = !discordReady ? 'unknown' : ['online','idle','dnd'].includes(status) ? status : 'offline';
+    const status = statuses[id] || 'unknown'; const siteOnline = Boolean(site && Date.now() - new Date(site.lastSeen).getTime() < 150000);
+    const statusTone = !discordReady || status === 'unknown' ? 'unknown' : ['online','idle','dnd'].includes(status) ? status : 'offline';
     const roleNames = (member.roles || []).map((role) => role.name).join(' · ');
     const submissions = `${monitorFormatNumber(stats.totalSubmissions || 0)}<small> ${monitorFormatNumber(stats.approvedSubmissions || 0)} مقبول · ${monitorFormatNumber(stats.pendingSubmissions || 0)} معلّق</small>`;
     const requests = `${monitorFormatNumber(stats.adminRequests || 0)}<small> إداري · ${monitorFormatNumber(stats.leaveRequests || 0)} إجازة</small>`;
@@ -1134,7 +1134,7 @@ function exportAdminMonitoringCsv() {
   const statuses = state.monitor.presence?.available ? (state.monitor.presence.statuses || {}) : {};
   const quote = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
   const rows = [['Discord ID','Username','Main server highest role','Roles','Is admin','Discord status','Website last seen','Messages today','Total messages','Submissions','Approved','Pending','Rejected','Points','Leave requests','Admin requests']];
-  members.forEach((member) => { const id=String(member.id); const stats=statsById.get(id)||{}; const site=siteById.get(id); rows.push([id, member.username, member.roleName, (member.roles||[]).map((role)=>role.name).join(' | '), member.isAdmin?'yes':'no', state.monitor.presence?.available ? monitorStatusLabel(statuses[id]||'offline',true) : 'unavailable', site?.lastSeen || '', stats.dailyMessages||0, stats.totalMessages||0, stats.totalSubmissions||0, stats.approvedSubmissions||0, stats.pendingSubmissions||0, stats.rejectedSubmissions||0, stats.totalPoints||0, stats.leaveRequests||0, stats.adminRequests||0]); });
+  members.forEach((member) => { const id=String(member.id); const stats=statsById.get(id)||{}; const site=siteById.get(id); rows.push([id, member.username, member.roleName, (member.roles||[]).map((role)=>role.name).join(' | '), member.isAdmin?'yes':'no', state.monitor.presence?.available ? monitorStatusLabel(statuses[id]||'unknown',true) : 'unavailable', site?.lastSeen || '', stats.dailyMessages||0, stats.totalMessages||0, stats.totalSubmissions||0, stats.approvedSubmissions||0, stats.pendingSubmissions||0, stats.rejectedSubmissions||0, stats.totalPoints||0, stats.leaveRequests||0, stats.adminRequests||0]); });
   const csv = '\uFEFF' + rows.map((row) => row.map(quote).join(',')).join('\r\n');
   const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
   const link = document.createElement('a'); link.href = url; link.download = `borg-management-monitor-${new Date().toISOString().slice(0,10)}.csv`; document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);

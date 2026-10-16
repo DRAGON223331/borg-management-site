@@ -47,6 +47,14 @@ const validPresenceStatuses = new Set(['online', 'idle', 'dnd', 'offline']);
 function normalizePresenceStatus(status) {
   return validPresenceStatuses.has(status) ? status : 'offline';
 }
+function getMemberPresenceStatus(guild, member) {
+  // A PresenceUpdate can arrive while a bulk member snapshot is being built.
+  // Prefer the member-attached value, then the live guild presence cache.
+  const memberStatus = member?.presence?.status;
+  if (validPresenceStatuses.has(memberStatus)) return memberStatus;
+  const cachedStatus = guild?.presences?.cache?.get(String(member?.id))?.status;
+  return normalizePresenceStatus(cachedStatus);
+}
 async function ensureDiscordPresenceSchema() {
   if (!presenceSchemaPromise) {
     presenceSchemaPromise = (async () => {
@@ -70,9 +78,11 @@ async function syncStaffPresenceSnapshot() {
     .map((member) => ({
       user_id: String(member.id),
       username: String(member.user.globalName || member.user.username || member.id).slice(0, 100),
-      status: normalizePresenceStatus(member.presence?.status),
+      status: getMemberPresenceStatus(guild, member),
     }));
-  await sql`DELETE FROM discord_presence WHERE guild_id = ${STAFF_GUILD_ID}`;
+  // Upsert the snapshot instead of deleting all rows first. Deleting creates a race
+  // where a fresh PresenceUpdate can be overwritten by an older snapshot. Members
+  // who leave are removed by the GuildMemberRemove handler below.
   if (rows.length) {
     await sql`INSERT INTO discord_presence(guild_id, user_id, username, status, updated_at)
       SELECT ${STAFF_GUILD_ID}, r.user_id, r.username, r.status, NOW()
@@ -82,7 +92,8 @@ async function syncStaffPresenceSnapshot() {
   await sql`INSERT INTO discord_presence_meta(guild_id, last_seen) VALUES (${STAFF_GUILD_ID}, NOW())
     ON CONFLICT (guild_id) DO UPDATE SET last_seen = NOW()`;
   presenceSnapshotReady = true;
-  console.log(`[presence] synced ${rows.length} staff members`);
+  const counts = rows.reduce((result, row) => { result[row.status] = (result[row.status] || 0) + 1; return result; }, {});
+  console.log(`[presence] synced ${rows.length} staff members: ${JSON.stringify(counts)}`);
 }
 async function saveDiscordPresence(presence) {
   if (!presence || String(presence.guild?.id || '') !== STAFF_GUILD_ID) return;
