@@ -373,12 +373,54 @@ function hasAdministratorPermission(guildObject) {
   try { return (BigInt(guildObject.permissions) & PermissionsBitField.Flags.Administrator) === PermissionsBitField.Flags.Administrator; }
   catch { return false; }
 }
-function requireAuth(req, res, next) {
+const liveMainGuildAccessCache = new Map();
+async function refreshSessionManagerAccess(sessionUser) {
+  if (!sessionUser) return null;
+  const userId = String(sessionUser.id || '');
+  if (MANAGER_IDS.has(userId)) return { ...sessionUser, isManager: true, isAdmin: false };
+  if (!(sessionUser.isAdmin || sessionUser.isManager)) return sessionUser;
+  const cached = liveMainGuildAccessCache.get(userId);
+  if (cached && cached.expiresAt > Date.now()) return { ...sessionUser, ...cached.value };
+  try {
+    const mainGuild = await client.guilds.fetch(MAIN_GUILD_ID);
+    const member = await mainGuild.members.fetch(userId);
+    const isAdmin = Boolean(member.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID) || member.permissions.has(PermissionsBitField.Flags.Administrator));
+    const value = { isAdmin, isManager: false, isPrimaryServerMember: true, permissionCheckError: false };
+    liveMainGuildAccessCache.set(userId, { value, expiresAt: Date.now() + 25_000 });
+    return { ...sessionUser, ...value };
+  } catch (error) {
+    console.warn('[manager permission refresh]', error.message);
+    const value = { isAdmin: false, isManager: false, isPrimaryServerMember: false, permissionCheckError: true };
+    liveMainGuildAccessCache.set(userId, { value, expiresAt: Date.now() + 8000 });
+    return { ...sessionUser, ...value };
+  }
+}
+async function refreshRequestSessionUser(req) {
+  const current = req.session?.user;
+  if (!current || !(current.isAdmin || current.isManager)) return current || null;
+  req.session.user = await refreshSessionManagerAccess(current);
+  return req.session.user;
+}
+async function isMainServerManager(userId) {
+  const id = String(userId || '');
+  if (MANAGER_IDS.has(id)) return true;
+  if (!id) return false;
+  try {
+    const guild = await client.guilds.fetch(MAIN_GUILD_ID);
+    const member = await guild.members.fetch(id);
+    return Boolean(member.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID) || member.permissions.has(PermissionsBitField.Flags.Administrator));
+  } catch (error) {
+    console.warn('[review permission check]', error.message);
+    return false;
+  }
+}
+async function requireAuth(req, res, next) {
   if (!req.session || !req.session.user) return res.status(401).json({ error: 'سجل دخولك بديسكورد أولًا.' });
+  await refreshRequestSessionUser(req);
   next();
 }
 function requireManager(req, res, next) {
-  if (!canManage(req.session.user)) return res.status(403).json({ error: 'الصلاحية دي للمسؤولين فقط.' });
+  if (!canManage(req.session.user)) return res.status(403).json({ error: 'الصلاحية دي لمسؤولي السيرفر الأساسي فقط.' });
   next();
 }
 function sameOrigin(req, res, next) {
@@ -628,13 +670,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return;
   }
   const reviewerId = interaction.user.id;
-  let authorized = MANAGER_IDS.has(reviewerId) || Boolean(interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator));
-  const roleIds = interaction.member?.roles?.cache ? [...interaction.member.roles.cache.keys()] : (Array.isArray(interaction.member?.roles) ? interaction.member.roles : []);
-  if (roleIds.includes(MANAGEMENT_STAFF_ROLE_ID) || roleIds.includes(MANAGEMENT_MAIN_ROLE_ID)) authorized = true;
-  if (!authorized) {
-    const mainMember = await client.guilds.fetch(MAIN_GUILD_ID).then((guild) => guild.members.fetch(reviewerId)).catch(() => null);
-    if (mainMember?.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID)) authorized = true;
-  }
+  const authorized = await isMainServerManager(reviewerId);
   if (!authorized) {
     try { await interaction.reply({ content: 'مراجعة طلبات الإجازة للمسؤولين فقط.', ephemeral: true }); } catch {}
     return;
@@ -670,13 +706,7 @@ async function handleSubmissionButton(interaction, submissionId, targetStatus) {
     return;
   }
   const reviewerId = interaction.user.id;
-  let authorized = MANAGER_IDS.has(reviewerId) || Boolean(interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator));
-  const roleIds = interaction.member?.roles?.cache ? [...interaction.member.roles.cache.keys()] : (Array.isArray(interaction.member?.roles) ? interaction.member.roles : []);
-  if (roleIds.includes(MANAGEMENT_STAFF_ROLE_ID) || roleIds.includes(MANAGEMENT_MAIN_ROLE_ID)) authorized = true;
-  if (!authorized) {
-    const mainMember = await client.guilds.fetch(MAIN_GUILD_ID).then((guild) => guild.members.fetch(reviewerId)).catch(() => null);
-    if (mainMember?.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID)) authorized = true;
-  }
+  const authorized = await isMainServerManager(reviewerId);
   if (!authorized) {
     try { await interaction.reply({ content: 'مراجعة تسليمات المهمات للمسؤولين فقط.', ephemeral: true }); } catch {}
     return;
@@ -840,7 +870,7 @@ async function getStaffRoster() {
       joinedAt: member.joinedAt ? new Date(member.joinedAt).toISOString() : null,
       roleColor: highest ? highest.hexColor : '#64748b',
       roles: assignedRoles.map((role) => ({ id: role.id, name: role.name, position: role.position, color: role.hexColor })),
-      isAdmin: MANAGER_IDS.has(member.id) || member.roles.cache.has(MANAGEMENT_STAFF_ROLE_ID) || Boolean(mainMember?.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID)) || member.permissions.has(PermissionsBitField.Flags.Administrator) || Boolean(mainMember?.permissions.has(PermissionsBitField.Flags.Administrator)),
+      isAdmin: MANAGER_IDS.has(member.id) || Boolean(mainMember?.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID)) || Boolean(mainMember?.permissions.has(PermissionsBitField.Flags.Administrator)),
     };
     if (!mainMember) {
       missingMainGuild.push(row);
@@ -919,8 +949,9 @@ app.get('/auth/callback', authLimiter, async (req, res) => {
       client.guilds.fetch(MAIN_GUILD_ID).then((guild) => guild.members.fetch(discordUser.id)).catch(() => null),
       client.guilds.fetch(STAFF_GUILD_ID).then((guild) => guild.members.fetch(discordUser.id)).catch(() => null),
     ]);
-    const hasManagementRole = Boolean(mainMemberForRoles?.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID) || staffMemberForRoles?.roles.cache.has(MANAGEMENT_STAFF_ROLE_ID));
-    const isAdmin = hasAdministratorPermission(staffGuild) || hasAdministratorPermission(mainGuild) || hasManagementRole;
+    const hasManagementRole = Boolean(mainMemberForRoles?.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID));
+    // الإدارة في الموقع تُحدد من السيرفر الأساسي فقط، وليس من رتب سيرفر الاستاف.
+    const isAdmin = hasAdministratorPermission(mainGuild) || hasManagementRole;
     if (!staffGuild && !isAdmin && !isManager) {
       return res.status(403).send(`الحساب ده مش عضو في سيرفر الاستاف، ومش معاه صلاحية Administrator في السيرفر الأساسي. ادخل سيرفر الاستاف (${STAFF_GUILD_ID}) ثم جرّب تاني.`);
     }
@@ -952,9 +983,11 @@ app.post('/auth/logout', requireAuth, (req, res) => {
   });
 });
 
-app.get('/api/health', (req, res) => res.json({ ok: true, botReady, botLastError: botReady ? '' : botLastError }));
-app.get('/api/me', (req, res) => {
+app.get('/api/health', (req, res) => res.json({ ok: true, botReady, botLastError: botReady ? '' : botLastError, databaseReady: Boolean(db), storageReady: fs.existsSync(UPLOAD_DIR) }));
+app.get('/api/me', async (req, res) => {
   if (!req.session.user) return res.json({ authenticated: false });
+  await refreshRequestSessionUser(req);
+  res.set('Cache-Control', 'no-store');
   res.json({ authenticated: true, user: { ...req.session.user, avatarUrl: profileAvatar(req.session.user), canManage: canManage(req.session.user) } });
 });
 
@@ -1001,6 +1034,63 @@ function rankOf(allStats, userId, field) {
   const index = rows.findIndex((row) => String(row.userId) === String(userId));
   return { rank: index >= 0 ? index + 1 : null, of: rows.length };
 }
+
+app.get('/api/admin-monitoring', requireAuth, requireManager, (req, res) => {
+  try {
+    const siteActivity = db.prepare('SELECT user_id AS userId, username, avatar_url AS avatarUrl, last_seen AS lastSeen FROM site_presence ORDER BY last_seen DESC LIMIT 1000').all();
+    const activeTasks = db.prepare('SELECT COUNT(*) AS count FROM tasks WHERE active = 1').get()?.count || 0;
+    const requiredActiveTasks = db.prepare('SELECT COUNT(*) AS count FROM tasks WHERE active = 1 AND required = 1').get()?.count || 0;
+    const submissions = db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN status IN ('submitted','pending') THEN 1 ELSE 0 END) AS pending, SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved, SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected FROM submissions").get() || {};
+    const pendingStaffRequests = db.prepare("SELECT COUNT(*) AS count FROM staff_requests WHERE status = 'pending'").get()?.count || 0;
+    const pendingLeaveRequests = db.prepare("SELECT COUNT(*) AS count FROM leave_requests WHERE status = 'pending'").get()?.count || 0;
+    const reviewDecisions24h = db.prepare('SELECT COUNT(*) AS count FROM submission_review_audit WHERE created_at >= ?').get(new Date(Date.now() - 86400000).toISOString())?.count || 0;
+    const totalReviewDecisions = db.prepare('SELECT COUNT(*) AS count FROM submission_review_audit').get()?.count || 0;
+    res.set('Cache-Control', 'no-store');
+    res.json({ generatedAt: nowIso(), siteActivity, metrics: { activeTasks: Number(activeTasks), requiredActiveTasks: Number(requiredActiveTasks), dueWithin24Hours: 0, totalSubmissions: Number(submissions.total || 0), pendingSubmissions: Number(submissions.pending || 0), approvedSubmissions: Number(submissions.approved || 0), rejectedSubmissions: Number(submissions.rejected || 0), pendingStaffRequests: Number(pendingStaffRequests), pendingLeaveRequests: Number(pendingLeaveRequests), reviewDecisions24h: Number(reviewDecisions24h), totalReviewDecisions: Number(totalReviewDecisions) } });
+  } catch (error) {
+    console.error('[admin monitoring]', error.message);
+    res.status(500).json({ error: 'تعذر تحميل تفاصيل مراقبة الإدارة.' });
+  }
+});
+
+app.get('/api/task-stats', requireAuth, requireManager, (req, res) => {
+  try {
+    const totals = db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved, SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected, SUM(CASE WHEN status IN ('pending','submitted') THEN 1 ELSE 0 END) AS pending FROM submissions").get();
+    const all = getAllStaffStats();
+    const mostActive = [...all].filter((x) => Number(x.totalSubmissions || 0) > 0).sort((a,b) => Number(b.totalSubmissions || 0) - Number(a.totalSubmissions || 0)).slice(0,10).map((x) => ({ userId:x.userId, username:x.username, submissions:Number(x.totalSubmissions || 0), approved:Number(x.approvedSubmissions || 0), rejected:Number(x.rejectedSubmissions || 0) }));
+    const inactive = [...all].filter((x) => !x.lastSeen).slice(0,50).map((x) => ({ userId:x.userId, username:x.username, submissions:Number(x.totalSubmissions || 0), lastSubmission:null }));
+    res.set('Cache-Control', 'no-store'); res.json({ totals: Object.fromEntries(Object.entries(totals || {}).map(([key,value]) => [key, Number(value || 0)])), mostActive, inactive, inactiveDays:14 });
+  } catch (error) { console.error('[task stats]', error.message); res.status(500).json({ error: 'تعذر تحميل إحصائيات التسليمات.' }); }
+});
+
+app.get('/api/submission-audit', requireAuth, requireManager, (req, res) => {
+  try {
+    const entries = db.prepare('SELECT id, submission_id AS submissionId, member_id AS memberId, member_name AS memberName, decision, reviewer_id AS reviewerId, reviewer_name AS reviewerName, reason, created_at AS createdAt FROM submission_review_audit ORDER BY id DESC LIMIT 100').all();
+    res.set('Cache-Control', 'no-store'); res.json({ entries });
+  } catch (error) { console.error('[submission audit]', error.message); res.status(500).json({ error: 'تعذر تحميل سجل قرارات التسليم.' }); }
+});
+
+app.get('/api/audit-log', requireAuth, requireManager, async (req, res) => {
+  try {
+    const guild = await client.guilds.fetch(MAIN_GUILD_ID);
+    const actionRaw = req.query.actionType ? Number(req.query.actionType) : undefined;
+    const userId = /^\d{15,22}$/.test(String(req.query.userId || '')) ? String(req.query.userId) : undefined;
+    const before = /^\d{15,22}$/.test(String(req.query.before || '')) ? String(req.query.before) : undefined;
+    const audit = await guild.fetchAuditLogs({ limit: 50, ...(Number.isInteger(actionRaw) && actionRaw > 0 ? { type: actionRaw } : {}), ...(userId ? { user: userId } : {}), ...(before ? { before } : {}) });
+    const labelByAction = { 1:['تعديل إعدادات السيرفر','edit'], 10:['إنشاء روم','create'], 11:['تعديل روم','edit'], 12:['حذف روم','danger'], 20:['طرد عضو','danger'], 22:['حظر عضو','danger'], 23:['فك حظر','create'], 24:['تعديل عضو','edit'], 25:['تعديل رتب عضو','edit'], 28:['إضافة بوت','create'], 30:['إنشاء رتبة','create'], 31:['تعديل رتبة','edit'], 32:['حذف رتبة','danger'], 40:['إنشاء دعوة','create'], 72:['حذف رسالة','danger'], 73:['حذف رسائل جماعي','danger'] };
+    const entries = [...audit.entries.values()].map((entry) => {
+      const [label, tone] = labelByAction[Number(entry.action)] || [`حدث #${Number(entry.action)}`, 'edit'];
+      const actor = entry.executor;
+      const target = entry.target;
+      return { id:String(entry.id), createdAt:entry.createdAt?.toISOString?.() || nowIso(), actionType:Number(entry.action), label, tone,
+        actor: actor ? { id:String(actor.id), username:actor.globalName || actor.username, avatarUrl:actor.displayAvatarURL?.({extension:'png',size:64}) || '' } : { id:'', username:'غير معروف', avatarUrl:'' },
+        targetId: target?.id ? String(target.id) : '', targetName: target?.displayName || target?.globalName || target?.username || '', targetAvatarUrl: target?.displayAvatarURL?.({extension:'png',size:64}) || '',
+        reason: cleanText(entry.reason || '',300), changes: (entry.changes || []).slice(0,8).map((change) => ({ key:cleanText(change.key,40), oldValue:cleanText(JSON.stringify(change.old ?? ''),200), newValue:cleanText(JSON.stringify(change.new ?? ''),200) })),
+        count:Number(entry.extra?.count || entry.extra?.count || 0), channelId:String(entry.extra?.channel?.id || '') };
+    });
+    res.set('Cache-Control','no-store'); res.json({ entries, hasMore: entries.length >= 50, nextBefore: entries.length ? entries[entries.length - 1].id : null });
+  } catch (error) { console.error('[audit log]', error.message); res.status(503).json({ error: 'تعذر تحميل سجل Discord. تأكد من صلاحية View Audit Log للبوت في السيرفر الأساسي.' }); }
+});
 
 app.get('/api/staff-stats', requireAuth, (req, res) => {
   try { res.set('Cache-Control', 'no-store'); res.json({ stats: getAllStaffStats(), dailyDate: getDailyStaffMessageStats().dailyDate }); }
@@ -1383,7 +1473,7 @@ app.post('/api/staff-requests/:id/:action', requireAuth, async (req, res) => {
 
 app.get('/api/discord-presence', requireAuth, async (req, res) => {
   try {
-    if (!botReady) return res.json({ available: false, statuses: {} });
+    if (!botReady) return res.json({ available: false, statuses: {}, lastSeenAt: null, ageSeconds: null });
     const guild = await client.guilds.fetch(STAFF_GUILD_ID);
     const members = await guild.members.fetch({ withPresences: true });
     const statuses = {};
@@ -1392,10 +1482,10 @@ app.get('/api/discord-presence', requireAuth, async (req, res) => {
       statuses[member.id] = member.presence?.status || 'offline';
     }
     res.set('Cache-Control', 'no-store');
-    res.json({ available: true, statuses });
+    res.json({ available: true, statuses, lastSeenAt: nowIso(), ageSeconds: 0 });
   } catch (error) {
     console.error('[discord presence]', error.message);
-    res.json({ available: false, statuses: {} });
+    res.json({ available: false, statuses: {}, lastSeenAt: null, ageSeconds: null });
   }
 });
 

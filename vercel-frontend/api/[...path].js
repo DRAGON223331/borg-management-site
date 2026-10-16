@@ -610,6 +610,35 @@ async function discordApi(route, options = {}) {
   }
   return payload;
 }
+
+// صلاحيات الإدارة تُراجع من السيرفر الأساسي باستمرار بدل الاعتماد على قيمة قديمة محفوظة في جلسة الدخول.
+async function refreshSessionPrivileges(user) {
+  if (!user) return null;
+  const userId = String(user.id || '');
+  if (MANAGER_IDS.has(userId)) return { ...user, isManager: true, isAdmin: false, permissionCheckError: false };
+  if (!(user.isAdmin || user.isManager)) return user;
+  try {
+    const roleList = await cached(`main-guild-roles:${MAIN_GUILD_ID}`, 120_000, async () => {
+      const roles = await discordApi(`/guilds/${MAIN_GUILD_ID}/roles`);
+      return (roles || []).map((role) => ({ id: String(role.id), permissions: String(role.permissions || '0') }));
+    });
+    const effective = await cached(`main-guild-member-authz:${userId}`, 25_000, async () => {
+      const member = await discordApi(`/guilds/${MAIN_GUILD_ID}/members/${userId}`);
+      const roleIds = (member.roles || []).map(String);
+      const isAdmin = roleIds.includes(MANAGEMENT_MAIN_ROLE_ID) || roleIds.some((roleId) => {
+        const role = roleList.find((item) => item.id === roleId);
+        try { return (BigInt(role?.permissions || '0') & 8n) === 8n; } catch { return false; }
+      });
+      return { isAdmin, isPrimaryServerMember: true };
+    });
+    return { ...user, isManager: false, isAdmin: Boolean(effective.isAdmin), isPrimaryServerMember: true, permissionCheckError: false };
+  } catch (error) {
+    // لو تعذر التحقق، نقفل صلاحيات الإدارة مؤقتًا بدل الوثوق في جلسة قديمة.
+    console.warn('[manager permission refresh]', cleanText(error?.message || error, 160));
+    return { ...user, isManager: false, isAdmin: false, isPrimaryServerMember: false, permissionCheckError: true };
+  }
+}
+
 const AUDIT_ACTIONS = {
   1: ['تعديل إعدادات السيرفر', 'edit'],
   10: ['إنشاء روم', 'create'], 11: ['تعديل روم', 'edit'], 12: ['حذف روم', 'danger'],
@@ -991,11 +1020,9 @@ async function handleAuth(parts, req, res) {
       const mainMemberData = memberLookups[0].status === 'fulfilled' ? memberLookups[0].value : null;
       const staffMemberData = memberLookups[1].status === 'fulfilled' ? memberLookups[1].value : null;
       // The configured management roles also grant management access, matching the standalone server.
-      const hasManagementRole = Boolean(
-        (mainMemberData?.roles || []).includes(MANAGEMENT_MAIN_ROLE_ID) ||
-        (staffMemberData?.roles || []).includes(MANAGEMENT_STAFF_ROLE_ID)
-      );
-      const isAdmin = hasAdmin(staffGuild) || hasAdmin(mainGuild) || hasManagementRole;
+      const hasManagementRole = Boolean((mainMemberData?.roles || []).includes(MANAGEMENT_MAIN_ROLE_ID));
+      // الإدارة وصلاحية التحكم تُحسبان من السيرفر الأساسي فقط، وليس من رتب سيرفر الاستاف.
+      const isAdmin = hasAdmin(mainGuild) || hasManagementRole;
       if (!staffGuild && !isAdmin && !isManager) {
         res.setHeader('Set-Cookie', clearCookie(OAUTH_COOKIE));
         return sendText(res, 403, `الحساب ده مش عضو في سيرفر الاستاف، ومش معاه صلاحية Administrator في السيرفر الأساسي. ادخل سيرفر الاستاف (${STAFF_GUILD_ID}) ثم جرّب تاني.`);
@@ -1172,7 +1199,7 @@ async function getRoster() {
       roleColor: highest ? toHex(highest.color) : '#64748b',
       roles: assigned.map((role) => ({ id: role.id, name: role.name, position: role.position, color: toHex(role.color) })),
       // Keep the roster and admin analytics aligned: explicit manager IDs or actual Administrator permission only.
-      isAdmin: MANAGER_IDS.has(member.user.id) || (member.roles || []).some((roleId) => { const role = staffRoleById.get(roleId); try { return (BigInt(role?.permissions || 0) & 8n) === 8n; } catch { return false; } }) || assigned.some((role) => { try { return (BigInt(role.permissions || 0) & 8n) === 8n; } catch { return false; } }),
+      isAdmin: MANAGER_IDS.has(member.user.id) || Boolean((mainMember?.roles || []).includes(MANAGEMENT_MAIN_ROLE_ID)) || assigned.some((role) => { try { return (BigInt(role.permissions || 0) & 8n) === 8n; } catch { return false; } }),
     };
     if (!mainMember) {
       missingMainGuild.push(row);
@@ -1227,7 +1254,8 @@ async function updateDiscordSubmissionReview(sub, status, reviewer, reason = '',
 
 async function handleApi(parts, req, res) {
   const route = parts[0] || '';
-  const user = getSessionUser(req);
+  let user = getSessionUser(req);
+  if (user && (user.isAdmin || user.isManager)) user = await refreshSessionPrivileges(user);
   if (req.method !== 'GET' && !ensureSameOrigin(req, res)) return;
   if (route === 'health' && req.method === 'GET') {
     // فحص البوت مرة كل دقيقة بس مهما كان عدد المستخدمين (كان بيعمل طلب Discord مع كل نبضة من كل مستخدم).
@@ -1418,6 +1446,28 @@ async function handleApi(parts, req, res) {
     await sql`INSERT INTO admin_notification_reads(user_id, last_read_id, updated_at) VALUES (${user.id}, (SELECT COALESCE(MAX(id), 0) FROM admin_notifications), NOW())
       ON CONFLICT (user_id) DO UPDATE SET last_read_id = GREATEST(admin_notification_reads.last_read_id, EXCLUDED.last_read_id), updated_at = NOW()`;
     return sendJson(res, 200, { ok: true });
+  }
+
+  if (route === 'admin-monitoring' && parts.length === 1 && req.method === 'GET') {
+    if (!canManage(user)) return sendError(res, 403, 'لوحة مراقبة الإدارة متاحة لمسؤولي السيرفر الأساسي فقط.');
+    if (rateLimited(req, res, user, 'admin-monitoring', 20)) return;
+    const [siteActivity, taskRows, submissionRows, staffRequestRows, leaveRequestRows, reviewRows] = await Promise.all([
+      sql`SELECT user_id AS "userId", username, avatar_url AS "avatarUrl", last_seen AS "lastSeen" FROM site_presence ORDER BY last_seen DESC LIMIT 1000`,
+      sql`SELECT COUNT(*) FILTER (WHERE active = TRUE AND (deadline_at IS NULL OR deadline_at > NOW()))::int AS "activeTasks", COUNT(*) FILTER (WHERE active = TRUE AND required = TRUE AND (deadline_at IS NULL OR deadline_at > NOW()))::int AS "requiredActiveTasks", COUNT(*) FILTER (WHERE active = TRUE AND deadline_at IS NOT NULL AND deadline_at > NOW() AND deadline_at <= NOW() + INTERVAL '24 hours')::int AS "dueWithin24Hours" FROM tasks`,
+      sql`SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE status IN ('submitted','pending'))::int AS pending, COUNT(*) FILTER (WHERE status = 'approved')::int AS approved, COUNT(*) FILTER (WHERE status = 'rejected')::int AS rejected FROM submissions`,
+      sql`SELECT COUNT(*) FILTER (WHERE status = 'pending')::int AS pending FROM staff_requests`,
+      sql`SELECT COUNT(*) FILTER (WHERE status = 'pending')::int AS pending FROM leave_requests`,
+      sql`SELECT COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours')::int AS recent, COUNT(*)::int AS total FROM submission_review_audit`,
+    ]);
+    return sendJson(res, 200, {
+      generatedAt: new Date().toISOString(),
+      siteActivity: siteActivity.map((row) => ({ userId: String(row.userId), username: row.username, avatarUrl: row.avatarUrl, lastSeen: row.lastSeen })),
+      metrics: {
+        activeTasks: Number(taskRows[0]?.activeTasks || 0), requiredActiveTasks: Number(taskRows[0]?.requiredActiveTasks || 0), dueWithin24Hours: Number(taskRows[0]?.dueWithin24Hours || 0),
+        totalSubmissions: Number(submissionRows[0]?.total || 0), pendingSubmissions: Number(submissionRows[0]?.pending || 0), approvedSubmissions: Number(submissionRows[0]?.approved || 0), rejectedSubmissions: Number(submissionRows[0]?.rejected || 0),
+        pendingStaffRequests: Number(staffRequestRows[0]?.pending || 0), pendingLeaveRequests: Number(leaveRequestRows[0]?.pending || 0), reviewDecisions24h: Number(reviewRows[0]?.recent || 0), totalReviewDecisions: Number(reviewRows[0]?.total || 0),
+      },
+    });
   }
 
   if (route === 'staff-stats' && parts.length === 1 && req.method === 'GET') {
@@ -2116,13 +2166,13 @@ async function handleApi(parts, req, res) {
       const lastSeen = metaRows.length ? new Date(metaRows[0].lastSeen).getTime() : 0;
       // A recent worker heartbeat confirms this is live Gateway data, not a stale snapshot.
       if (!lastSeen || !Number.isFinite(lastSeen) || Date.now() - lastSeen > 180_000) {
-        return { available: false, statuses: {} };
+        return { available: false, statuses: {}, lastSeenAt: metaRows.length ? new Date(lastSeen).toISOString() : null, ageSeconds: lastSeen ? Math.max(0, Math.floor((Date.now() - lastSeen) / 1000)) : null };
       }
       const rows = await sql`SELECT user_id AS "userId", status FROM discord_presence WHERE guild_id = ${STAFF_GUILD_ID}`;
       const validStatuses = new Set(['online', 'idle', 'dnd', 'offline']);
       const statuses = {};
       for (const row of rows) statuses[String(row.userId)] = validStatuses.has(row.status) ? row.status : 'offline';
-      return { available: true, statuses };
+      return { available: true, statuses, lastSeenAt: new Date(lastSeen).toISOString(), ageSeconds: Math.max(0, Math.floor((Date.now() - lastSeen) / 1000)) };
     });
     return sendJson(res, 200, result);
   }

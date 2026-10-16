@@ -104,23 +104,18 @@ client.on(Events.GuildMemberRemove, async (member) => {
 });
 
 function isReviewManager(interaction) {
-  const member = interaction.member;
-  const userId = String(interaction.user?.id || '');
-  if (MANAGER_IDS.has(userId)) return true;
-  if (member?.permissions?.has?.('Administrator')) return true;
-  const roleIds = Array.isArray(member?.roles) ? member.roles.map((role) => typeof role === 'string' ? role : role.id) : [];
-  return roleIds.includes(MANAGEMENT_MAIN_ROLE_ID) || roleIds.includes(MANAGEMENT_STAFF_ROLE_ID);
+  // IDs in MANAGER_IDS are explicit overrides; all other grants are checked against MAIN_GUILD_ID.
+  return MANAGER_IDS.has(String(interaction.user?.id || ''));
 }
 async function isReviewManagerAnywhere(interaction) {
   if (isReviewManager(interaction)) return true;
   const userId = String(interaction.user?.id || '');
-  for (const guildId of [MAIN_GUILD_ID, STAFF_GUILD_ID]) {
-    try {
-      const guild = await client.guilds.fetch(guildId);
-      const member = await guild.members.fetch(userId);
-      if (member.permissions.has('Administrator') || member.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID) || member.roles.cache.has(MANAGEMENT_STAFF_ROLE_ID)) return true;
-    } catch { /* البوت قد لا يكون عضوًا في السيرفر أو لا يملك صلاحية جلب الأعضاء */ }
-  }
+  if (!userId) return false;
+  try {
+    const guild = await client.guilds.fetch(MAIN_GUILD_ID);
+    const member = await guild.members.fetch(userId);
+    return Boolean(member.permissions.has('Administrator') || member.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID));
+  } catch { /* تعذر التحقق من عضوية وصلاحيات السيرفر الأساسي: رفض مغلق */ }
   return false;
 }
 async function getSubmissionMessage(submission) {

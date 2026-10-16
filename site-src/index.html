@@ -78,6 +78,7 @@
             <button class="nav-menu-item" type="button" role="menuitem" data-page="leaderboard"><span>★</span><span>ليدر بورد</span></button>
             <button class="nav-menu-item" type="button" role="menuitem" data-page="staff-chat"><span>☷</span><span>شات الاستاف</span></button>
             <div class="nav-menu-heading manager-only hidden">إدارة النظام</div>
+            <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="admin-monitor"><span>◉</span><span>مراقبة الإدارة</span></button>
             <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="management-chat"><span>♧</span><span>شات المسؤولين</span></button>
             <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="audit-log"><span>≣</span><span>سجل السيرفر</span></button>
           </div>
@@ -262,6 +263,52 @@
           </div></div>
           <div id="lb-podium" class="lb-podium"></div>
           <div id="lb-list" class="lb-list"><div class="loading-state">جاري تحميل الترتيب...</div></div>
+        </section>
+
+
+        <section id="page-admin-monitor" class="page manager-only hidden">
+          <div class="page-heading monitor-page-heading">
+            <div><div class="eyebrow">BORG MANAGEMENT INTELLIGENCE</div><h1>لوحة مراقبة الإدارة</h1><p>متابعة تفصيلية للاستاف، الرتب من السيرفر الأساسي، حالة ديسكورد والموقع، المهمات، الطلبات، وسجل النشاط.</p><small id="monitor-last-updated" class="monitor-updated">لسه ما تمش تحديث البيانات.</small></div>
+            <div class="monitor-heading-actions"><span class="page-heading-badge"><span class="status-dot"></span> للمسؤولين فقط</span><button id="monitor-refresh" type="button" class="primary-button compact">تحديث كل البيانات ↻</button><button id="monitor-export" type="button" class="secondary-button compact">تصدير تقرير CSV ↓</button></div>
+          </div>
+          <div id="monitor-alerts" class="monitor-alerts" aria-live="polite"></div>
+          <div id="monitor-kpis" class="monitor-kpis"><div class="loading-state">جاري جمع بيانات المراقبة...</div></div>
+          <section class="monitor-section">
+            <div class="section-title-row"><div><span class="tiny-label">SYSTEM HEALTH</span><h2>صحة الخدمات والاتصال</h2><p class="muted small-copy">حالة الخدمات مبنية على آخر فحص فعلي، مش على شكل الواجهة فقط.</p></div></div>
+            <div id="monitor-services" class="monitor-services"><div class="loading-state">جاري فحص الخدمات...</div></div>
+          </section>
+          <section class="monitor-section">
+            <div class="section-title-row"><div><span class="tiny-label">DISCORD PRESENCE</span><h2>حالة أعضاء الاستاف</h2><p id="monitor-presence-note" class="muted small-copy">حالة Discord ووقت تحديث الـ worker.</p></div><button id="monitor-open-audit" type="button" class="secondary-button compact">فتح سجل السيرفر ↗</button></div>
+            <div id="monitor-presence-stats" class="monitor-presence-stats"><div class="loading-state">جاري تجميع الحالات...</div></div>
+            <div id="monitor-top-active" class="monitor-top-active"><div class="loading-state">جاري تحميل النشاط...</div></div>
+          </section>
+          <section class="monitor-section">
+            <div class="section-title-row"><div><span class="tiny-label">STAFF DIRECTORY / MAIN SERVER ROLES</span><h2>تفاصيل كل عضو</h2><p class="muted small-copy">الرتبة المعروضة من السيرفر الأساسي، وحالة Discord منفصلة عن كون العضو فاتح الموقع.</p></div><span id="monitor-member-count" class="count-pill">—</span></div>
+            <div class="monitor-table-tools"><input id="monitor-member-search" type="search" placeholder="ابحث بالاسم أو Discord ID أو الرتبة..." aria-label="بحث في أعضاء المراقبة"><select id="monitor-member-filter" aria-label="فلترة الأعضاء"><option value="all">كل الأعضاء</option><option value="admins">الإدارة فقط</option><option value="discord-online">متصلون على Discord</option><option value="site-online">فاتحون الموقع</option><option value="not-main">مش في السيرفر الأساسي</option><option value="no-role">بدون رتبة أساسية</option></select><select id="monitor-role-filter" aria-label="فلترة حسب الرتبة الأساسية"><option value="">كل الرتب الأساسية</option></select><button id="monitor-member-search-clear" type="button" class="text-button">مسح الفلاتر</button></div>
+            <div class="monitor-table-wrap"><table class="monitor-table"><thead><tr><th>العضو / ID</th><th>الرتبة الأساسية</th><th>Discord</th><th>الموقع</th><th>رسائل اليوم</th><th>إجمالي الرسائل</th><th>التسليمات</th><th>نقاط</th><th>طلبات</th><th>آخر ظهور بالموقع</th></tr></thead><tbody id="monitor-members-body"><tr><td colspan="10" class="loading-state">جاري تحميل الأعضاء...</td></tr></tbody></table></div>
+            <div class="monitor-table-footer"><span id="monitor-members-shown" class="muted small-copy">—</span><button id="monitor-members-more" type="button" class="secondary-button compact hidden">عرض أعضاء أكتر ↓</button></div>
+          </section>
+          <div class="monitor-two-columns">
+            <section class="monitor-section">
+              <div class="section-title-row"><div><span class="tiny-label">TASK DELIVERY</span><h2>حالة المهمات والتسليمات</h2></div><button id="monitor-open-tasks" type="button" class="text-button">فتح المهمات ↗</button></div>
+              <div id="monitor-task-stats" class="monitor-task-stats"><div class="loading-state">جاري تحميل التسليمات...</div></div>
+              <div id="monitor-task-bars" class="monitor-task-bars"></div>
+            </section>
+            <section class="monitor-section">
+              <div class="section-title-row"><div><span class="tiny-label">ADMIN REQUESTS</span><h2>الطلبات التي تحتاج مراجعة</h2></div></div>
+              <div id="monitor-pending-requests" class="monitor-events"><div class="loading-state">جاري تحميل الطلبات...</div></div>
+            </section>
+          </div>
+          <div class="monitor-two-columns">
+            <section class="monitor-section">
+              <div class="section-title-row"><div><span class="tiny-label">MAIN SERVER AUDIT</span><h2>أحدث إجراءات السيرفر</h2></div><button type="button" class="text-button" id="monitor-audit-refresh">تحديث السجل ↻</button></div>
+              <div id="monitor-audit-events" class="monitor-events"><div class="loading-state">جاري تحميل سجل Discord...</div></div>
+            </section>
+            <section class="monitor-section">
+              <div class="section-title-row"><div><span class="tiny-label">SUBMISSION REVIEW AUDIT</span><h2>أحدث قرارات الإدارة</h2><p class="muted small-copy">موافقات ورفض وإعادة فتح التسليمات المسجلة في الموقع.</p></div></div>
+              <div id="monitor-review-events" class="monitor-events"><div class="loading-state">جاري تحميل قرارات الإدارة...</div></div>
+            </section>
+          </div>
         </section>
 
         <section id="page-audit-log" class="page">

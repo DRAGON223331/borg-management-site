@@ -15,6 +15,7 @@ const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
 const MESSAGE_COUNT_CHANNEL_ID = (process.env.MESSAGE_COUNT_CHANNEL_ID || '1552049641913065552').trim();
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY || '';
+let primaryGuildAuthCache = { expiresAt: 0, ownerId: '', adminRoleIds: [] };
 const { buildSubmissionNotifications, mergeSubmissionDecisionEmbed } = require('../lib/submission-notifications.js');
 const { loadSubmissionEvidence, appendEvidenceLinks } = require('../lib/submission-evidence.js');
 const { sendMissingTasksReport } = require('../lib/missing-tasks-report.js');
@@ -146,18 +147,42 @@ function buildNoticeEmbed(item, status, reviewerId, note) {
 function isAdministrator(permissionBits) {
   try { return (BigInt(permissionBits || '0') & 8n) === 8n; } catch { return false; }
 }
-// صلاحية /csv: مسؤول معرّف في MANAGER_IDS، أو Administrator / رتبة الإدارة — ومن داخل السيرفر الأساسي أو سيرفر الاستاف فقط.
+async function getPrimaryGuildAuthData() {
+  if (primaryGuildAuthCache.expiresAt > Date.now()) return primaryGuildAuthCache;
+  const [roles, guild] = await Promise.all([
+    discordApi(`/guilds/${MAIN_GUILD_ID}/roles`),
+    discordApi(`/guilds/${MAIN_GUILD_ID}`),
+  ]);
+  primaryGuildAuthCache = {
+    expiresAt: Date.now() + 60_000,
+    ownerId: String(guild?.owner_id || ''),
+    adminRoleIds: (roles || []).filter((role) => isAdministrator(role.permissions)).map((role) => String(role.id)),
+  };
+  return primaryGuildAuthCache;
+}
+async function isMainGuildManager(userId) {
+  const id = String(userId || '');
+  if (MANAGER_IDS.has(id)) return true;
+  if (!id || !BOT_TOKEN) return false;
+  try {
+    const [member, auth] = await Promise.all([
+      discordApi(`/guilds/${MAIN_GUILD_ID}/members/${id}`),
+      getPrimaryGuildAuthData(),
+    ]);
+    if (auth.ownerId === id) return true;
+    const assigned = new Set((member.roles || []).map(String));
+    return assigned.has(MANAGEMENT_MAIN_ROLE_ID) || auth.adminRoleIds.some((roleId) => assigned.has(roleId));
+  } catch (error) {
+    console.warn('[interaction primary-guild authorization]', cleanText(error?.message || error, 160));
+    return false;
+  }
+}
+// حتى لو تم الضغط من سيرفر الاستاف، القرار مبني على صلاحيات السيرفر الأساسي فقط.
 async function isCsvAuthorized(interaction) {
   const userId = String(interaction.member?.user?.id || interaction.user?.id || '');
-  if (!userId) return false;
-  if (MANAGER_IDS.has(userId)) return true;
   const guildId = String(interaction.guild_id || '');
   if (guildId !== MAIN_GUILD_ID && guildId !== STAFF_GUILD_ID) return false;
-  const roles = Array.isArray(interaction.member?.roles) ? interaction.member.roles.map(String) : [];
-  if (isAdministrator(interaction.member?.permissions) || roles.includes(MANAGEMENT_MAIN_ROLE_ID) || roles.includes(MANAGEMENT_STAFF_ROLE_ID)) return true;
-  if (!BOT_TOKEN) return false;
-  const lookups = await Promise.allSettled([MAIN_GUILD_ID, STAFF_GUILD_ID].map((id) => discordApi(`/guilds/${id}/members/${userId}`)));
-  return lookups.some((result) => result.status === 'fulfilled' && (result.value?.roles || []).some((roleId) => roleId === MANAGEMENT_MAIN_ROLE_ID || roleId === MANAGEMENT_STAFF_ROLE_ID));
+  return isMainGuildManager(userId);
 }
 async function handleCsvCommand(interaction, res) {
   if (!(await isCsvAuthorized(interaction))) return send(res, { type: 4, data: { content: 'أمر /csv متاح لمسؤولي الإدارة فقط.', flags: 64 } });
@@ -247,22 +272,17 @@ async function handleCommand(interaction, res) {
     await fetch(`${DISCORD_API}/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
   } catch (error) { console.error('[points command followup]', cleanText(error?.message || error, 160)); }
 }
-function reviewAuthorized(interaction) {
+async function reviewAuthorized(interaction) {
   const reviewerId = String(interaction.member?.user?.id || interaction.user?.id || '');
-  const roles = Array.isArray(interaction.member?.roles) ? interaction.member.roles.map(String) : [];
-  return MANAGER_IDS.has(reviewerId) || isAdministrator(interaction.member?.permissions) || roles.includes(MANAGEMENT_MAIN_ROLE_ID) || roles.includes(MANAGEMENT_STAFF_ROLE_ID);
+  return isMainGuildManager(reviewerId);
 }
 async function handleSubmissionReview(interaction, res, { action, submissionId, isModal }) {
   if (interaction.channel_id && String(interaction.channel_id) !== SUBMISSION_REVIEW_CHANNEL_ID) {
     return send(res, { type: 4, data: { content: 'أزرار مراجعة التسليمات شغالة في روم مراجعة المهمات فقط.', flags: 64 } });
   }
   const reviewerId = String(interaction.member?.user?.id || interaction.user?.id || '');
-  let authorized = reviewAuthorized(interaction);
-  if (!authorized && BOT_TOKEN) {
-    const lookups = await Promise.allSettled([MAIN_GUILD_ID, STAFF_GUILD_ID].map((guildId) => discordApi(`/guilds/${guildId}/members/${reviewerId}`)));
-    authorized = lookups.some((result) => result.status === 'fulfilled' && (result.value?.roles || []).some((roleId) => roleId === MANAGEMENT_MAIN_ROLE_ID || roleId === MANAGEMENT_STAFF_ROLE_ID));
-  }
-  if (!authorized) return send(res, { type: 4, data: { content: 'مراجعة تسليمات المهمات للمسؤولين فقط.', flags: 64 } });
+  const authorized = await reviewAuthorized(interaction);
+  if (!authorized) return send(res, { type: 4, data: { content: 'مراجعة تسليمات المهمات للمسؤولين في السيرفر الأساسي فقط.', flags: 64 } });
 
   // Same behavior as the leave buttons: the reject button opens an optional-reason modal.
   if (!isModal && action === 'reject') {
@@ -481,15 +501,8 @@ async function handler(req, res) {
   if (!match) return send(res, { type: 4, data: { content: 'الزر ده مش مدعوم.', flags: 64 } });
   if (String(interaction.channel_id || '') !== LEAVE_REQUEST_CHANNEL_ID) return send(res, { type: 4, data: { content: 'الأزرار دي شغالة في روم طلبات الإجازات فقط.', flags: 64 } });
   const reviewerId = String(interaction.member?.user?.id || interaction.user?.id || '');
-  const roles = Array.isArray(interaction.member?.roles) ? interaction.member.roles.map(String) : [];
-  let authorized = MANAGER_IDS.has(reviewerId) || isAdministrator(interaction.member?.permissions) || roles.includes(MANAGEMENT_MAIN_ROLE_ID) || roles.includes(MANAGEMENT_STAFF_ROLE_ID);
-  if (!authorized && BOT_TOKEN) {
-    const guildIds = [process.env.MAIN_GUILD_ID || '883871561474539630', process.env.STAFF_GUILD_ID || '1556647204255568063'];
-    const roleIds = [MANAGEMENT_MAIN_ROLE_ID, MANAGEMENT_STAFF_ROLE_ID];
-    const lookups = await Promise.allSettled(guildIds.map((guildId) => discordApi(`/guilds/${guildId}/members/${reviewerId}`)));
-    authorized = lookups.some((result) => result.status === 'fulfilled' && (result.value?.roles || []).some((roleId) => roleIds.includes(roleId)));
-  }
-  if (!authorized) return send(res, { type: 4, data: { content: 'مراجعة طلبات الإجازة للمسؤولين فقط.', flags: 64 } });
+  const authorized = await isMainGuildManager(reviewerId);
+  if (!authorized) return send(res, { type: 4, data: { content: 'مراجعة طلبات الإجازة للمسؤولين في السيرفر الأساسي فقط.', flags: 64 } });
   const requestId = Number(match[2]);
 
   // Reject button: open a small form so the reviewer can (optionally) write the reason.

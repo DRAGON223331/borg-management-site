@@ -16,12 +16,14 @@ const state = {
   onlineUserIds: new Set(),
   discordStatuses: {},
   discordPresenceAvailable: false,
+  discordPresenceMeta: { lastSeenAt: null, ageSeconds: null },
   dailyMessageStats: { dailyStats: [], dailyTotal: 0, dailyDate: null },
   staffStats: [],
   notif: { items: [], unread: 0, maxId: null, open: false },
   lbMetric: 'points',
   audit: { entries: [], nextBefore: null, hasMore: false, loading: false },
   activeStaffProfileId: null,
+  monitor: { health: null, summary: null, roster: null, staffStats: [], presence: null, taskStats: null, audit: [], reviewAudit: [], leaveRequests: [], staffRequests: [], loadErrors: [], updatedAt: null, memberLimit: 100 },
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -155,6 +157,10 @@ async function initialize() {
       if (!document.hidden && $('.page.active-page')?.id === 'page-tasks') loadTasks();
     }, 60000);
     setInterval(() => { if (!document.hidden) loadNotifications(); }, 60000);
+    // Refresh the full monitoring board only while it's visible; avoid background API churn.
+    setInterval(() => {
+      if (!document.hidden && state.user?.canManage && $('.page.active-page')?.id === 'page-admin-monitor') loadAdminMonitoring();
+    }, 120000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) loadNotifications(); });
   } catch (error) {
     showFatal(error.message || 'حصل خطأ أثناء تحميل الموقع.');
@@ -209,6 +215,16 @@ function wireNavigation() {
   $('#audit-action')?.addEventListener('change', () => loadAudit(true));
   $('#audit-user')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); loadAudit(true); } });
   $('#audit-search')?.addEventListener('input', () => renderAudit());
+  $('#monitor-refresh')?.addEventListener('click', () => loadAdminMonitoring());
+  $('#monitor-audit-refresh')?.addEventListener('click', () => loadAdminMonitoring({ auditOnly: true }));
+  $('#monitor-open-audit')?.addEventListener('click', () => openPage('audit-log'));
+  $('#monitor-open-tasks')?.addEventListener('click', () => openPage('tasks'));
+  $('#monitor-member-search')?.addEventListener('input', () => renderMonitorMembers(true));
+  $('#monitor-member-filter')?.addEventListener('change', () => renderMonitorMembers(true));
+  $('#monitor-role-filter')?.addEventListener('change', () => renderMonitorMembers(true));
+  $('#monitor-member-search-clear')?.addEventListener('click', () => { if ($('#monitor-member-search')) $('#monitor-member-search').value = ''; if ($('#monitor-member-filter')) $('#monitor-member-filter').value = 'all'; if ($('#monitor-role-filter')) $('#monitor-role-filter').value = ''; renderMonitorMembers(true); });
+  $('#monitor-members-more')?.addEventListener('click', () => { state.monitor.memberLimit += 100; renderMonitorMembers(false); });
+  $('#monitor-export')?.addEventListener('click', exportAdminMonitoringCsv);
   $$('[data-go]').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.go)));
   $('#logout-btn').addEventListener('click', async () => {
     try { await api('/api/auth/logout', { method: 'POST' }); }
@@ -219,6 +235,7 @@ function wireNavigation() {
 function openPage(page) {
   if (page === 'management-chat' && !state.user?.canManage) return;
   if (page === 'audit-log' && !state.user?.canManage) return;
+  if (page === 'admin-monitor' && !state.user?.canManage) return;
   if (page === 'staff-profile' && !state.activeStaffProfileId) return;
   $$('.page').forEach((element) => element.classList.remove('active-page'));
   $(`#page-${page}`)?.classList.add('active-page');
@@ -235,6 +252,7 @@ function openPage(page) {
   if (page === 'personal') loadPersonal();
   if (page === 'leaderboard') { renderLeaderboard(); loadStaffStats(); }
   if (page === 'audit-log') loadAudit(true);
+  if (page === 'admin-monitor') loadAdminMonitoring();
   if (page === 'tasks') {
     loadTasks();
     loadSubmissions();
@@ -703,7 +721,8 @@ async function refreshPresence() {
     const discord = await api('/api/discord-presence');
     state.discordStatuses = discord.statuses || {};
     state.discordPresenceAvailable = Boolean(discord.available);
-  } catch { state.discordPresenceAvailable = false; }
+    state.discordPresenceMeta = { lastSeenAt: discord.lastSeenAt || null, ageSeconds: Number.isFinite(Number(discord.ageSeconds)) ? Number(discord.ageSeconds) : null };
+  } catch { state.discordPresenceAvailable = false; state.discordPresenceMeta = { lastSeenAt: null, ageSeconds: null }; }
   renderRoster();
   renderAdminOverview();
   const footer = $('.roster-footer');
@@ -872,6 +891,255 @@ async function loadStaffProfile(userId, providedMember = null) {
     $('#staff-profile-content').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
   }
 }
+
+function monitorFormatNumber(value) { return Number(value || 0).toLocaleString('en-US'); }
+function monitorAgo(value) {
+  if (!value) return 'لا يوجد سجل سابق';
+  const ts = new Date(value).getTime();
+  if (!Number.isFinite(ts)) return 'وقت غير معروف';
+  const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (seconds < 60) return `منذ ${seconds} ث`;
+  if (seconds < 3600) return `منذ ${Math.floor(seconds / 60)} د`;
+  if (seconds < 86400) return `منذ ${Math.floor(seconds / 3600)} س`;
+  return `منذ ${Math.floor(seconds / 86400)} يوم`;
+}
+function monitorStatusLabel(status, available = true) {
+  if (!available) return 'غير متاح';
+  return ({ online: 'أونلاين', idle: 'خامل', dnd: 'عدم الإزعاج', offline: 'أوفلاين / مخفي' })[status] || 'أوفلاين / مخفي';
+}
+function monitorSetStatusCard(title, detail, stateName, icon) {
+  const labels = { ok: 'سليم', warn: 'تحذير', bad: 'متعطل', unknown: 'غير معروف' };
+  return `<article class="monitor-service-card state-${stateName}"><span class="monitor-service-icon">${icon}</span><div class="monitor-service-copy"><b>${escapeHtml(title)}</b><small>${escapeHtml(detail || 'لا توجد تفاصيل')}</small></div><span class="monitor-service-status">${labels[stateName] || 'غير معروف'}</span></article>`;
+}
+async function loadAdminMonitoring(options = {}) {
+  if (!state.user?.canManage) return;
+  const button = $('#monitor-refresh');
+  if (button && !options.auditOnly) setButtonLoading(button, true, 'جاري التحديث...');
+  const boxIds = ['monitor-kpis', 'monitor-services', 'monitor-presence-stats', 'monitor-members-body', 'monitor-task-stats', 'monitor-pending-requests', 'monitor-audit-events', 'monitor-review-events'];
+  if (!options.auditOnly && !state.monitor.updatedAt) boxIds.forEach((id) => {
+    const node = $(`#${id}`); if (!node) return;
+    node.innerHTML = node.tagName === 'TBODY'
+      ? '<tr><td colspan="10" class="loading-state">جاري تحميل بيانات المراقبة...</td></tr>'
+      : '<div class="loading-state">جاري تحميل بيانات المراقبة...</div>';
+  });
+  const jobs = options.auditOnly
+    ? { audit: () => api('/api/audit-log'), reviewAudit: () => api('/api/submission-audit') }
+    : {
+        health: () => api('/api/health'), summary: () => api('/api/admin-monitoring'), roster: () => api('/api/roster'),
+        stats: () => api('/api/staff-stats'), presence: () => api('/api/discord-presence'), taskStats: () => api('/api/task-stats'),
+        audit: () => api('/api/audit-log'), reviewAudit: () => api('/api/submission-audit'),
+        leaveRequests: () => api('/api/leave-requests'), staffRequests: () => api('/api/staff-requests'),
+      };
+  try {
+    const keys = Object.keys(jobs);
+    const results = await Promise.allSettled(keys.map((key) => jobs[key]()));
+    const failures = [];
+    results.forEach((result, index) => {
+      const key = keys[index];
+      if (result.status === 'rejected') {
+        failures.push(`${key}: ${result.reason?.message || 'تعذر التحميل'}`);
+        // Remove the failed source's previous snapshot so stale data isn't presented as freshly checked.
+        if (key === 'stats') state.monitor.staffStats = [];
+        else if (key === 'audit') state.monitor.audit = [];
+        else if (key === 'reviewAudit') state.monitor.reviewAudit = [];
+        else if (key === 'leaveRequests') state.monitor.leaveRequests = [];
+        else if (key === 'staffRequests') state.monitor.staffRequests = [];
+        else state.monitor[key] = null;
+        return;
+      }
+      const data = result.value;
+      if (key === 'stats') state.monitor.staffStats = Array.isArray(data.stats) ? data.stats : [];
+      else if (key === 'audit') state.monitor.audit = Array.isArray(data.entries) ? data.entries : [];
+      else if (key === 'reviewAudit') state.monitor.reviewAudit = Array.isArray(data.entries) ? data.entries : [];
+      else if (key === 'leaveRequests') state.monitor.leaveRequests = Array.isArray(data.requests) ? data.requests : [];
+      else if (key === 'staffRequests') state.monitor.staffRequests = Array.isArray(data.requests) ? data.requests : [];
+      else state.monitor[key] = data;
+    });
+    state.monitor.loadErrors = options.auditOnly
+      ? [...state.monitor.loadErrors.filter((item) => !item.startsWith('audit:') && !item.startsWith('reviewAudit:')), ...failures]
+      : failures;
+    if (options.auditOnly) state.monitor.auditUpdatedAt = new Date().toISOString();
+    else state.monitor.updatedAt = new Date().toISOString();
+    renderAdminMonitoring(state.monitor.loadErrors);
+    if (failures.length) showToast(`تم التحديث جزئيًا؛ تعذر تحميل ${failures.length} من المصادر.`, 'info');
+    else if (!options.auditOnly) showToast('تم تحديث لوحة مراقبة الإدارة.', 'success');
+  } catch (error) {
+    showToast(error.message || 'تعذر تحديث لوحة المراقبة.', 'error');
+  } finally { if (button && !options.auditOnly) setButtonLoading(button, false); }
+}
+function renderAdminMonitoring(failures = []) {
+  const monitor = state.monitor;
+  const roster = monitor.roster || state.roster || { groups: [], memberCount: 0 };
+  const members = (roster.groups || []).flatMap((group) => (group.members || []).map((member) => ({ ...member, sourceRoleName: member.roleName || group.name })));
+  const statsById = new Map((monitor.staffStats || []).map((item) => [String(item.userId), item]));
+  const siteRows = monitor.summary?.siteActivity || [];
+  const siteById = new Map(siteRows.map((item) => [String(item.userId), item]));
+  // لا نستعمل Presence قديمة من حالة الواجهة كأنها فحص جديد، ولا نحوّل فشل المصدر إلى Offline.
+  const discord = monitor.presence || { available: false, statuses: {} };
+  const statuses = discord.available ? (discord.statuses || {}) : {};
+  const statCounts = { online: null, idle: null, dnd: null, offline: null };
+  if (discord.available) {
+    Object.keys(statCounts).forEach((key) => { statCounts[key] = 0; });
+    members.forEach((member) => { const status = statuses[String(member.id)] || 'offline'; statCounts[status] = (statCounts[status] || 0) + 1; });
+  }
+  const hasSummary = Boolean(monitor.summary?.generatedAt);
+  const webOnline = hasSummary ? siteRows.filter((item) => Number.isFinite(new Date(item.lastSeen).getTime()) && Date.now() - new Date(item.lastSeen).getTime() < 150000) : null;
+  const admins = members.filter((member) => member.isAdmin);
+  const metrics = monitor.summary?.metrics || {};
+  const totalStats = (monitor.taskStats?.totals || {});
+  const cards = [
+    ['إجمالي أعضاء الاستاف', roster.memberCount ?? members.length, 'حسابًا في دليل الاستاف', '◉'],
+    ['مسؤولو الإدارة', admins.length, 'محددون حسب صلاحيات السيرفر الأساسي', '♜'],
+    ['Online على Discord', statCounts.online ?? '—', discord.available ? 'حالة حديثة من الـ Gateway' : 'Presence غير متاح؛ لا نفترض أنها Offline', '●'],
+    ['نشطون على الموقع', webOnline === null ? '—' : webOnline.length, hasSummary ? 'نبضة خلال آخر 150 ثانية' : 'بيانات النشاط غير متاحة', '⌁'],
+    ['المهمات النشطة', metrics.activeTasks ?? '—', monitor.summary ? `منها ${monitorFormatNumber(metrics.requiredActiveTasks)} إجبارية` : 'تفاصيل المهمات غير متاحة', '✓'],
+    ['تسليمات بانتظار المراجعة', totalStats.pending ?? metrics.pendingSubmissions ?? '—', 'مطلوب إجراء من الإدارة', '⏳'],
+    ['طلبات إدارية معلّقة', monitor.summary ? (Number(metrics.pendingStaffRequests || 0) + Number(metrics.pendingLeaveRequests || 0)) : '—', monitor.summary ? `${monitorFormatNumber(metrics.pendingStaffRequests)} طلب إداري · ${monitorFormatNumber(metrics.pendingLeaveRequests)} إجازة` : 'بيانات الطلبات غير متاحة', '✉'],
+    ['قرارات آخر 24 ساعة', metrics.reviewDecisions24h ?? '—', 'قرارات محفوظة في سجل التسليمات', '≣'],
+    ['إجمالي التسليمات', totalStats.total ?? metrics.totalSubmissions ?? '—', 'كل التسليمات المسجلة في قاعدة البيانات', '▤'],
+    ['قرارات المراجعة إجمالًا', metrics.totalReviewDecisions ?? '—', 'سجل مراجعات التسليمات بالكامل', '☷'],
+  ];
+  const kpis = $('#monitor-kpis');
+  if (kpis) kpis.innerHTML = cards.map(([label, value, note, icon], index) => `<article class="monitor-kpi"><div class="monitor-kpi-top"><span>${icon}</span><small>${escapeHtml(label)}</small></div><strong>${escapeHtml(value === '—' ? value : monitorFormatNumber(value))}</strong><p>${escapeHtml(note)}</p></article>`).join('');
+  const health = monitor.health || null;
+  const presenceFresh = Boolean(discord.available);
+  const apiOk = Boolean(health?.ok);
+  const lastPresenceAge = Number(monitor.presence?.ageSeconds);
+  const presenceDetail = presenceFresh ? `آخر نبضة منذ ${monitorAgo(monitor.presence?.lastSeenAt)}` : 'لا توجد نبضة worker حديثة؛ الحالات متوقفة حتى عودة المزامنة';
+  const services = $('#monitor-services');
+  if (services) services.innerHTML = [
+    monitorSetStatusCard('واجهة و API الموقع', health ? (apiOk ? 'وصل رد ناجح من API' : 'الخدمة ردّت بحالة غير سليمة') : 'تعذر الحصول على نتيجة الفحص', !health ? 'unknown' : apiOk ? 'ok' : 'warn', '⌂'),
+    monitorSetStatusCard('Discord Bot', health ? (health.botReady ? 'التوكن متصل و Discord رد بنجاح' : 'البوت غير متصل أو إعداداته ناقصة') : 'لم يتم التحقق من حالة البوت', !health ? 'unknown' : health.botReady ? 'ok' : 'bad', '◉'),
+    monitorSetStatusCard('قاعدة البيانات', health ? (health.databaseReady ? 'اتصال قاعدة البيانات مضبوط' : 'DATABASE_URL غير مضبوط أو الخدمة غير جاهزة') : 'لم يتم التحقق من قاعدة البيانات', !health ? 'unknown' : health.databaseReady ? 'ok' : 'bad', '▤'),
+    monitorSetStatusCard('تخزين المرفقات', health ? (health.storageReady ? 'تكوين التخزين موجود' : 'إعدادات التخزين غير مكتملة') : 'لم يتم التحقق من التخزين', !health ? 'unknown' : health.storageReady ? 'ok' : 'warn', '↥'),
+    monitorSetStatusCard('Discord Presence Worker', presenceFresh ? presenceDetail : 'البيانات غير متاحة أو أقدم من 3 دقائق', presenceFresh ? (Number.isFinite(lastPresenceAge) && lastPresenceAge > 120 ? 'warn' : 'ok') : 'bad', '◌'),
+    monitorSetStatusCard('رتب السيرفر الأساسي', monitor.loadErrors.some((item) => item.startsWith('roster:')) ? 'تعذر تحديث دليل الرتب' : roster.groups?.length ? `${members.length} عضو تم تحميلهم من دليل الاستاف` : 'تعذر تحميل دليل الرتب', monitor.loadErrors.some((item) => item.startsWith('roster:')) || !roster.groups?.length ? 'warn' : 'ok', '♜'),
+    monitorSetStatusCard('Discord Audit Log', monitor.loadErrors.some((item) => item.startsWith('audit:')) ? 'تعذر تحميل سجل الإجراءات' : 'تم تحميل سجل الإجراءات', monitor.loadErrors.some((item) => item.startsWith('audit:')) ? 'warn' : 'ok', '≣'),
+  ].join('');
+  const presNote = $('#monitor-presence-note');
+  if (presNote) presNote.textContent = presenceFresh ? `آخر تحديث من البوت: ${formatDate(monitor.presence?.lastSeenAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })}. Offline / Invisible بيظهروا بنفس الحالة لدى Discord.` : 'Presence غير متاح: راجع تشغيل bot-worker وPresence Intent؛ لن يتم اعتبار غياب البيانات دليلًا على أن الأعضاء Offline.';
+  const presenceStats = $('#monitor-presence-stats');
+  if (presenceStats) presenceStats.innerHTML = [
+    ['Online', statCounts.online, 'online'], ['Idle', statCounts.idle, 'idle'], ['Do Not Disturb', statCounts.dnd, 'dnd'], ['Offline / Invisible', statCounts.offline, 'offline'],
+  ].map(([label, count, status]) => `<article class="monitor-presence-card status-${status}${count === null ? ' status-unknown' : ''}"><span class="monitor-presence-dot"></span><b>${count === null ? '—' : monitorFormatNumber(count)}</b><small>${label}</small></article>`).join('');
+  const activityBox = $('#monitor-top-active');
+  const topActive = [...members].map((member) => ({ member, stats: statsById.get(String(member.id)) || {} })).sort((a, b) => Number(b.stats.dailyMessages || 0) - Number(a.stats.dailyMessages || 0)).filter((row) => Number(row.stats.dailyMessages || 0) > 0).slice(0, 8);
+  const maxMessages = Math.max(1, ...topActive.map((row) => Number(row.stats.dailyMessages || 0)));
+  if (activityBox) activityBox.innerHTML = `<div class="monitor-subheading"><b>أعلى نشاط رسائل اليوم</b><small>من روم الإحصاء المحدد في إعدادات البوت</small></div>${monitor.loadErrors.some((item) => item.startsWith('stats:')) ? '<div class="task-empty">بيانات الرسائل غير متاحة؛ تعذر تحميل إحصائيات الاستاف.</div>' : topActive.length ? topActive.map(({ member, stats }, index) => `<div class="monitor-activity-row"><span class="monitor-activity-rank">${index + 1}</span><img src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="monitor-activity-main"><b>${escapeHtml(member.username)}</b><div class="monitor-activity-track"><span style="width:${Math.max(2, Number(stats.dailyMessages || 0) / maxMessages * 100)}%"></span></div></div><strong>${monitorFormatNumber(stats.dailyMessages)}</strong></div>`).join('') : '<div class="task-empty">لا توجد رسائل مسجلة لليوم حتى الآن.</div>'}`;
+  const memberCount = $('#monitor-member-count'); if (memberCount) memberCount.textContent = monitorFormatNumber(members.length) + ' عضو';
+  renderMonitorMembers(true);
+  const taskStats = $('#monitor-task-stats');
+  if (taskStats) taskStats.innerHTML = [
+    ['كل التسليمات', totalStats.total ?? metrics.totalSubmissions ?? '—'], ['مقبولة', totalStats.approved ?? metrics.approvedSubmissions ?? '—'], ['قيد المراجعة', totalStats.pending ?? metrics.pendingSubmissions ?? '—'], ['مرفوضة', totalStats.rejected ?? metrics.rejectedSubmissions ?? '—'], ['المهمات النشطة', metrics.activeTasks ?? '—'], ['الإجباري النشط', metrics.requiredActiveTasks ?? '—'], ['تنتهي خلال 24 ساعة', metrics.dueWithin24Hours ?? '—'], ['قرارات آخر 24 ساعة', metrics.reviewDecisions24h ?? '—'],
+  ].map(([label, value]) => `<div class="monitor-mini-stat"><small>${escapeHtml(label)}</small><b>${escapeHtml(value === '—' ? value : monitorFormatNumber(value))}</b></div>`).join('');
+  const bars = $('#monitor-task-bars');
+  if (bars) {
+    if (!monitor.taskStats && !monitor.summary) bars.innerHTML = '<div class="task-empty">بيانات توزيع التسليمات غير متاحة حاليًا.</div>';
+    else {
+      const total = Math.max(1, Number(totalStats.total ?? metrics.totalSubmissions ?? 0));
+      const segments = [['مقبول', totalStats.approved ?? metrics.approvedSubmissions ?? 0, 'green'], ['بانتظار المراجعة', totalStats.pending ?? metrics.pendingSubmissions ?? 0, 'amber'], ['مرفوض', totalStats.rejected ?? metrics.rejectedSubmissions ?? 0, 'red']];
+      bars.innerHTML = `<div class="monitor-progress-track">${segments.map(([, value, color]) => `<span class="fill-${color}" style="width:${Math.max(0, Number(value) / total * 100)}%"></span>`).join('')}</div><div class="monitor-legend">${segments.map(([label, value, color]) => `<span><i class="fill-${color}"></i>${escapeHtml(label)}: ${monitorFormatNumber(value)}</span>`).join('')}</div>`;
+    }
+  }
+  const pendingRequests = $('#monitor-pending-requests');
+  const reqs = [
+    ...(monitor.staffRequests || []).filter((item) => item.status === 'pending').map((item) => ({ kind: 'طلب إداري', title: item.subject || item.requestType || 'طلب بدون عنوان', reason: item.details || '', by: item.username, when: item.createdAt, id: item.id, href: 'staff-request' })),
+    ...(monitor.leaveRequests || []).filter((item) => item.status === 'pending').map((item) => ({ kind: 'طلب إجازة', title: `${item.startDate || '?'} — ${item.endDate || '?'}`, reason: item.reason || '', by: item.username, when: item.createdAt, id: item.id, href: 'leave' })),
+  ].sort((a, b) => new Date(b.when || 0) - new Date(a.when || 0)).slice(0, 8);
+  if (pendingRequests) {
+    const requestsUnavailable = monitor.loadErrors.some((item) => item.startsWith('staffRequests:')) && monitor.loadErrors.some((item) => item.startsWith('leaveRequests:'));
+    pendingRequests.innerHTML = reqs.length ? reqs.map((item) => `<article class="monitor-event"><span class="monitor-event-mark warn">!</span><div class="monitor-event-main"><b>${escapeHtml(item.kind)} #${escapeHtml(item.id)}: ${escapeHtml(item.title)}</b><small>${escapeHtml(item.by || 'عضو')} · ${escapeHtml(monitorAgo(item.when))}</small>${item.reason ? `<p>${escapeHtml(item.reason)}</p>` : ''}</div><span class="monitor-tag warn">معلّق</span></article>`).join('') : requestsUnavailable ? '<div class="task-empty">تعذر تحميل الطلبات من مصدريها؛ تحقق من تفاصيل الخطأ بالأعلى.</div>' : '<div class="task-empty">مفيش طلبات إدارية أو إجازات معلّقة.</div>';
+  }
+  const auditBox = $('#monitor-audit-events');
+  if (auditBox) auditBox.innerHTML = (monitor.audit || []).length ? monitor.audit.slice(0, 8).map((entry) => `<article class="monitor-event"><span class="monitor-event-mark ${entry.tone === 'danger' ? 'bad' : entry.tone === 'create' ? 'ok' : 'neutral'}">${entry.tone === 'danger' ? '!' : entry.tone === 'create' ? '+' : '≣'}</span><div class="monitor-event-main"><b>${escapeHtml(entry.label || 'إجراء إداري')}</b><small>${escapeHtml(entry.actor?.username || entry.actor?.id || 'غير معروف')}${entry.targetName ? ` ← ${escapeHtml(entry.targetName)}` : ''} · ${escapeHtml(monitorAgo(entry.createdAt))}</small>${entry.reason ? `<p>${escapeHtml(entry.reason)}</p>` : ''}</div><span class="monitor-tag ${entry.tone === 'danger' ? 'bad' : 'neutral'}">${escapeHtml(entry.tone === 'danger' ? 'حساس' : 'Discord')}</span></article>`).join('') : '<div class="task-empty">لا توجد إجراءات متاحة أو تعذّر تحميل السجل.</div>';
+  const reviewBox = $('#monitor-review-events');
+  if (reviewBox) reviewBox.innerHTML = (monitor.reviewAudit || []).length ? monitor.reviewAudit.slice(0, 8).map((entry) => { const status = entry.decision === 'approved' ? ['موافقة', 'ok'] : entry.decision === 'rejected' ? ['رفض', 'bad'] : ['إعادة فتح', 'warn']; return `<article class="monitor-event"><span class="monitor-event-mark ${status[1]}">${status[1] === 'ok' ? '✓' : status[1] === 'bad' ? '!' : '↻'}</span><div class="monitor-event-main"><b>${escapeHtml(status[0])} · التسليم #${entry.submissionId}</b><small>${escapeHtml(entry.reviewerName || entry.reviewerId)} راجع ${escapeHtml(entry.memberName || entry.memberId)} · ${escapeHtml(monitorAgo(entry.createdAt))}</small>${entry.reason ? `<p>${escapeHtml(entry.reason)}</p>` : ''}</div><span class="monitor-tag ${status[1]}">${escapeHtml(status[0])}</span></article>`; }).join('') : monitor.loadErrors.some((item) => item.startsWith('reviewAudit:')) ? '<div class="task-empty">تعذر تحميل سجل قرارات الإدارة.</div>' : '<div class="task-empty">لا توجد قرارات مراجعة مسجلة حتى الآن.</div>';
+  const alerts = $('#monitor-alerts');
+  if (alerts) {
+    const items = [];
+    if (health && !health.botReady) items.push(['bad', 'البوت غير جاهز — راجع التوكن أو صلاحيات Discord.']);
+    if (health && !health.databaseReady) items.push(['bad', 'اتصال قاعدة البيانات غير مؤكد.']);
+    if (!health) items.push(['warn', 'تعذر فحص صحة الخدمات؛ لا يمكن تأكيد أن البوت أو قاعدة البيانات متعطلان.']);
+    if (!presenceFresh) items.push(['warn', 'حالة Discord غير متاحة حاليًا؛ لا تعتبرها Offline.']);
+    const missingMain = members.filter((member) => member.roleId === 'not-in-main').length;
+    const noRole = members.filter((member) => member.roleId === 'none').length;
+    if (missingMain) items.push(['warn', `${missingMain} عضوًا في دليل الاستاف غير موجودين في السيرفر الأساسي.`]);
+    if (noRole) items.push(['warn', `${noRole} عضوًا ليس لديهم رتبة في السيرفر الأساسي.`]);
+    if (failures.length) {
+      items.push(['warn', `تعذّر تحميل ${failures.length} مصدر: ${failures.map((item) => item.split(':')[0]).join('، ')}.`]);
+      failures.forEach((failure) => items.push(['warn', failure]));
+    }
+    alerts.innerHTML = items.map(([tone, message]) => `<div class="monitor-alert ${tone}"><b>${tone === 'bad' ? 'مشكلة' : 'ملاحظة'}</b><span>${escapeHtml(message)}</span></div>`).join('');
+  }
+  const updated = $('#monitor-last-updated');
+  if (updated) updated.textContent = `آخر تحديث: ${formatDate(monitor.updatedAt || new Date(), { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Africa/Cairo' })} بتوقيت القاهرة`;
+}
+function renderMonitorMembers(resetLimit = false) {
+  const body = $('#monitor-members-body');
+  if (!body) return;
+  if (resetLimit) state.monitor.memberLimit = 100;
+  const monitor = state.monitor;
+  const roster = monitor.roster || state.roster || { groups: [], memberCount: 0 };
+  const members = (roster.groups || []).flatMap((group) => (group.members || []).map((member) => ({ ...member, sourceRoleName: member.roleName || group.name })));
+  const statsById = new Map((monitor.staffStats || []).map((item) => [String(item.userId), item]));
+  const siteById = new Map((monitor.summary?.siteActivity || []).map((item) => [String(item.userId), item]));
+  const discordReady = Boolean(monitor.presence?.available);
+  const statuses = discordReady ? (monitor.presence?.statuses || {}) : {};
+  const query = ($('#monitor-member-search')?.value || '').trim().toLocaleLowerCase('ar');
+  const filter = $('#monitor-member-filter')?.value || 'all';
+  const roleFilter = $('#monitor-role-filter')?.value || '';
+  const roleSelect = $('#monitor-role-filter');
+  if (roleSelect) {
+    const previousRole = roleSelect.value || roleFilter;
+    const roles = [...new Map(members.filter((member) => member.roleId && !['none','not-in-main'].includes(String(member.roleId))).map((member) => [String(member.roleId), String(member.roleName || member.roleId)])).entries()].sort((a, b) => a[1].localeCompare(b[1], 'ar'));
+    const options = '<option value="">كل الرتب الأساسية</option>' + roles.map(([id, name]) => `<option value="${escapeHtml(id)}">${escapeHtml(name)}</option>`).join('');
+    if (roleSelect.dataset.optionsKey !== JSON.stringify(roles)) { roleSelect.innerHTML = options; roleSelect.dataset.optionsKey = JSON.stringify(roles); }
+    roleSelect.value = roles.some(([id]) => id === previousRole) ? previousRole : '';
+  }
+  const selectedRole = roleSelect?.value || '';
+  const filtered = members.filter((member) => {
+    const id = String(member.id); const stats = statsById.get(id) || {}; const site = siteById.get(id);
+    const status = statuses[id] || 'offline'; const siteOnline = Boolean(site && Date.now() - new Date(site.lastSeen).getTime() < 150000);
+    const roles = (member.roles || []).map((role) => role.name).join(' ');
+    const searchText = `${member.username} ${member.handle} ${id} ${member.roleName || ''} ${roles}`.toLocaleLowerCase('ar');
+    if (query && !searchText.includes(query)) return false;
+    if (selectedRole && String(member.roleId) !== selectedRole) return false;
+    if (filter === 'admins' && !member.isAdmin) return false;
+    if (filter === 'discord-online' && !(discordReady && ['online','idle','dnd'].includes(status))) return false;
+    if (filter === 'site-online' && !siteOnline) return false;
+    if (filter === 'not-main' && member.roleId !== 'not-in-main') return false;
+    if (filter === 'no-role' && member.roleId !== 'none') return false;
+    return true;
+  });
+  const shown = filtered.slice(0, state.monitor.memberLimit || 100);
+  if (!shown.length) body.innerHTML = '<tr><td colspan="10" class="loading-state">مفيش أعضاء مطابقين للفلاتر.</td></tr>';
+  else body.innerHTML = shown.map((member) => {
+    const id = String(member.id); const stats = statsById.get(id) || {}; const site = siteById.get(id);
+    const status = statuses[id] || 'offline'; const siteOnline = Boolean(site && Date.now() - new Date(site.lastSeen).getTime() < 150000);
+    const statusTone = !discordReady ? 'unknown' : ['online','idle','dnd'].includes(status) ? status : 'offline';
+    const roleNames = (member.roles || []).map((role) => role.name).join(' · ');
+    const submissions = `${monitorFormatNumber(stats.totalSubmissions || 0)}<small> ${monitorFormatNumber(stats.approvedSubmissions || 0)} مقبول · ${monitorFormatNumber(stats.pendingSubmissions || 0)} معلّق</small>`;
+    const requests = `${monitorFormatNumber(stats.adminRequests || 0)}<small> إداري · ${monitorFormatNumber(stats.leaveRequests || 0)} إجازة</small>`;
+    return `<tr><td><div class="monitor-member-cell"><img src="${escapeHtml(member.avatarUrl || avatarFallback(id))}" alt=""><div><b>${escapeHtml(member.username || id)}${member.isAdmin ? '<span class="monitor-admin-chip">إدارة</span>' : ''}</b><small>${escapeHtml(id)}</small></div></div></td><td><b>${escapeHtml(member.roleName || '—')}</b><small class="monitor-role-list">${escapeHtml(roleNames || 'بدون رتب مرئية')}</small></td><td><span class="monitor-status-pill ${statusTone}"><i></i>${escapeHtml(monitorStatusLabel(status, discordReady))}</span></td><td><span class="monitor-status-pill ${siteOnline ? 'online' : 'offline'}"><i></i>${siteOnline ? 'نشط بالموقع' : 'غير نشط'}</span></td><td>${monitorFormatNumber(stats.dailyMessages || 0)}</td><td>${monitorFormatNumber(stats.totalMessages || 0)}</td><td>${submissions}</td><td>${monitorFormatNumber(stats.totalPoints || 0)}</td><td>${requests}</td><td>${escapeHtml(monitorAgo(site?.lastSeen || stats.lastSeen))}</td></tr>`;
+  }).join('');
+  const shownLabel = $('#monitor-members-shown'); if (shownLabel) shownLabel.textContent = `عرض ${monitorFormatNumber(shown.length)} من ${monitorFormatNumber(filtered.length)} عضو مطابق`;
+  const more = $('#monitor-members-more'); if (more) { more.classList.toggle('hidden', shown.length >= filtered.length); more.disabled = shown.length >= filtered.length; }
+}
+function exportAdminMonitoringCsv() {
+  if (!state.user?.canManage) return;
+  const roster = state.monitor.roster || state.roster || { groups: [] };
+  const members = (roster.groups || []).flatMap((group) => group.members || []);
+  const statsById = new Map((state.monitor.staffStats || []).map((item) => [String(item.userId), item]));
+  const siteById = new Map((state.monitor.summary?.siteActivity || []).map((item) => [String(item.userId), item]));
+  const statuses = state.monitor.presence?.available ? (state.monitor.presence.statuses || {}) : {};
+  const quote = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+  const rows = [['Discord ID','Username','Main server highest role','Roles','Is admin','Discord status','Website last seen','Messages today','Total messages','Submissions','Approved','Pending','Rejected','Points','Leave requests','Admin requests']];
+  members.forEach((member) => { const id=String(member.id); const stats=statsById.get(id)||{}; const site=siteById.get(id); rows.push([id, member.username, member.roleName, (member.roles||[]).map((role)=>role.name).join(' | '), member.isAdmin?'yes':'no', state.monitor.presence?.available ? monitorStatusLabel(statuses[id]||'offline',true) : 'unavailable', site?.lastSeen || '', stats.dailyMessages||0, stats.totalMessages||0, stats.totalSubmissions||0, stats.approvedSubmissions||0, stats.pendingSubmissions||0, stats.rejectedSubmissions||0, stats.totalPoints||0, stats.leaveRequests||0, stats.adminRequests||0]); });
+  const csv = '\uFEFF' + rows.map((row) => row.map(quote).join(',')).join('\r\n');
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+  const link = document.createElement('a'); link.href = url; link.download = `borg-management-monitor-${new Date().toISOString().slice(0,10)}.csv`; document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+}
+
 const LB_METRICS = {
   points: { field: 'totalPoints', unit: 'نقطة' },
   messages: { field: 'totalMessages', unit: 'رسالة' },
