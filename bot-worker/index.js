@@ -66,6 +66,12 @@ async function ensureDiscordPresenceSchema() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (guild_id, user_id)
       )`;
       await sql`CREATE INDEX IF NOT EXISTS idx_discord_presence_guild_status ON discord_presence(guild_id, status)`;
+      await sql`CREATE TABLE IF NOT EXISTS discord_presence_activity (
+        guild_id TEXT NOT NULL, user_id TEXT NOT NULL, username TEXT NOT NULL DEFAULT '',
+        activity_type TEXT NOT NULL DEFAULT 'message' CHECK (activity_type IN ('message','voice')),
+        last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (guild_id, user_id)
+      )`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_discord_presence_activity_recent ON discord_presence_activity(guild_id, last_activity_at DESC)`;
       await sql`CREATE TABLE IF NOT EXISTS discord_presence_meta (guild_id TEXT PRIMARY KEY, last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(), last_sync_at TIMESTAMPTZ, last_error TEXT, member_count INTEGER NOT NULL DEFAULT 0, known_count INTEGER NOT NULL DEFAULT 0)`;
       await sql`ALTER TABLE discord_presence_meta ADD COLUMN IF NOT EXISTS last_sync_at TIMESTAMPTZ`;
       await sql`ALTER TABLE discord_presence_meta ADD COLUMN IF NOT EXISTS last_error TEXT`;
@@ -148,6 +154,34 @@ async function runPresenceSnapshot(label = 'sync') {
     presenceSnapshotRunning = false;
   }
 }
+const offlineActivityLastWrite = new Map();
+const OFFLINE_ACTIVITY_COOLDOWN_MS = 15_000;
+async function recordOfflinePresenceActivity({ guild, member, user, type }) {
+  if (!guild || String(guild.id || '') !== STAFF_GUILD_ID || !user || user.bot) return;
+  const userId = String(user.id);
+  const liveStatus = getMemberPresenceStatus(guild, member || guild.members.cache.get(userId));
+  // Discord reports Invisible as Offline. Only mark an activity signal when the current
+  // Gateway/cache status or our latest persisted status is Offline; never infer from absence.
+  if (liveStatus && liveStatus !== 'offline') return;
+  const now = Date.now();
+  const lastWrite = offlineActivityLastWrite.get(userId) || 0;
+  if (now - lastWrite < OFFLINE_ACTIVITY_COOLDOWN_MS) return;
+  try {
+    await ensureDiscordPresenceSchema();
+    let status = liveStatus;
+    if (!status) {
+      const saved = await sql`SELECT status FROM discord_presence WHERE guild_id = ${STAFF_GUILD_ID} AND user_id = ${userId} LIMIT 1`;
+      status = normalizePresenceStatus(saved[0]?.status);
+    }
+    if (status !== 'offline') return;
+    offlineActivityLastWrite.set(userId, now);
+    await sql`INSERT INTO discord_presence_activity(guild_id, user_id, username, activity_type, last_activity_at)
+      VALUES (${STAFF_GUILD_ID}, ${userId}, ${String(user.globalName || user.username || userId).slice(0, 100)}, ${type}, NOW())
+      ON CONFLICT (guild_id, user_id) DO UPDATE SET username = EXCLUDED.username, activity_type = EXCLUDED.activity_type, last_activity_at = NOW()`;
+  } catch (error) {
+    console.error('[presence offline activity]', error.message);
+  }
+}
 async function saveDiscordPresence(presence) {
   if (!presence || String(presence.guild?.id || '') !== STAFF_GUILD_ID) return;
   const member = presence.member;
@@ -158,18 +192,40 @@ async function saveDiscordPresence(presence) {
     const status = normalizePresenceStatus(presence.status);
     if (!status) {
       await sql`DELETE FROM discord_presence WHERE guild_id = ${STAFF_GUILD_ID} AND user_id = ${String(user.id)}`;
+      await sql`DELETE FROM discord_presence_activity WHERE guild_id = ${STAFF_GUILD_ID} AND user_id = ${String(user.id)}`;
+      offlineActivityLastWrite.delete(String(user.id));
       return;
     }
     await sql`INSERT INTO discord_presence(guild_id, user_id, username, status, updated_at)
       VALUES (${STAFF_GUILD_ID}, ${String(user.id)}, ${String(user.globalName || user.username || user.id).slice(0, 100)}, ${status}, NOW())
       ON CONFLICT (guild_id, user_id) DO UPDATE SET username = EXCLUDED.username, status = EXCLUDED.status, updated_at = NOW()`;
+    if (status !== 'offline') {
+      await sql`DELETE FROM discord_presence_activity WHERE guild_id = ${STAFF_GUILD_ID} AND user_id = ${String(user.id)}`;
+      offlineActivityLastWrite.delete(String(user.id));
+    }
   } catch (error) { console.error('[presence update]', error.message); }
 }
 client.on(Events.PresenceUpdate, (_oldPresence, newPresence) => { void saveDiscordPresence(newPresence); });
+// A message or voice join while the bot sees a member as Offline is evidence of activity,
+// not proof of Invisible. The dashboard labels this explicitly as a recent-activity signal.
+client.on(Events.MessageCreate, (message) => {
+  if (!message.guild || !message.author || message.author.bot || message.webhookId) return;
+  void recordOfflinePresenceActivity({ guild: message.guild, member: message.member, user: message.author, type: 'message' });
+});
+client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+  if (!newState.channelId || newState.channelId === oldState.channelId) return;
+  const member = newState.member;
+  if (!member?.user) return;
+  void recordOfflinePresenceActivity({ guild: newState.guild, member, user: member.user, type: 'voice' });
+});
 client.on(Events.GuildMemberRemove, async (member) => {
   if (String(member.guild?.id || '') !== STAFF_GUILD_ID) return;
-  try { await ensureDiscordPresenceSchema(); await sql`DELETE FROM discord_presence WHERE guild_id = ${STAFF_GUILD_ID} AND user_id = ${String(member.id)}`; }
-  catch (error) { console.error('[presence member leave]', error.message); }
+  try {
+    await ensureDiscordPresenceSchema();
+    await sql`DELETE FROM discord_presence WHERE guild_id = ${STAFF_GUILD_ID} AND user_id = ${String(member.id)}`;
+    await sql`DELETE FROM discord_presence_activity WHERE guild_id = ${STAFF_GUILD_ID} AND user_id = ${String(member.id)}`;
+    offlineActivityLastWrite.delete(String(member.id));
+  } catch (error) { console.error('[presence member leave]', error.message); }
 });
 
 function isReviewManager(interaction) {

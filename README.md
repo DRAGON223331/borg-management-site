@@ -150,7 +150,7 @@ To improve compatibility with Vercel route resolution, the project includes dedi
 
 - **لو بتشغّل `server.js`** (اتصال Gateway دائم): الأمر شغال تلقائيًا.
 - **لو على Vercel**: Vercel Functions مش بتقدر تسمع رسائل عادية، فشغّل مجلد `bot-worker/` على استضافة Node دائمة (Railway / Render / VPS) بالمتغيرين `DISCORD_BOT_TOKEN` و`DATABASE_URL` (نفس قاعدة بيانات الموقع)، بالأمر `npm install && npm start`.
-- لازم تفعّل **Message Content Intent**. ولحالة Discord الحقيقية، فعّل **Presence Intent** و**Server Members Intent** من Discord Developer Portal ← Bot ← Privileged Gateway Intents، ثم أعد تشغيل `bot-worker`. حالة Offline لا تميّز تقنيًا بين الانقطاع الفعلي ووضع Invisible.
+- لازم تفعّل **Message Content Intent**. ولحالة Discord، فعّل **Presence Intent** و**Server Members Intent** من Discord Developer Portal ← Bot ← Privileged Gateway Intents، ثم أعد تشغيل `bot-worker`. أضيف مؤشر نشاط: لو العضو كتب رسالة أو دخل فويس بينما حالة البوت عنده Offline، يظهر في الموقع كـ **Offline لكن نشط مؤخرًا** لمدة 5 دقائق. هذا لا يكشف Invisible بشكل مضمون؛ Discord لا يميّز عبر الـ API بين Offline الحقيقي ووضع Invisible، والحالات التي لا تُصدر نشاطًا لا يمكن فصلها تقنيًا.
 - الرد بيكون في نفس الروم (رسائل ديسكورد العادية مفيش فيها رد خاص زي الـslash). الأمر السلاش الوحيد هو `/mypoints` (بيتسجل تلقائيًا).
 
 ## تحديثات v21 — خصوصية، أداء، إشعارات، وتصدير CSV
@@ -239,3 +239,8 @@ To improve compatibility with Vercel route resolution, the project includes dedi
 - فعّل `Guild Members Intent` و`Guild Presences Intent` من Discord Developer Portal ثم أعد تشغيل الـ worker.
 - قيمة `dnd` معناها **عدم الإزعاج** وليست Offline. الـ worker يطبع الآن توزيع الحالات في السجل برسالة تبدأ بـ `[presence] synced`؛ لو الشخص ظاهر `dnd` في السجل لكن الموقع يعرض غير ذلك، راجع نشر الواجهة وامسح كاش المتصفح.
 - لو Discord لم يرسل Presence لعضو، لا نحوله تلقائيًا إلى Offline؛ سيظهر **الحالة غير مستلمة**. أما Offline وInvisible فلا يمكن التمييز بينهما عبر Presence في Discord. موافقة العضو على تسجيل الدخول للموقع لا تغني عن تفعيل intents وتشغيل الـ worker، كما أن البوت لا يستطيع قراءة حالة مستخدم لا ينتمي إلى سيرفر الاستاف المحدد.
+
+
+## ملاحظة مهمة عن حالة Discord وتسجيل الدخول
+
+تسجيل الدخول بـ Discord OAuth يعرض هوية الحساب المصرّح بها مثل الاسم والصورة، لكنه لا يكشف حالة الاتصال الحالية ولا إعدادات الخصوصية الخاصة بالحساب. حالة `Offline` في Discord لا يمكن تمييزها رسميًا عن وضع `Invisible`. لذلك تعرض لوحة المراقبة مصدرين منفصلين: حالة Discord من البوت، ونشاط الموقع من نبضات الصفحة. وإذا كتب العضو رسالة أو دخل قناة صوتية بينما يظهر Offline، يُعرض مؤشر «Offline/مخفي مع نشاط حديث» لمدة خمس دقائق؛ وهو دليل نشاط حديث وليس كشفًا يقينيًا لإعداد Invisible.

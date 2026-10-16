@@ -308,6 +308,12 @@ async function ensureSchema() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (guild_id, user_id)
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_discord_presence_guild_status ON discord_presence(guild_id, status)`;
+    await sql`CREATE TABLE IF NOT EXISTS discord_presence_activity (
+      guild_id TEXT NOT NULL, user_id TEXT NOT NULL, username TEXT NOT NULL DEFAULT '',
+      activity_type TEXT NOT NULL DEFAULT 'message' CHECK (activity_type IN ('message','voice')),
+      last_activity_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (guild_id, user_id)
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_discord_presence_activity_recent ON discord_presence_activity(guild_id, last_activity_at DESC)`;
     await sql`CREATE TABLE IF NOT EXISTS discord_presence_meta (
       guild_id TEXT PRIMARY KEY, last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(), last_sync_at TIMESTAMPTZ,
       last_error TEXT, member_count INTEGER NOT NULL DEFAULT 0, known_count INTEGER NOT NULL DEFAULT 0
@@ -2204,7 +2210,18 @@ async function handleApi(parts, req, res) {
       const statuses = {};
       // Missing status rows intentionally remain absent; the client labels those as unknown.
       for (const row of rows) if (validStatuses.has(row.status)) statuses[String(row.userId)] = row.status;
-      return { available: true, statuses, storedCount: Object.keys(statuses).length, lastSeenAt, ageSeconds, lastSyncAt, syncAgeSeconds, lastError: meta.lastError || null, memberCount: Number(meta.memberCount || 0), knownCount: Number(meta.knownCount || 0) };
+      // Activity signal: users who posted or joined voice while the Gateway status was Offline.
+      // Discord does not expose Invisible separately, so this is evidence of activity, not certainty.
+      const recentActivityRows = await sql`SELECT user_id AS "userId", activity_type AS "activityType", last_activity_at AS "lastActivityAt"
+        FROM discord_presence_activity WHERE guild_id = ${STAFF_GUILD_ID} AND last_activity_at > NOW() - INTERVAL '5 minutes'`;
+      const offlineActivity = {};
+      for (const row of recentActivityRows) {
+        const id = String(row.userId);
+        if (statuses[id] !== 'offline') continue;
+        statuses[id] = 'offline_active';
+        offlineActivity[id] = { type: row.activityType, at: row.lastActivityAt };
+      }
+      return { available: true, statuses, offlineActivity, storedCount: Object.keys(statuses).length, lastSeenAt, ageSeconds, lastSyncAt, syncAgeSeconds, lastError: meta.lastError || null, memberCount: Number(meta.memberCount || 0), knownCount: Number(meta.knownCount || 0) };
     });
     return sendJson(res, 200, result);
   }

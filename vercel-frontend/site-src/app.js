@@ -750,7 +750,7 @@ function renderRoster() {
   $('#roster-content').innerHTML = groups.map((group) => `
     <section class="roster-group">
       <div class="roster-role-heading"><span class="role-pin" style="background:${/^#[0-9a-f]{6}$/i.test(group.color) ? group.color : '#64748b'}"></span><span>${escapeHtml(group.name)}</span><span class="role-line"></span></div>
-      ${group.members.map((member) => `<div class="member-row" role="button" tabindex="0" data-user-id="${escapeHtml(member.id)}" title="${escapeHtml(member.username)} — اضغط لفتح الملف، وكلك يمين لنسخ ID"><div class="member-avatar-wrap"><img class="member-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><span class="member-state ${['online','idle','dnd'].includes(state.discordStatuses[String(member.id)]) ? 'is-online' : (state.discordPresenceAvailable && !state.discordStatuses[String(member.id)] ? 'is-unknown' : 'is-offline')}" title="${state.discordPresenceAvailable ? ({online:'متصل على ديسكورد',idle:'خامل على ديسكورد',dnd:'عدم الإزعاج على ديسكورد',offline:'أوفلاين أو مخفي على ديسكورد',unknown:'حالة Discord لم تصل من البوت'}[state.discordStatuses[String(member.id)] || 'unknown']) : 'حالة ديسكورد غير متاحة'}"></span></div><div style="min-width:0"><div class="member-row-name">${escapeHtml(member.username)}${member.isAdmin ? '<span class="member-admin-tag">إدارة</span>' : ''}</div><div class="member-row-handle">@${escapeHtml(member.handle)}</div></div><span class="member-rank-dot" style="background:${/^#[0-9a-f]{6}$/i.test(member.roleColor) ? member.roleColor : '#64748b'}"></span></div>`).join('')}
+      ${group.members.map((member) => `<div class="member-row" role="button" tabindex="0" data-user-id="${escapeHtml(member.id)}" title="${escapeHtml(member.username)} — اضغط لفتح الملف، وكلك يمين لنسخ ID"><div class="member-avatar-wrap"><img class="member-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><span class="member-state ${['online','idle','dnd','offline_active'].includes(state.discordStatuses[String(member.id)]) ? 'is-online' : (state.discordPresenceAvailable && !state.discordStatuses[String(member.id)] ? 'is-unknown' : 'is-offline')}" title="${state.discordPresenceAvailable ? ({online:'متصل على ديسكورد',idle:'خامل على ديسكورد',dnd:'عدم الإزعاج على ديسكورد',offline:'أوفلاين / مخفي (Discord لا يفرّق بينهم)',offline_active:'أوفلاين لكن نشط مؤخرًا',unknown:'حالة Discord لم تصل من البوت'}[state.discordStatuses[String(member.id)] || 'unknown']) : 'حالة ديسكورد غير متاحة'}"></span></div><div style="min-width:0"><div class="member-row-name">${escapeHtml(member.username)}${member.isAdmin ? '<span class="member-admin-tag">إدارة</span>' : ''}</div><div class="member-row-handle">@${escapeHtml(member.handle)}</div></div><span class="member-rank-dot" style="background:${/^#[0-9a-f]{6}$/i.test(member.roleColor) ? member.roleColor : '#64748b'}"></span></div>`).join('')}
     </section>
   `).join('');
 }
@@ -977,7 +977,7 @@ function renderAdminMonitoring(failures = []) {
   // لا نستعمل Presence قديمة من حالة الواجهة كأنها فحص جديد، ولا نحوّل فشل المصدر إلى Offline.
   const discord = monitor.presence || { available: false, statuses: {} };
   const statuses = discord.available ? (discord.statuses || {}) : {};
-  const statCounts = { online: null, idle: null, dnd: null, offline: null, unknown: null };
+  const statCounts = { online: null, idle: null, dnd: null, offline: null, offline_active: null, unknown: null };
   if (discord.available) {
     Object.keys(statCounts).forEach((key) => { statCounts[key] = 0; });
     members.forEach((member) => { const status = statuses[String(member.id)] || 'unknown'; statCounts[statCounts.hasOwnProperty(status) ? status : 'unknown'] += 1; });
@@ -1026,7 +1026,7 @@ function renderAdminMonitoring(failures = []) {
   ].join('');
   const presNote = $('#monitor-presence-note');
   if (presNote) presNote.textContent = presenceFresh
-    ? `آخر نبضة من البوت: ${formatDate(monitor.presence?.lastSeenAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })}. آخر مزامنة ناجحة: ${monitor.presence?.lastSyncAt ? formatDate(monitor.presence.lastSyncAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'غير متاحة'}. الحالة غير المستلمة ليست Offline؛ وDiscord لا يميّز بين Offline وInvisible.`
+    ? `آخر نبضة من البوت: ${formatDate(monitor.presence?.lastSeenAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })}. آخر مزامنة ناجحة: ${monitor.presence?.lastSyncAt ? formatDate(monitor.presence.lastSyncAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'غير متاحة'}. إذا كتب العضو أو دخل فويس بينما Discord يظهره Offline، سيظهر كنشط مؤخرًا لمدة 5 دقائق. ده مؤشر نشاط وليس كشفًا مضمونًا لوضع Invisible؛ فـDiscord لا يفرّق بين Offline وInvisible.`
     : monitor.presence?.reason === 'stale-heartbeat'
       ? `آخر نبضة منذ ${monitorAgo(monitor.presence?.lastSeenAt)}؛ تأكد أن الخدمة تعمل باستمرار وتستخدم DATABASE_URL نفسه الموجود في Vercel.`
       : monitor.presence?.reason === 'sync-failed'
@@ -1036,7 +1036,7 @@ function renderAdminMonitoring(failures = []) {
           : 'لم تصل نبضة من bot-worker. شغّله على استضافة Node دائمة بنفس DISCORD_BOT_TOKEN وDATABASE_URL، وتأكد أن توكن البوت من نفس تطبيق Discord الذي فعّلت فيه Intents.';
   const presenceStats = $('#monitor-presence-stats');
   if (presenceStats) presenceStats.innerHTML = [
-    ['Online', statCounts.online, 'online'], ['Idle', statCounts.idle, 'idle'], ['Do Not Disturb', statCounts.dnd, 'dnd'], ['Offline / Invisible', statCounts.offline, 'offline'], ['حالة غير مستلمة', statCounts.unknown, 'unknown'],
+    ['Online', statCounts.online, 'online'], ['Idle', statCounts.idle, 'idle'], ['Do Not Disturb', statCounts.dnd, 'dnd'], ['Offline / Invisible بدون نشاط حديث', statCounts.offline, 'offline'], ['Offline لكن نشط خلال آخر 5 دقائق', statCounts.offline_active, 'offline'], ['حالة غير مستلمة', statCounts.unknown, 'unknown'],
   ].map(([label, count, status]) => `<article class="monitor-presence-card status-${status}${count === null ? ' status-unknown' : ''}"><span class="monitor-presence-dot"></span><b>${count === null ? '—' : monitorFormatNumber(count)}</b><small>${label}</small></article>`).join('');
   const activityBox = $('#monitor-top-active');
   const topActive = [...members].map((member) => ({ member, stats: statsById.get(String(member.id)) || {} })).sort((a, b) => Number(b.stats.dailyMessages || 0) - Number(a.stats.dailyMessages || 0)).filter((row) => Number(row.stats.dailyMessages || 0) > 0).slice(0, 8);
@@ -1122,6 +1122,7 @@ function renderMonitorMembers(resetLimit = false) {
     if (selectedRole && String(member.roleId) !== selectedRole) return false;
     if (filter === 'admins' && !member.isAdmin) return false;
     if (filter === 'discord-online' && !(discordReady && ['online','idle','dnd'].includes(status))) return false;
+    if (filter === 'discord-offline-active' && !(discordReady && status === 'offline_active')) return false;
     if (filter === 'site-online' && !siteOnline) return false;
     if (filter === 'not-main' && member.roleId !== 'not-in-main') return false;
     if (filter === 'no-role' && member.roleId !== 'none') return false;
