@@ -94,6 +94,7 @@
             <div id="notif-list" class="notif-list"><div class="loading-state">جاري التحميل...</div></div>
           </div>
         </div>
+        <button id="appearance-open" class="icon-button appearance-open" type="button" title="تخصيص المظهر" aria-label="تخصيص المظهر" aria-haspopup="dialog">⌘</button>
         <div class="connection-pill" id="bot-status"><span class="status-dot"></span><span>جاري فحص البوت</span></div>
         <div class="profile-chip">
           <img id="top-avatar" alt="صورة الحساب" src="">
@@ -107,7 +108,7 @@
       <aside class="staff-panel">
         <div class="panel-heading">
           <div><span class="tiny-label">TEAM DIRECTORY</span><h2>أعضاء الاستاف</h2></div>
-          <span class="count-pill" id="staff-count">—</span>
+          <div class="panel-heading-tools"><span class="count-pill" id="staff-count">—</span><button id="roster-collapse" class="secondary-button compact roster-collapse-toggle" type="button" aria-expanded="true">طي القائمة −</button></div>
         </div>
         <p class="muted small-copy">مرتّبين حسب أعلى رتبة ليهم في السيرفر الأساسي.</p>
         <div class="roster-search-wrap"><span>⌕</span><input id="roster-search" type="search" placeholder="ابحث عن عضو..." aria-label="ابحث عن عضو"></div>
@@ -132,6 +133,35 @@
             <article class="stat-card"><div class="stat-icon green">✓</div><div><span>الإجباري اللي خلصته</span><strong id="stat-done-required">0</strong></div><div class="stat-foot">حسب تسليماتك المسجلة</div></article>
             <article class="stat-card"><div class="stat-icon blue">↗</div><div><span>إنجازاتك المسجلة</span><strong id="stat-done">0</strong></div><div class="stat-foot">مهمات عليها تسليم منك</div></article>
           </div>
+
+          <section id="cyber-command-deck" class="cyber-command-deck manager-only hidden" aria-label="مركز القيادة السيبراني">
+            <div class="cyber-deck-header">
+              <div><span class="eyebrow cyber-eyebrow">NEURAL NETWORK // LIVE OPS</span><h2>مركز القيادة السيبراني</h2><p>مؤشرات حقيقية من خدمات الموقع وديسكورد وسجل الإجراءات.</p></div>
+              <div class="cyber-head-actions"><span class="cyber-live-badge"><i></i> LIVE FEED</span><button id="cyber-deck-refresh" class="secondary-button compact" type="button">مزامنة البيانات ↻</button></div>
+            </div>
+            <div id="cyber-deck-kpis" class="cyber-deck-kpis"><div class="loading-state">جاري مزامنة المؤشرات...</div></div>
+            <div class="cyber-deck-grid">
+              <section class="cyber-deck-panel cyber-health-panel">
+                <div class="cyber-panel-heading"><div><span class="tiny-label">SYSTEM INTEGRITY</span><h3>حالة الخدمات</h3></div><span class="cyber-panel-index">01 / HEALTH</span></div>
+                <div id="cyber-service-grid" class="cyber-service-grid"><div class="loading-state">جاري فحص الخدمات...</div></div>
+              </section>
+              <section class="cyber-deck-panel cyber-chart-panel">
+                <div class="cyber-panel-heading"><div><span class="tiny-label">STAFF ACTIVITY</span><h3>أعلى نشاط رسائل اليوم</h3></div><span class="cyber-panel-index">02 / ANALYTICS</span></div>
+                <div id="cyber-activity-chart" class="cyber-activity-chart"><div class="loading-state">جاري تحميل النشاط الحقيقي...</div></div>
+              </section>
+            </div>
+            <section class="cyber-deck-panel cyber-trend-panel">
+              <div class="cyber-panel-heading"><div><span class="tiny-label">TEMPORAL ANALYTICS</span><h3>تدفّق الأحداث عبر الزمن</h3><p>مقارنة السجلات التي تم تحميلها حاليًا بالفترة السابقة.</p></div><span class="cyber-panel-index">02B / TREND</span></div>
+              <div class="cyber-trend-toolbar"><div id="cyber-trend-summary" class="cyber-trend-summary"><span>جاري حساب الأحداث...</span></div><div class="cyber-period-switch" role="group" aria-label="الفترة الزمنية للتحليل"><button type="button" data-cyber-period="24h" aria-pressed="true" class="active">24 ساعة</button><button type="button" data-cyber-period="7d" aria-pressed="false">7 أيام</button></div></div>
+              <div id="cyber-trend-chart" class="cyber-trend-chart"><div class="loading-state">جاري تجهيز الرسم البياني...</div></div>
+              <p class="cyber-data-caveat">المقارنة مبنية على الأحداث المستلمة من السجلات المتاحة؛ قد لا تمثل كامل الفترة إذا كانت هناك صفحات إضافية في المصدر.</p>
+            </section>
+            <section class="cyber-deck-panel cyber-timeline-panel">
+              <div class="cyber-panel-heading"><div><span class="tiny-label">AUDIT STREAM</span><h3>آخر الأحداث الإدارية</h3><p>من سجل Discord وقرارات مراجعة التسليمات.</p></div><div class="cyber-timeline-actions"><span class="cyber-panel-index">03 / ACTIVITY</span><button id="cyber-open-audit" class="text-button" type="button">فتح السجل الكامل ↗</button></div></div>
+              <div id="cyber-activity-feed" class="cyber-activity-feed"><div class="loading-state">جاري تحميل سجل النشاط...</div></div>
+              <div class="cyber-deck-foot"><span class="cyber-pulse-dot"></span><span id="cyber-deck-updated">بانتظار أول مزامنة</span><span class="cyber-foot-note">لا تُعرض أي قيمة افتراضية كأنها حالة مؤكدة</span></div>
+            </section>
+          </section>
 
           <section id="admin-overview-section" class="admin-overview-section manager-only hidden">
             <div class="section-title-row"><div><span class="tiny-label">MANAGEMENT ANALYTICS</span><h2>إحصائيات المسؤولين</h2><p class="muted small-copy">اضغط على أي مسؤول لفتح ملفه الكامل وإحصائياته.</p></div></div>
@@ -380,6 +410,25 @@
       </main>
     </div>
   </section>
+  <section id="appearance-modal" class="appearance-modal hidden" role="dialog" aria-modal="true" aria-labelledby="appearance-title">
+    <button class="appearance-backdrop" type="button" data-appearance-close aria-label="إغلاق إعدادات المظهر"></button>
+    <div class="appearance-panel">
+      <header class="appearance-header"><div><span class="tiny-label">PERSONAL INTERFACE</span><h2 id="appearance-title">تخصيص واجهة القيادة</h2><p>احفظ اللون والتأثيرات اللي تناسبك على نفس الجهاز.</p></div><button id="appearance-close" class="icon-button" type="button" aria-label="إغلاق">×</button></header>
+      <section class="appearance-setting"><div class="appearance-setting-heading"><b>لون النيون</b><small>ACCENT PROFILE</small></div><div class="appearance-choices">
+        <button type="button" class="appearance-choice" data-accent-choice="cyan" aria-pressed="false"><i class="swatch swatch-cyan"></i><span><b>Neon Cyber</b><small>سماوي + ماجنتا</small></span></button>
+        <button type="button" class="appearance-choice" data-accent-choice="magenta" aria-pressed="false"><i class="swatch swatch-magenta"></i><span><b>Hyper Violet</b><small>ماجنتا + سماوي</small></span></button>
+        <button type="button" class="appearance-choice" data-accent-choice="acid" aria-pressed="false"><i class="swatch swatch-acid"></i><span><b>Acid Protocol</b><small>لايم + سماوي</small></span></button>
+      </div></section>
+      <section class="appearance-setting"><div class="appearance-setting-heading"><b>قوة الأنيميشن</b><small>MOTION ENGINE</small></div><div class="appearance-motion-options">
+        <button type="button" data-motion-choice="strong" aria-pressed="false"><b>قوي</b><small>طاقة وتأثيرات لافتة</small></button>
+        <button type="button" data-motion-choice="balanced" aria-pressed="false"><b>متوازن</b><small>حركة واضحة وأهدأ</small></button>
+        <button type="button" data-motion-choice="calm" aria-pressed="false"><b>هادئ</b><small>انتقالات بسيطة</small></button>
+      </div></section>
+      <label class="appearance-toggle-row" for="appearance-scanlines"><span><b>تأثيرات المسح السيبراني</b><small>خطوط متحركة وتفاصيل HUD بالخلفية</small></span><input id="appearance-scanlines" type="checkbox" checked><span class="appearance-switch" aria-hidden="true"></span></label>
+      <div class="appearance-footer"><button id="appearance-reset" class="secondary-button" type="button">إعادة ضبط التصميم</button><span>الإعدادات محفوظة محليًا في المتصفح</span></div>
+    </div>
+  </section>
+
   <section id="fatal-screen" class="fatal-screen hidden"><div class="fatal-card"><h2>تعذر تحميل الموقع</h2><p id="fatal-message">حصل خطأ غير متوقع.</p><button id="retry-btn" class="primary-button">إعادة المحاولة</button></div></section>
 </body>
 </html>

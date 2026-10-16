@@ -23,6 +23,7 @@ const state = {
   lbMetric: 'points',
   audit: { entries: [], nextBefore: null, hasMore: false, loading: false },
   activeStaffProfileId: null,
+  cyberTrendPeriod: '24h',
   monitor: { health: null, summary: null, roster: null, staffStats: [], presence: null, taskStats: null, audit: [], reviewAudit: [], leaveRequests: [], staffRequests: [], loadErrors: [], updatedAt: null, memberLimit: 100 },
 };
 
@@ -102,6 +103,79 @@ function setButtonLoading(button, loading, text = 'جاري التنفيذ...') 
     delete button.dataset.oldText;
   }
 }
+const APPEARANCE_KEY = 'borg-cyber-appearance-v1';
+const DEFAULT_APPEARANCE = { accent: 'cyan', motion: 'strong', scanlines: true };
+function readAppearance() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(APPEARANCE_KEY) || '{}');
+    return {
+      accent: ['cyan', 'magenta', 'acid'].includes(saved.accent) ? saved.accent : DEFAULT_APPEARANCE.accent,
+      motion: ['strong', 'balanced', 'calm'].includes(saved.motion) ? saved.motion : DEFAULT_APPEARANCE.motion,
+      scanlines: typeof saved.scanlines === 'boolean' ? saved.scanlines : DEFAULT_APPEARANCE.scanlines,
+    };
+  } catch { return { ...DEFAULT_APPEARANCE }; }
+}
+function applyAppearance(appearance = readAppearance()) {
+  const root = document.documentElement;
+  root.dataset.accent = appearance.accent;
+  root.dataset.motion = appearance.motion;
+  root.dataset.scanlines = String(appearance.scanlines);
+  $$('[data-accent-choice]').forEach((button) => { const active = button.dataset.accentChoice === appearance.accent; button.classList.toggle('selected', active); button.setAttribute('aria-pressed', String(active)); });
+  $$('[data-motion-choice]').forEach((button) => { const active = button.dataset.motionChoice === appearance.motion; button.classList.toggle('selected', active); button.setAttribute('aria-pressed', String(active)); });
+  const scanlines = $('#appearance-scanlines'); if (scanlines) scanlines.checked = appearance.scanlines;
+}
+function saveAppearance(patch) {
+  const next = { ...readAppearance(), ...patch };
+  try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(next)); } catch { /* Privacy mode may disable persistent storage; keep the current session styling. */ }
+  applyAppearance(next);
+}
+function wireAppearanceControls() {
+  const modal = $('#appearance-modal');
+  const opener = $('#appearance-open');
+  const closeButton = $('#appearance-close');
+  if (!modal || modal.dataset.wired === '1') return;
+  modal.dataset.wired = '1';
+  const close = () => { modal.classList.add('hidden'); document.body.classList.remove('appearance-modal-open'); opener?.focus(); };
+  opener?.addEventListener('click', () => { modal.classList.remove('hidden'); document.body.classList.add('appearance-modal-open'); applyAppearance(); closeButton?.focus(); });
+  closeButton?.addEventListener('click', close);
+  modal.querySelectorAll('[data-appearance-close]').forEach((button) => button.addEventListener('click', close));
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !modal.classList.contains('hidden')) close(); });
+  $$('[data-accent-choice]').forEach((button) => button.addEventListener('click', () => saveAppearance({ accent: button.dataset.accentChoice })));
+  $$('[data-motion-choice]').forEach((button) => button.addEventListener('click', () => saveAppearance({ motion: button.dataset.motionChoice })));
+  $('#appearance-scanlines')?.addEventListener('change', (event) => saveAppearance({ scanlines: event.currentTarget.checked }));
+  $('#appearance-reset')?.addEventListener('click', () => { try { localStorage.removeItem(APPEARANCE_KEY); } catch {} applyAppearance({ ...DEFAULT_APPEARANCE }); showToast('تمت إعادة ضبط إعدادات المظهر.', 'success'); });
+  applyAppearance();
+}
+function wireRosterCollapse() {
+  const panel = $('.staff-panel');
+  const button = $('#roster-collapse');
+  if (!panel || !button || button.dataset.wired === '1') return;
+  button.dataset.wired = '1';
+  button.addEventListener('click', () => {
+    const collapsed = panel.classList.toggle('roster-collapsed');
+    button.setAttribute('aria-expanded', String(!collapsed));
+    button.textContent = collapsed ? 'عرض القائمة +' : 'طي القائمة −';
+  });
+}
+function animateCounter(node, target, duration = 1150) {
+  if (!node) return;
+  const finalValue = Number(target);
+  if (!Number.isFinite(finalValue)) { node.textContent = String(target ?? '—'); return; }
+  const startValue = Number.isFinite(Number(node.dataset.currentCount)) ? Number(node.dataset.currentCount) : (Number(node.textContent.replace(/[^0-9.-]/g, '')) || 0);
+  node.dataset.currentCount = String(finalValue);
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches || document.documentElement.dataset.motion === 'calm';
+  const format = (value) => Math.round(value).toLocaleString('en-US');
+  if (reduced) { node.textContent = format(finalValue); return; }
+  const startTime = performance.now();
+  const tick = (now) => {
+    const progress = Math.min(1, (now - startTime) / duration);
+    const eased = 1 - Math.pow(1 - progress, 4);
+    node.textContent = format(startValue + (finalValue - startValue) * eased);
+    if (progress < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
 function showLogin() {
   $('#app-shell').classList.add('hidden');
   $('#fatal-screen').classList.add('hidden');
@@ -133,6 +207,8 @@ async function initialize() {
     showApp();
     renderProfile();
     wireNavigation();
+    wireAppearanceControls();
+    wireRosterCollapse();
     wireTasks();
     wireChats();
     wireRoster();
@@ -151,7 +227,7 @@ async function initialize() {
       $('#manager-staff-request-section')?.classList.remove('hidden');
       wireNotifications();
     }
-    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests(), loadStaffRequests(), loadStaffStats(), loadNotifications(), ...(state.user.canManage ? [loadTaskInsights(), loadSubmissionAudit()] : [])]);
+    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests(), loadStaffRequests(), loadStaffStats(), loadNotifications(), ...(state.user.canManage ? [loadTaskInsights(), loadSubmissionAudit(), loadAdminMonitoring({ silent: true })] : [])]);
     startChatPolling();
     startPresenceHeartbeat();
     // تخفيف الضغط على السيرفر: التحديثات الدورية بتقف لما التبويب يتخبى وبتتأخر شوية.
@@ -163,7 +239,8 @@ async function initialize() {
     setInterval(() => { if (!document.hidden) loadNotifications(); }, 60000);
     // Refresh the full monitoring board only while it's visible; avoid background API churn.
     setInterval(() => {
-      if (!document.hidden && state.user?.canManage && $('.page.active-page')?.id === 'page-admin-monitor') loadAdminMonitoring();
+      const activePage = $('.page.active-page')?.id;
+      if (!document.hidden && state.user?.canManage && ['page-admin-monitor', 'page-overview'].includes(activePage)) loadAdminMonitoring({ silent: true });
     }, 120000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) loadNotifications(); });
   } catch (error) {
@@ -220,6 +297,13 @@ function wireNavigation() {
   $('#audit-user')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); loadAudit(true); } });
   $('#audit-search')?.addEventListener('input', () => renderAudit());
   $('#monitor-refresh')?.addEventListener('click', () => loadAdminMonitoring());
+  $('#cyber-deck-refresh')?.addEventListener('click', () => loadAdminMonitoring());
+  $$('[data-cyber-period]').forEach((button) => button.addEventListener('click', () => {
+    state.cyberTrendPeriod = button.dataset.cyberPeriod === '7d' ? '7d' : '24h';
+    $$('[data-cyber-period]').forEach((item) => { const active = item === button; item.classList.toggle('active', active); item.setAttribute('aria-pressed', String(active)); });
+    renderCyberTrendChart();
+  }));
+  $('#cyber-open-audit')?.addEventListener('click', () => openPage('audit-log'));
   $('#monitor-audit-refresh')?.addEventListener('click', () => loadAdminMonitoring({ auditOnly: true }));
   $('#monitor-open-audit')?.addEventListener('click', () => openPage('audit-log'));
   $('#monitor-open-tasks')?.addEventListener('click', () => openPage('tasks'));
@@ -327,7 +411,7 @@ function openPage(page) {
   if (page === 'personal') loadPersonal();
   if (page === 'leaderboard') { renderLeaderboard(); loadStaffStats(); }
   if (page === 'audit-log') loadAudit(true);
-  if (page === 'admin-monitor') loadAdminMonitoring();
+  if (page === 'admin-monitor') loadAdminMonitoring({ silent: true });
   if (page === 'site-managers' && state.user?.isOwner) loadSiteManagers();
   if (page === 'tasks') {
     loadTasks();
@@ -354,10 +438,10 @@ async function loadTasks() {
     const existingIds = new Set(state.tasks.map((task) => task.id));
     const lockedIds = new Set(state.tasks.filter((task) => task.completedByMe || task.pendingByMe || task.rejectedByMe).map((task) => task.id));
     state.selectedTaskIds = new Set([...state.selectedTaskIds].filter((id) => existingIds.has(id) && !lockedIds.has(id)));
-    $('#stat-active').textContent = result.stats.active;
-    $('#stat-required').textContent = result.stats.required;
-    $('#stat-done-required').textContent = result.stats.completedRequired;
-    $('#stat-done').textContent = result.stats.completedByMe;
+    animateCounter($('#stat-active'), result.stats.active);
+    animateCounter($('#stat-required'), result.stats.required);
+    animateCounter($('#stat-done-required'), result.stats.completedRequired);
+    animateCounter($('#stat-done'), result.stats.completedByMe);
     $('#filter-all-count').textContent = state.tasks.length;
     $('#filter-required-count').textContent = state.tasks.filter((task) => task.required).length;
     $('#filter-optional-count').textContent = state.tasks.filter((task) => !task.required).length;
@@ -1037,12 +1121,128 @@ async function loadAdminMonitoring(options = {}) {
     if (options.auditOnly) state.monitor.auditUpdatedAt = new Date().toISOString();
     else state.monitor.updatedAt = new Date().toISOString();
     renderAdminMonitoring(state.monitor.loadErrors);
-    if (failures.length) showToast(`تم التحديث جزئيًا؛ تعذر تحميل ${failures.length} من المصادر.`, 'info');
-    else if (!options.auditOnly) showToast('تم تحديث لوحة مراقبة الإدارة.', 'success');
+    renderCyberCommandDeck();
+    if (failures.length && !options.silent) showToast(`تم التحديث جزئيًا؛ تعذر تحميل ${failures.length} من المصادر.`, 'info');
+    else if (!failures.length && !options.auditOnly && !options.silent) showToast('تم تحديث لوحة مراقبة الإدارة.', 'success');
   } catch (error) {
-    showToast(error.message || 'تعذر تحديث لوحة المراقبة.', 'error');
+    if (!options.silent) showToast(error.message || 'تعذر تحديث لوحة المراقبة.', 'error');
   } finally { if (button && !options.auditOnly) setButtonLoading(button, false); }
 }
+function cyberCount(value) {
+  const n = Number(value);
+  if (value === null || value === undefined || value === '' || !Number.isFinite(n)) return '<strong class="cyber-metric-value is-unknown">—</strong>';
+  return `<strong class="cyber-metric-value" data-count-target="${n}">0</strong>`;
+}
+function renderCyberTrendChart() {
+  const chart = $('#cyber-trend-chart');
+  const summaryNode = $('#cyber-trend-summary');
+  if (!chart || !summaryNode) return;
+  const monitor = state.monitor || {};
+  const now = Date.now();
+  const isWeek = state.cyberTrendPeriod === '7d';
+  const periodMs = isWeek ? 7 * 86400000 : 86400000;
+  const bucketCount = isWeek ? 7 : 12;
+  const bucketMs = periodMs / bucketCount;
+  const currentStart = now - periodMs;
+  const previousStart = currentStart - periodMs;
+  const entries = [
+    ...(monitor.audit || []).map((entry) => ({ when: entry.createdAt, source: 'discord' })),
+    ...(monitor.reviewAudit || []).map((entry) => ({ when: entry.createdAt, source: 'review' })),
+  ].map((entry) => ({ ...entry, timestamp: new Date(entry.when || 0).getTime() })).filter((entry) => Number.isFinite(entry.timestamp) && entry.timestamp > 0);
+  const currentEntries = entries.filter((entry) => entry.timestamp >= currentStart && entry.timestamp <= now);
+  const previousEntries = entries.filter((entry) => entry.timestamp >= previousStart && entry.timestamp < currentStart);
+  const previousCount = previousEntries.length;
+  const currentCount = currentEntries.length;
+  let compareLabel = 'لا توجد سجلات سابقة كافية للمقارنة';
+  let compareTone = 'neutral';
+  if (previousCount > 0) {
+    const delta = Math.round(((currentCount - previousCount) / previousCount) * 100);
+    compareLabel = `${delta > 0 ? '+' : ''}${delta}% مقارنة بالفترة السابقة`;
+    compareTone = delta > 0 ? 'up' : delta < 0 ? 'down' : 'neutral';
+  } else if (currentCount === 0) {
+    compareLabel = 'لا توجد أحداث مسجلة في الفترتين';
+  }
+  summaryNode.innerHTML = `<div class="cyber-trend-total"><small>${isWeek ? 'أحداث آخر 7 أيام' : 'أحداث آخر 24 ساعة'}</small><b>${currentCount.toLocaleString('en-US')}</b><em>سجلًا مستلمًا</em></div><div class="cyber-trend-compare tone-${compareTone}"><small>مقارنة بالفترة السابقة</small><b>${escapeHtml(compareLabel)}</b><em>${previousCount.toLocaleString('en-US')} سجل في الفترة السابقة</em></div>`;
+  const buckets = Array.from({ length: bucketCount }, (_, index) => ({ start: currentStart + index * bucketMs, count: 0 }));
+  currentEntries.forEach((entry) => {
+    const index = Math.max(0, Math.min(bucketCount - 1, Math.floor((entry.timestamp - currentStart) / bucketMs)));
+    buckets[index].count += 1;
+  });
+  const max = Math.max(1, ...buckets.map((bucket) => bucket.count));
+  chart.innerHTML = `<div class="cyber-trend-bars">${buckets.map((bucket, index) => {
+    const label = isWeek
+      ? formatDate(new Date(bucket.start), { day: 'numeric', month: 'short', timeZone: 'Africa/Cairo' })
+      : formatDate(new Date(bucket.start), { hour: '2-digit', timeZone: 'Africa/Cairo' });
+    const height = bucket.count ? Math.max(5, bucket.count / max * 100) : 0;
+    return `<div class="cyber-trend-column" style="--column-index:${index}"><div class="cyber-trend-stage"><small>${bucket.count.toLocaleString('en-US')}</small><span style="--trend-height:${height}%"></span></div><label>${escapeHtml(label)}</label></div>`;
+  }).join('')}</div>`;
+}
+function renderCyberCommandDeck() {
+  const root = $('#cyber-command-deck');
+  if (!root || !state.user?.canManage) return;
+  const monitor = state.monitor || {};
+  const health = monitor.health;
+  const presence = monitor.presence || {};
+  const summary = monitor.summary || {};
+  const metrics = summary.metrics || {};
+  const totals = monitor.taskStats?.totals || {};
+  const members = (monitor.roster?.groups || []).flatMap((group) => (group.members || []).map((member) => ({ ...member, sourceRoleName: member.roleName || group.name })));
+  const statusCounts = members.length ? members.map((member) => (presence.statuses || {})[String(member.id)] || 'unknown') : Object.values(presence.statuses || {});
+  const onlineCount = presence.available ? statusCounts.filter((status) => ['online', 'idle', 'dnd'].includes(status)).length : null;
+  const openRequests = summary.generatedAt ? Number(metrics.pendingStaffRequests || 0) + Number(metrics.pendingLeaveRequests || 0) : null;
+  const kpis = $('#cyber-deck-kpis');
+  if (kpis) {
+    const tiles = [
+      { label: 'أعضاء الاستاف', value: monitor.roster ? (monitor.roster.memberCount ?? members.length) : null, foot: 'دليل الرتب الأساسي', icon: '◉', tone: 'cyan' },
+      { label: 'نشطون على Discord', value: onlineCount, foot: presence.available ? 'حسب آخر Presence متاح' : 'حالة Discord غير متاحة', icon: '⌁', tone: 'violet' },
+      { label: 'تسليمات تنتظر المراجعة', value: totals.pending ?? metrics.pendingSubmissions ?? null, foot: 'تحتاج قرار الإدارة', icon: '↯', tone: 'pink' },
+      { label: 'طلبات إدارية معلّقة', value: openRequests, foot: summary.generatedAt ? 'طلبات وإجازات' : 'البيانات غير متاحة', icon: '▤', tone: 'lime' },
+    ];
+    kpis.innerHTML = tiles.map((tile, index) => `<article class="cyber-kpi-tile tone-${tile.tone}" style="--tile-index:${index}"><span class="cyber-kpi-icon">${tile.icon}</span><div class="cyber-kpi-copy"><small>${escapeHtml(tile.label)}</small>${cyberCount(tile.value)}<em>${escapeHtml(tile.foot)}</em></div><span class="cyber-kpi-rune">${String(index + 1).padStart(2, '0')}</span></article>`).join('');
+    kpis.querySelectorAll('[data-count-target]').forEach((node) => animateCounter(node, node.dataset.countTarget, 1350));
+  }
+  const serviceGrid = $('#cyber-service-grid');
+  if (serviceGrid) {
+    const hasRoster = Boolean(monitor.roster && Array.isArray(monitor.roster.groups));
+    const presenceState = !presence.available ? 'unknown' : (Number.isFinite(Number(presence.ageSeconds)) && Number(presence.ageSeconds) > 120 ? 'warn' : 'ok');
+    const presenceDetail = presence.available ? `آخر نبضة منذ ${monitorAgo(presence.lastSeenAt)}` : (presence.reason === 'sync-failed' ? 'المزامنة فشلت؛ راجع سجلات worker' : presence.reason === 'stale-heartbeat' ? 'آخر نبضة قديمة؛ راجع تشغيل worker' : 'لا توجد حالة مؤكدة حاليًا؛ لا تعتبرها Offline');
+    serviceGrid.innerHTML = [
+      monitorSetStatusCard('واجهة الموقع و API', health ? (health.ok ? 'استجابة API ناجحة' : 'وصل رد غير سليم') : 'لم يصل فحص مؤكد', health ? (health.ok ? 'ok' : 'warn') : 'unknown', '⌂'),
+      monitorSetStatusCard('Discord Bot', health ? (health.botReady ? 'البوت متصل' : 'البوت غير جاهز أو إعداداته ناقصة') : 'لم يتم التحقق بعد', health ? (health.botReady ? 'ok' : 'bad') : 'unknown', '◉'),
+      monitorSetStatusCard('قاعدة البيانات', health ? (health.databaseReady ? 'اتصال قاعدة البيانات جاهز' : 'الاتصال غير جاهز') : 'لم يصل فحص مؤكد', health ? (health.databaseReady ? 'ok' : 'bad') : 'unknown', '▤'),
+      monitorSetStatusCard('Discord Presence Worker', presenceDetail, presenceState, '◌'),
+    ].join('');
+  }
+  const chart = $('#cyber-activity-chart');
+  if (chart) {
+    const statsById = new Map((monitor.staffStats || []).map((item) => [String(item.userId), item]));
+    const sourceRows = members.length ? members.map((member) => ({ member, stats: statsById.get(String(member.id)) || {} })) : (monitor.staffStats || []).map((stats) => ({ member: { id: stats.userId, username: stats.username || String(stats.userId), avatarUrl: avatarFallback(stats.userId) }, stats }));
+    const activeRows = sourceRows.map((row) => ({ ...row, count: Number(row.stats.dailyMessages || 0) })).filter((row) => row.count > 0).sort((a, b) => b.count - a.count).slice(0, 6);
+    const max = Math.max(1, ...activeRows.map((row) => row.count));
+    if (monitor.loadErrors.some((item) => item.startsWith('stats:'))) chart.innerHTML = '<div class="cyber-empty"><span>!</span><b>تعذر تحميل إحصائيات النشاط</b><small>راجع مصدر بيانات الرسائل من لوحة المراقبة.</small></div>';
+    else if (!monitor.staffStats?.length) chart.innerHTML = '<div class="cyber-empty"><span>⌁</span><b>البيانات لم تصل بعد</b><small>اضغط مزامنة البيانات لإعادة المحاولة.</small></div>';
+    else if (!activeRows.length) chart.innerHTML = '<div class="cyber-empty"><span>⌁</span><b>لا توجد رسائل مسجلة اليوم</b><small>سيظهر النشاط هنا عند توفر بيانات حقيقية.</small></div>';
+    else chart.innerHTML = `<div class="cyber-chart-caption"><span>LIVE MESSAGE COUNTS</span><small>أعلى ${activeRows.length} أعضاء · اليوم</small></div>${activeRows.map((row, index) => `<div class="cyber-chart-row" style="--bar-index:${index}"><span class="cyber-chart-rank">${String(index + 1).padStart(2, '0')}</span><img src="${escapeHtml(row.member.avatarUrl || avatarFallback(row.member.id))}" alt=""><div class="cyber-chart-main"><div class="cyber-chart-label"><b>${escapeHtml(row.member.username || row.member.id)}</b><small>${row.count.toLocaleString('en-US')} رسالة</small></div><div class="cyber-bar-track"><span style="--bar-width:${Math.max(2, row.count / max * 100)}%"></span></div></div></div>`).join('')}`;
+  }
+  const feed = $('#cyber-activity-feed');
+  if (feed) {
+    const discordRows = (monitor.audit || []).map((entry) => ({ label: entry.label || 'إجراء إداري', actor: entry.actor?.username || entry.actor?.id || 'غير معروف', target: entry.targetName || entry.targetId || '', when: entry.createdAt, reason: entry.reason || '', tone: entry.tone === 'danger' ? 'bad' : entry.tone === 'create' ? 'good' : 'neutral', source: 'DISCORD AUDIT' }));
+    const reviewRows = (monitor.reviewAudit || []).map((entry) => {
+      const decision = entry.decision === 'approved' ? ['موافقة على التسليم', 'good'] : entry.decision === 'rejected' ? ['رفض التسليم', 'bad'] : ['إعادة فتح التسليم', 'warn'];
+      return { label: `${decision[0]} #${entry.submissionId}`, actor: entry.reviewerName || entry.reviewerId || 'مسؤول', target: entry.memberName || entry.memberId || '', when: entry.createdAt, reason: entry.reason || '', tone: decision[1], source: 'TASK REVIEW' };
+    });
+    const events = [...discordRows, ...reviewRows].sort((a, b) => new Date(b.when || 0) - new Date(a.when || 0)).slice(0, 5);
+    if (events.length) feed.innerHTML = events.map((entry, index) => `<article class="cyber-timeline-entry tone-${entry.tone}" style="--event-index:${index}"><span class="cyber-timeline-marker">${entry.tone === 'good' ? '✓' : entry.tone === 'bad' ? '!' : '⌁'}</span><div class="cyber-timeline-content"><div class="cyber-timeline-topline"><b>${escapeHtml(entry.label)}</b><span>${escapeHtml(entry.source)}</span></div><p>${escapeHtml(entry.actor)}${entry.target ? ` <i>←</i> ${escapeHtml(entry.target)}` : ''}</p>${entry.reason ? `<small>${escapeHtml(entry.reason)}</small>` : ''}</div><time>${escapeHtml(monitorAgo(entry.when))}</time></article>`).join('');
+    else if (monitor.loadErrors.some((item) => item.startsWith('audit:') || item.startsWith('reviewAudit:'))) feed.innerHTML = '<div class="cyber-empty"><span>!</span><b>تعذر تحميل سجل النشاط</b><small>المصادر لم ترجع بيانات مؤكدة؛ افتح لوحة المراقبة للتفاصيل.</small></div>';
+    else feed.innerHTML = '<div class="cyber-empty"><span>⌁</span><b>لا توجد أحداث متاحة حتى الآن</b><small>ستظهر الإجراءات الجديدة هنا بعد تسجيلها في مصادرها.</small></div>';
+  }
+  renderCyberTrendChart();
+  const periodButtons = $$('[data-cyber-period]');
+  periodButtons.forEach((button) => { const active = button.dataset.cyberPeriod === state.cyberTrendPeriod; button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active)); });
+  const updated = $('#cyber-deck-updated');
+  if (updated) updated.textContent = monitor.updatedAt ? `آخر مزامنة: ${formatDate(monitor.updatedAt, { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Africa/Cairo' })} بتوقيت القاهرة` : 'لم تكتمل المزامنة الأولى بعد';
+}
+
 function renderAdminMonitoring(failures = []) {
   const monitor = state.monitor;
   const roster = monitor.roster || state.roster || { groups: [], memberCount: 0 };
@@ -1744,4 +1944,5 @@ async function runIntroThenInitialize() {
   await initialize();
 }
 
+applyAppearance();
 runIntroThenInitialize();
