@@ -11,6 +11,10 @@ async function main() {
   for (const name of ['index.html', 'styles.css']) {
     fs.copyFileSync(path.join(source, name), path.join(output, name));
   }
+  const assetsSource = path.join(source, 'assets');
+  if (fs.existsSync(assetsSource)) {
+    fs.cpSync(assetsSource, path.join(output, 'assets'), { recursive: true });
+  }
   await esbuild.build({
     entryPoints: [path.join(source, 'app.js')],
     outfile: path.join(output, 'app.js'),

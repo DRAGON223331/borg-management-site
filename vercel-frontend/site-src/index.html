@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#0b1020">
+  <meta name="theme-color" content="#b42336">
   <meta name="description" content="مركز إدارة البرج لمتابعة مهمات الاستاف، وتسليم الأدلة، والتواصل بين أعضاء الاستاف والإدارة.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://borg-management-site.vercel.app/">
@@ -11,10 +11,13 @@
   <meta property="og:title" content="إدارة البرج | مركز إدارة الاستاف">
   <meta property="og:description" content="منصة إدارة البرج: تابع المهمات، سلّم الأدلة، وتواصل مع الاستاف والإدارة من مكان واحد.">
   <meta property="og:locale" content="ar_EG">
+  <meta property="og:image" content="https://borg-management-site.vercel.app/assets/borg-staff-server.jpg">
+  <meta name="twitter:image" content="https://borg-management-site.vercel.app/assets/borg-staff-server.jpg">
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="إدارة البرج | مركز إدارة الاستاف">
   <meta name="twitter:description" content="تابع المهمات، سلّم الأدلة، وتواصل مع الاستاف والإدارة من مكان واحد.">
   <title>إدارة البرج | لوحة الاستاف</title>
+  <link rel="icon" type="image/jpeg" href="/assets/borg-staff-server.jpg">
   <link rel="stylesheet" href="/styles.css">
   <script src="/app.js" defer></script>
 </head>
@@ -23,7 +26,7 @@
 
   <section id="login-screen" class="login-screen hidden">
     <div class="login-card">
-      <div class="brand-mark large-mark">ب</div>
+      <img class="brand-mark brand-image large-mark" src="/assets/borg-staff-server.jpg" alt="شعار سيرفر الاستاف">
       <div class="eyebrow">STAFF CONTROL CENTER</div>
       <h1>إدارة البرج</h1>
       <p>مكان واحد لمتابعة المهمات، وتسليم الأدلة، والتواصل بين الاستاف والإدارة.</p>
@@ -38,7 +41,7 @@
   <section id="app-shell" class="app-shell hidden">
     <header class="topbar">
       <div class="brand-lockup">
-        <div class="brand-mark">ب</div>
+        <img class="brand-mark brand-image" src="/assets/borg-staff-server.jpg" alt="شعار سيرفر الاستاف">
         <div>
           <div class="brand-title">إدارة البرج</div>
           <div class="brand-subtitle">مركز متابعة الاستاف</div>
@@ -49,7 +52,9 @@
         <button class="nav-tab" data-page="tasks"><span>✓</span> المهمات</button>
         <button class="nav-tab" data-page="leaderboard"><span>★</span> ليدر بورد</button>
         <button class="nav-tab" data-page="personal"><span>☺</span> شخصي</button>
+        <span class="nav-separator" aria-hidden="true"></span>
         <button class="nav-tab" data-page="staff-chat"><span>☷</span> شات الاستاف</button>
+        <span class="nav-separator manager-only hidden" aria-hidden="true"></span>
         <button class="nav-tab manager-only hidden" data-page="management-chat"><span>♧</span> شات المسؤولين</button>
         <button class="nav-tab manager-only hidden" data-page="audit-log"><span>≣</span> سجل السيرفر</button>
       </nav>
@@ -274,7 +279,7 @@
             <div id="daily-message-stats" class="daily-message-stats-list"><div class="loading-state">جاري حساب رسائل اليوم...</div></div>
             <div class="daily-message-stats-note">يبدأ العد من جديد تلقائيًا كل يوم الساعة 12:00 منتصف الليل بتوقيت القاهرة.</div>
           </section>
-          <div class="chat-shell"><div class="chat-header"><div class="chat-header-avatar">ب</div><div><b>غرفة الاستاف</b><small><span class="status-dot"></span> متاحة لأعضاء الموقع</small></div><span class="chat-encrypted-label">STAFF ROOM</span></div><div id="staff-chat-feed" class="chat-feed"><div class="loading-state">جاري تحميل الرسائل...</div></div><form class="chat-composer" id="staff-chat-form"><textarea id="staff-chat-input" maxlength="1500" rows="1" placeholder="اكتب رسالة للاستاف..." aria-label="رسالة للاستاف"></textarea><button type="submit" aria-label="إرسال الرسالة">➤</button></form></div>
+          <div class="chat-shell"><div class="chat-header"><div class="chat-header-avatar"><img src="/assets/borg-staff-server.jpg" alt="" /></div><div><b>غرفة الاستاف</b><small><span class="status-dot"></span> متاحة لأعضاء الموقع</small></div><span class="chat-encrypted-label">STAFF ROOM</span></div><div id="staff-chat-feed" class="chat-feed"><div class="loading-state">جاري تحميل الرسائل...</div></div><form class="chat-composer" id="staff-chat-form"><textarea id="staff-chat-input" maxlength="1500" rows="1" placeholder="اكتب رسالة للاستاف..." aria-label="رسالة للاستاف"></textarea><button type="submit" aria-label="إرسال الرسالة">➤</button></form></div>
         </section>
 
         <section id="page-management-chat" class="page chat-page">
