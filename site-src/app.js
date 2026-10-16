@@ -1005,19 +1005,35 @@ function renderAdminMonitoring(failures = []) {
   const presenceFresh = Boolean(discord.available);
   const apiOk = Boolean(health?.ok);
   const lastPresenceAge = Number(monitor.presence?.ageSeconds);
-  const presenceDetail = presenceFresh ? `آخر نبضة منذ ${monitorAgo(monitor.presence?.lastSeenAt)} · ${monitorFormatNumber(monitor.presence?.storedCount || 0)} حالة مستلمة` : (monitor.presence?.reason === 'stale-heartbeat' ? `آخر نبضة منذ ${monitorAgo(monitor.presence?.lastSeenAt)}؛ أعد تشغيل worker وتأكد من اتصاله بقاعدة بيانات الموقع` : 'لم تصل نبضة من worker؛ شغّله باستمرار بنفس DATABASE_URL وDISCORD_BOT_TOKEN');
+  const presenceError = String(monitor.presence?.lastError || '').trim();
+  const presenceFailureDetail = monitor.presence?.reason === 'stale-heartbeat'
+    ? `آخر نبضة منذ ${monitorAgo(monitor.presence?.lastSeenAt)}؛ تأكد أن worker شغال باستمرار وبنفس قاعدة البيانات`
+    : monitor.presence?.reason === 'sync-failed'
+      ? `الـ worker شغال لكن فشل في جلب الحالات: ${presenceError || 'راجع سجل تشغيل worker'}`
+      : monitor.presence?.reason === 'sync-not-complete'
+        ? 'الـ worker اتصل لكن المزامنة الأولى لم تكتمل بعد؛ راجع سجل تشغيل worker'
+        : 'لم تصل نبضة من bot-worker؛ شغّله على استضافة Node دائمة بنفس DATABASE_URL وDISCORD_BOT_TOKEN';
+  const presenceDetail = presenceFresh ? `آخر نبضة منذ ${monitorAgo(monitor.presence?.lastSeenAt)} · ${monitorFormatNumber(monitor.presence?.storedCount || 0)} حالة مستلمة` : presenceFailureDetail;
   const services = $('#monitor-services');
   if (services) services.innerHTML = [
     monitorSetStatusCard('واجهة و API الموقع', health ? (apiOk ? 'وصل رد ناجح من API' : 'الخدمة ردّت بحالة غير سليمة') : 'تعذر الحصول على نتيجة الفحص', !health ? 'unknown' : apiOk ? 'ok' : 'warn', '⌂'),
     monitorSetStatusCard('Discord Bot', health ? (health.botReady ? 'التوكن متصل و Discord رد بنجاح' : 'البوت غير متصل أو إعداداته ناقصة') : 'لم يتم التحقق من حالة البوت', !health ? 'unknown' : health.botReady ? 'ok' : 'bad', '◉'),
     monitorSetStatusCard('قاعدة البيانات', health ? (health.databaseReady ? 'اتصال قاعدة البيانات مضبوط' : 'DATABASE_URL غير مضبوط أو الخدمة غير جاهزة') : 'لم يتم التحقق من قاعدة البيانات', !health ? 'unknown' : health.databaseReady ? 'ok' : 'bad', '▤'),
     monitorSetStatusCard('تخزين المرفقات', health ? (health.storageReady ? 'تكوين التخزين موجود' : 'إعدادات التخزين غير مكتملة') : 'لم يتم التحقق من التخزين', !health ? 'unknown' : health.storageReady ? 'ok' : 'warn', '↥'),
-    monitorSetStatusCard('Discord Presence Worker', presenceFresh ? presenceDetail : 'البيانات غير متاحة أو أقدم من 3 دقائق', presenceFresh ? (Number.isFinite(lastPresenceAge) && lastPresenceAge > 120 ? 'warn' : 'ok') : 'bad', '◌'),
+    monitorSetStatusCard('Discord Presence Worker', presenceDetail, presenceFresh ? (Number.isFinite(lastPresenceAge) && lastPresenceAge > 120 ? 'warn' : 'ok') : (monitor.presence?.reason === 'sync-failed' ? 'warn' : 'bad'), '◌'),
     monitorSetStatusCard('رتب السيرفر الأساسي', monitor.loadErrors.some((item) => item.startsWith('roster:')) ? 'تعذر تحديث دليل الرتب' : roster.groups?.length ? `${members.length} عضو تم تحميلهم من دليل الاستاف` : 'تعذر تحميل دليل الرتب', monitor.loadErrors.some((item) => item.startsWith('roster:')) || !roster.groups?.length ? 'warn' : 'ok', '♜'),
     monitorSetStatusCard('Discord Audit Log', monitor.loadErrors.some((item) => item.startsWith('audit:')) ? 'تعذر تحميل سجل الإجراءات' : 'تم تحميل سجل الإجراءات', monitor.loadErrors.some((item) => item.startsWith('audit:')) ? 'warn' : 'ok', '≣'),
   ].join('');
   const presNote = $('#monitor-presence-note');
-  if (presNote) presNote.textContent = presenceFresh ? `آخر تحديث من البوت: ${formatDate(monitor.presence?.lastSeenAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })}. الحالة غير المستلمة ليست Offline؛ وDiscord لا يميّز بين Offline وInvisible.` : (monitor.presence?.reason === 'stale-heartbeat' ? `آخر نبضة من worker منذ ${monitorAgo(monitor.presence?.lastSeenAt)}؛ تأكد من تشغيله باستمرار واستخدام نفس قاعدة بيانات الموقع.` : 'لم تصل نبضة من bot-worker: شغّله على استضافة Node دائمة بنفس DISCORD_BOT_TOKEN وDATABASE_URL، وفعّل Presence Intent وServer Members Intent. تسجيل الدخول بالموقع وحده لا يوفر حالات Discord.');
+  if (presNote) presNote.textContent = presenceFresh
+    ? `آخر نبضة من البوت: ${formatDate(monitor.presence?.lastSeenAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })}. آخر مزامنة ناجحة: ${monitor.presence?.lastSyncAt ? formatDate(monitor.presence.lastSyncAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'غير متاحة'}. الحالة غير المستلمة ليست Offline؛ وDiscord لا يميّز بين Offline وInvisible.`
+    : monitor.presence?.reason === 'stale-heartbeat'
+      ? `آخر نبضة منذ ${monitorAgo(monitor.presence?.lastSeenAt)}؛ تأكد أن الخدمة تعمل باستمرار وتستخدم DATABASE_URL نفسه الموجود في Vercel.`
+      : monitor.presence?.reason === 'sync-failed'
+        ? `الـ worker يعمل لكن فشل في مزامنة الأعضاء. الخطأ الأخير: ${presenceError || 'غير مسجل'}. افتح Logs على استضافة worker وتأكد أن البوت موجود في سيرفر الاستاف وأن STAFF_GUILD_ID صحيح.`
+        : monitor.presence?.reason === 'sync-not-complete'
+          ? 'وصلت نبضة الـ worker لكن لم تنجح مزامنة الأعضاء بعد. افتح Logs على استضافة worker لمعرفة خطأ [presence startup/retry].'
+          : 'لم تصل نبضة من bot-worker. شغّله على استضافة Node دائمة بنفس DISCORD_BOT_TOKEN وDATABASE_URL، وتأكد أن توكن البوت من نفس تطبيق Discord الذي فعّلت فيه Intents.';
   const presenceStats = $('#monitor-presence-stats');
   if (presenceStats) presenceStats.innerHTML = [
     ['Online', statCounts.online, 'online'], ['Idle', statCounts.idle, 'idle'], ['Do Not Disturb', statCounts.dnd, 'dnd'], ['Offline / Invisible', statCounts.offline, 'offline'], ['حالة غير مستلمة', statCounts.unknown, 'unknown'],

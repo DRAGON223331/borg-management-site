@@ -235,7 +235,7 @@ To improve compatibility with Vercel route resolution, the project includes dedi
 
 ### تشخيص حالة Discord (Online / DND)
 
-- لازم تنشر مجلد `bot-worker` بعد كل تحديث، وتشغّله باستمرار بنفس `DATABASE_URL` و`DISCORD_BOT_TOKEN` المستخدمين للموقع. تحديث الواجهة وحدها لا يحدّث حالة Discord.
+- لازم تنشر مجلد `bot-worker` بعد كل تحديث، وتشغّله باستمرار بنفس `DATABASE_URL` و`DISCORD_BOT_TOKEN` المستخدمين للموقع. لو فشل أول جلب للحالات، يعيد الـ worker المحاولة كل 30 ثانية، وتعرض لوحة المراقبة آخر خطأ مزامنة مسجّل. تحديث الواجهة وحدها لا يحدّث حالة Discord.
 - فعّل `Guild Members Intent` و`Guild Presences Intent` من Discord Developer Portal ثم أعد تشغيل الـ worker.
 - قيمة `dnd` معناها **عدم الإزعاج** وليست Offline. الـ worker يطبع الآن توزيع الحالات في السجل برسالة تبدأ بـ `[presence] synced`؛ لو الشخص ظاهر `dnd` في السجل لكن الموقع يعرض غير ذلك، راجع نشر الواجهة وامسح كاش المتصفح.
 - لو Discord لم يرسل Presence لعضو، لا نحوله تلقائيًا إلى Offline؛ سيظهر **الحالة غير مستلمة**. أما Offline وInvisible فلا يمكن التمييز بينهما عبر Presence في Discord. موافقة العضو على تسجيل الدخول للموقع لا تغني عن تفعيل intents وتشغيل الـ worker، كما أن البوت لا يستطيع قراءة حالة مستخدم لا ينتمي إلى سيرفر الاستاف المحدد.

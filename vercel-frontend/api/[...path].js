@@ -41,7 +41,7 @@ let lastMessageSyncAt = 0;
 let messageSyncPromise;
 
 // ───────── تخفيف الضغط: كاش في الذاكرة + حد للطلبات ─────────
-const SCHEMA_VERSION = 7; // ارفعه كل ما تضيف جدول/عمود جديد في ensureSchema
+const SCHEMA_VERSION = 8; // ارفعه كل ما تضيف جدول/عمود جديد في ensureSchema
 const PRESENCE_WINDOW_SECONDS = 150; // مدة اعتبار العضو "متصل" بعد آخر نبضة (النبضة كل 60 ثانية)
 const MESSAGE_SYNC_MIN_MS = Math.max(15, Number(process.env.MESSAGE_SYNC_MIN_SECONDS || 45)) * 1000;
 const memCache = new Map();
@@ -305,7 +305,14 @@ async function ensureSchema() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (guild_id, user_id)
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_discord_presence_guild_status ON discord_presence(guild_id, status)`;
-    await sql`CREATE TABLE IF NOT EXISTS discord_presence_meta (guild_id TEXT PRIMARY KEY, last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
+    await sql`CREATE TABLE IF NOT EXISTS discord_presence_meta (
+      guild_id TEXT PRIMARY KEY, last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(), last_sync_at TIMESTAMPTZ,
+      last_error TEXT, member_count INTEGER NOT NULL DEFAULT 0, known_count INTEGER NOT NULL DEFAULT 0
+    )`;
+    await sql`ALTER TABLE discord_presence_meta ADD COLUMN IF NOT EXISTS last_sync_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE discord_presence_meta ADD COLUMN IF NOT EXISTS last_error TEXT`;
+    await sql`ALTER TABLE discord_presence_meta ADD COLUMN IF NOT EXISTS member_count INTEGER NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE discord_presence_meta ADD COLUMN IF NOT EXISTS known_count INTEGER NOT NULL DEFAULT 0`;
     await sql`CREATE TABLE IF NOT EXISTS notification_state (notification_key TEXT PRIMARY KEY, last_sent_at TIMESTAMPTZ NOT NULL DEFAULT '1970-01-01T00:00:00Z')`;
     await sql`CREATE TABLE IF NOT EXISTS leave_requests (
       id BIGSERIAL PRIMARY KEY,
@@ -2162,25 +2169,27 @@ async function handleApi(parts, req, res) {
     await ensureSchema();
     const result = await cached(`discord-presence:${STAFF_GUILD_ID}`, 10_000, async () => {
       const sql = await getSql();
-      const metaRows = await sql`SELECT last_seen AS "lastSeen" FROM discord_presence_meta WHERE guild_id = ${STAFF_GUILD_ID} LIMIT 1`;
-      const lastSeen = metaRows.length ? new Date(metaRows[0].lastSeen).getTime() : 0;
-      // A recent worker heartbeat confirms this is live Gateway data, not a stale snapshot.
+      const metaRows = await sql`SELECT last_seen AS "lastSeen", last_sync_at AS "lastSyncAt", last_error AS "lastError", member_count AS "memberCount", known_count AS "knownCount" FROM discord_presence_meta WHERE guild_id = ${STAFF_GUILD_ID} LIMIT 1`;
+      const meta = metaRows[0] || {};
+      const lastSeen = meta.lastSeen ? new Date(meta.lastSeen).getTime() : 0;
+      const lastSync = meta.lastSyncAt ? new Date(meta.lastSyncAt).getTime() : 0;
+      // The worker heartbeat and a successful first sync are separate signals.
       const ageSeconds = lastSeen && Number.isFinite(lastSeen) ? Math.max(0, Math.floor((Date.now() - lastSeen) / 1000)) : null;
+      const syncAgeSeconds = lastSync && Number.isFinite(lastSync) ? Math.max(0, Math.floor((Date.now() - lastSync) / 1000)) : null;
+      const lastSeenAt = lastSeen && Number.isFinite(lastSeen) ? new Date(lastSeen).toISOString() : null;
+      const lastSyncAt = lastSync && Number.isFinite(lastSync) ? new Date(lastSync).toISOString() : null;
       if (!lastSeen || !Number.isFinite(lastSeen) || ageSeconds > 180) {
-        return {
-          available: false,
-          reason: lastSeen ? 'stale-heartbeat' : 'no-heartbeat',
-          statuses: {},
-          lastSeenAt: metaRows.length && Number.isFinite(lastSeen) ? new Date(lastSeen).toISOString() : null,
-          ageSeconds,
-        };
+        return { available: false, reason: lastSeen ? 'stale-heartbeat' : 'no-heartbeat', statuses: {}, lastSeenAt, ageSeconds, lastSyncAt, syncAgeSeconds, lastError: meta.lastError || null, memberCount: Number(meta.memberCount || 0), knownCount: Number(meta.knownCount || 0) };
+      }
+      if (!lastSync || !Number.isFinite(lastSync)) {
+        return { available: false, reason: meta.lastError ? 'sync-failed' : 'sync-not-complete', statuses: {}, lastSeenAt, ageSeconds, lastSyncAt: null, syncAgeSeconds: null, lastError: meta.lastError || null, memberCount: Number(meta.memberCount || 0), knownCount: Number(meta.knownCount || 0) };
       }
       const rows = await sql`SELECT user_id AS "userId", status FROM discord_presence WHERE guild_id = ${STAFF_GUILD_ID}`;
       const validStatuses = new Set(['online', 'idle', 'dnd', 'offline']);
       const statuses = {};
       // Missing status rows intentionally remain absent; the client labels those as unknown.
       for (const row of rows) if (validStatuses.has(row.status)) statuses[String(row.userId)] = row.status;
-      return { available: true, statuses, storedCount: Object.keys(statuses).length, lastSeenAt: new Date(lastSeen).toISOString(), ageSeconds };
+      return { available: true, statuses, storedCount: Object.keys(statuses).length, lastSeenAt, ageSeconds, lastSyncAt, syncAgeSeconds, lastError: meta.lastError || null, memberCount: Number(meta.memberCount || 0), knownCount: Number(meta.knownCount || 0) };
     });
     return sendJson(res, 200, result);
   }

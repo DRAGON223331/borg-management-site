@@ -16,11 +16,14 @@ const state = {
   onlineUserIds: new Set(),
   discordStatuses: {},
   discordPresenceAvailable: false,
+  discordPresenceMeta: { lastSeenAt: null, ageSeconds: null },
   dailyMessageStats: { dailyStats: [], dailyTotal: 0, dailyDate: null },
   staffStats: [],
+  notif: { items: [], unread: 0, maxId: null, open: false },
   lbMetric: 'points',
   audit: { entries: [], nextBefore: null, hasMore: false, loading: false },
   activeStaffProfileId: null,
+  monitor: { health: null, summary: null, roster: null, staffStats: [], presence: null, taskStats: null, audit: [], reviewAudit: [], leaveRequests: [], staffRequests: [], loadErrors: [], updatedAt: null, memberLimit: 100 },
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -138,18 +141,27 @@ async function initialize() {
     if (state.user.canManage) {
       $('#task-manager').classList.remove('hidden');
       $$('.manager-only').forEach((element) => element.classList.remove('hidden'));
+      wireTaskInsights();
       $('#submissions-heading').textContent = 'آخر تسليمات الاستاف';
       $('#manager-leave-section').classList.remove('hidden');
       $('#manager-staff-request-section')?.classList.remove('hidden');
+      wireNotifications();
     }
-    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests(), loadStaffRequests(), loadStaffStats()]);
+    await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests(), loadStaffRequests(), loadStaffStats(), loadNotifications(), ...(state.user.canManage ? [loadTaskInsights(), loadSubmissionAudit()] : [])]);
     startChatPolling();
     startPresenceHeartbeat();
-    setInterval(checkBotStatus, 30000);
-    setInterval(() => { if (state.user) loadStaffStats(); }, 45000);
+    // تخفيف الضغط على السيرفر: التحديثات الدورية بتقف لما التبويب يتخبى وبتتأخر شوية.
+    setInterval(() => { if (!document.hidden) checkBotStatus(); }, 120000);
+    setInterval(() => { if (state.user && !document.hidden) loadStaffStats(); }, 90000);
     setInterval(() => {
-      if ($('.page.active-page')?.id === 'page-tasks') loadTasks();
+      if (!document.hidden && $('.page.active-page')?.id === 'page-tasks') loadTasks();
     }, 60000);
+    setInterval(() => { if (!document.hidden) loadNotifications(); }, 60000);
+    // Refresh the full monitoring board only while it's visible; avoid background API churn.
+    setInterval(() => {
+      if (!document.hidden && state.user?.canManage && $('.page.active-page')?.id === 'page-admin-monitor') loadAdminMonitoring();
+    }, 120000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) loadNotifications(); });
   } catch (error) {
     showFatal(error.message || 'حصل خطأ أثناء تحميل الموقع.');
   }
@@ -203,6 +215,16 @@ function wireNavigation() {
   $('#audit-action')?.addEventListener('change', () => loadAudit(true));
   $('#audit-user')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); loadAudit(true); } });
   $('#audit-search')?.addEventListener('input', () => renderAudit());
+  $('#monitor-refresh')?.addEventListener('click', () => loadAdminMonitoring());
+  $('#monitor-audit-refresh')?.addEventListener('click', () => loadAdminMonitoring({ auditOnly: true }));
+  $('#monitor-open-audit')?.addEventListener('click', () => openPage('audit-log'));
+  $('#monitor-open-tasks')?.addEventListener('click', () => openPage('tasks'));
+  $('#monitor-member-search')?.addEventListener('input', () => renderMonitorMembers(true));
+  $('#monitor-member-filter')?.addEventListener('change', () => renderMonitorMembers(true));
+  $('#monitor-role-filter')?.addEventListener('change', () => renderMonitorMembers(true));
+  $('#monitor-member-search-clear')?.addEventListener('click', () => { if ($('#monitor-member-search')) $('#monitor-member-search').value = ''; if ($('#monitor-member-filter')) $('#monitor-member-filter').value = 'all'; if ($('#monitor-role-filter')) $('#monitor-role-filter').value = ''; renderMonitorMembers(true); });
+  $('#monitor-members-more')?.addEventListener('click', () => { state.monitor.memberLimit += 100; renderMonitorMembers(false); });
+  $('#monitor-export')?.addEventListener('click', exportAdminMonitoringCsv);
   $$('[data-go]').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.go)));
   $('#logout-btn').addEventListener('click', async () => {
     try { await api('/api/auth/logout', { method: 'POST' }); }
@@ -213,6 +235,7 @@ function wireNavigation() {
 function openPage(page) {
   if (page === 'management-chat' && !state.user?.canManage) return;
   if (page === 'audit-log' && !state.user?.canManage) return;
+  if (page === 'admin-monitor' && !state.user?.canManage) return;
   if (page === 'staff-profile' && !state.activeStaffProfileId) return;
   $$('.page').forEach((element) => element.classList.remove('active-page'));
   $(`#page-${page}`)?.classList.add('active-page');
@@ -229,6 +252,7 @@ function openPage(page) {
   if (page === 'personal') loadPersonal();
   if (page === 'leaderboard') { renderLeaderboard(); loadStaffStats(); }
   if (page === 'audit-log') loadAudit(true);
+  if (page === 'admin-monitor') loadAdminMonitoring();
   if (page === 'tasks') {
     loadTasks();
     loadSubmissions();
@@ -252,7 +276,8 @@ async function loadTasks() {
     const result = await api('/api/tasks');
     state.tasks = result.tasks || [];
     const existingIds = new Set(state.tasks.map((task) => task.id));
-    state.selectedTaskIds = new Set([...state.selectedTaskIds].filter((id) => existingIds.has(id)));
+    const lockedIds = new Set(state.tasks.filter((task) => task.completedByMe || task.pendingByMe || task.rejectedByMe).map((task) => task.id));
+    state.selectedTaskIds = new Set([...state.selectedTaskIds].filter((id) => existingIds.has(id) && !lockedIds.has(id)));
     $('#stat-active').textContent = result.stats.active;
     $('#stat-required').textContent = result.stats.required;
     $('#stat-done-required').textContent = result.stats.completedRequired;
@@ -285,18 +310,19 @@ function renderTaskList() {
   }
   $('#task-list').innerHTML = tasks.map((task) => `
     <article class="task-row ${task.completedByMe ? 'task-complete' : ''}" data-task-card="${task.id}">
-      <input class="task-select" type="checkbox" data-select-task="${task.id}" aria-label="اختيار المهمة ${escapeHtml(task.title)}" ${state.selectedTaskIds.has(task.id) ? 'checked' : ''}>
+      <input class="task-select" type="checkbox" data-select-task="${task.id}" aria-label="اختيار المهمة ${escapeHtml(task.title)}" ${state.selectedTaskIds.has(task.id) ? 'checked' : ''} ${task.completedByMe || task.pendingByMe || task.rejectedByMe ? 'disabled' : ''}>
       <div class="task-row-body">
         <div class="task-row-title">${escapeHtml(task.title)}</div>
         <div class="task-row-desc">أُضيفت بواسطة ${escapeHtml(task.created_by_name || 'الإدارة')} · ${formatDate(task.created_at, { day: 'numeric', month: 'short' })}</div>
         <div class="task-row-meta">
           <span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? '● مهمة إجبارية' : '○ مهمة اختيارية'}</span>
           <span class="task-id">#${task.id} · ⭐ ${Number(task.points || 0)} نقطة</span>
-          ${task.completedByMe ? '<span class="task-tag completed">✓ تم تسليمها</span>' : ''}
+          ${task.deadline_at ? `<span class="task-tag task-deadline-tag">⏰ تنتهي ${escapeHtml(formatDate(task.deadline_at, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Cairo' }))}</span>` : ''}
+          ${task.redoRequiredByMe ? '<span class="task-tag required">🔁 الإدارة طلبت إعادة المهمة · تم خصم النقاط</span>' : task.completedByMe ? '<span class="task-tag completed">✓ انتهت</span>' : task.pendingByMe ? '<span class="task-tag optional">⏳ بانتظار المراجعة</span>' : task.rejectedByMe ? '<span class="task-tag required">✕ مرفوضة · اتقفلت</span>' : ''}
         </div>
       </div>
       <div class="task-row-actions">
-        ${task.completedByMe ? '<span class="task-complete-label">منجزة</span>' : ''}
+        ${task.redoRequiredByMe ? '<span class="task-complete-label">مطلوب إعادة تسليم المهمة</span>' : task.completedByMe ? '<span class="task-complete-label">انتهت · مينفعش تتسلم تاني</span>' : task.pendingByMe ? '<span class="task-complete-label">متسلمة بانتظار المراجعة</span>' : task.rejectedByMe ? '<span class="task-complete-label">اترفضت · مينفعش تتسلم تاني</span>' : ''}
       ${state.user.canManage ? `<label class="task-points-editor" title="تعديل نقاط المهمة">⭐ <input type="number" min="0" max="100000" step="0.01" value="${Number(task.points || 0)}" data-task-points="${task.id}" aria-label="نقاط المهمة ${task.id}"> <span>نقطة</span></label>` : ''}
       ${state.user.canManage ? `<label class="task-manager-toggle"><input type="checkbox" data-required-toggle="${task.id}" ${task.required ? 'checked' : ''}> إجبارية</label>` : ''}
 ${state.user.canManage ? `<button type="button" class="task-delete-button" data-delete-task="${task.id}" aria-label="حذف المهمة ${task.id}">🗑️ حذف</button>` : ''}
@@ -388,7 +414,7 @@ function wireTasks() {
     renderTaskList();
   }));
   $('#select-visible-btn').addEventListener('click', () => {
-    const visibleIds = getFilteredTasks().map((task) => task.id);
+    const visibleIds = getFilteredTasks().filter((task) => !task.completedByMe && !task.pendingByMe && !task.rejectedByMe).map((task) => task.id);
     const allSelected = visibleIds.length && visibleIds.every((id) => state.selectedTaskIds.has(id));
     visibleIds.forEach((id) => allSelected ? state.selectedTaskIds.delete(id) : state.selectedTaskIds.add(id));
     renderTaskList();
@@ -413,7 +439,10 @@ function queueCurrentTask() {
   const pointsRaw = $('#new-task-points').value.trim();
   const points = Number(pointsRaw);
   if (!pointsRaw || !Number.isFinite(points) || points < 0 || points > 100000 || Math.round(points * 100) / 100 !== points) return showToast('اكتب نقاطًا من 0 إلى 100000 وبحد أقصى منزلتين عشريتين، مثل 0.1 أو 0.25.', 'error');
-  state.queue.push({ key: state.queueNextId++, title, required: $('#new-task-required').value === '1', points: Math.round(points * 100) / 100 });
+  const deadlineRaw = $('#new-task-deadline')?.value || '';
+  const deadlineDate = deadlineRaw ? new Date(deadlineRaw) : null;
+  if (deadlineRaw && (!deadlineDate || !Number.isFinite(deadlineDate.getTime()) || deadlineDate.getTime() <= Date.now())) return showToast('موعد انتهاء المهمة لازم يكون في المستقبل.', 'error');
+  state.queue.push({ key: state.queueNextId++, title, required: $('#new-task-required').value === '1', points: Math.round(points * 100) / 100, deadlineAt: deadlineDate ? deadlineDate.toISOString() : null });
   input.value = '';
   $('#new-task-points').value = '1';
   input.focus();
@@ -430,7 +459,7 @@ function renderTaskQueue() {
   queue.innerHTML = state.queue.map((item) => `
     <div class="queued-task" data-queue-key="${item.key}">
       <span class="task-id">${String(state.queue.indexOf(item) + 1).padStart(2, '0')}</span>
-      <div class="queued-task-title">${escapeHtml(item.title)}</div>
+      <div class="queued-task-title">${escapeHtml(item.title)}${item.deadlineAt ? `<small class="queued-deadline">⏰ ${escapeHtml(formatDate(item.deadlineAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Cairo' }))}</small>` : ''}</div>
       <label class="queued-task-points" title="عدد نقاط هذه المهمة">⭐ <input type="number" min="0" max="100000" step="0.01" value="${Number(item.points)}" data-queue-points="${item.key}" aria-label="نقاط ${escapeHtml(item.title)}"> <span>نقطة</span></label>
       <select data-queue-required="${item.key}" aria-label="نوع المهمة"><option value="1" ${item.required ? 'selected' : ''}>إجبارية</option><option value="0" ${!item.required ? 'selected' : ''}>اختيارية</option></select>
       <button class="remove-queue-item" data-remove-queue="${item.key}" aria-label="حذف المهمة">×</button>
@@ -464,7 +493,7 @@ async function publishQueuedTasks() {
   try {
     const result = await api('/api/tasks', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tasks: state.queue.map(({ title, required, points }) => ({ title, required, points })) }),
+      body: JSON.stringify({ tasks: state.queue.map(({ title, required, points, deadlineAt }) => ({ title, required, points, deadlineAt })) }),
     });
     state.queue = [];
     renderTaskQueue();
@@ -482,8 +511,8 @@ function renderFileList() {
 }
 async function submitTasks(event) {
   event.preventDefault();
-  const taskIds = [...state.selectedTaskIds];
-  if (!taskIds.length) return showToast('حدد مهمة واحدة على الأقل قبل التسليم.', 'error');
+  const taskIds = [...state.selectedTaskIds].filter((id) => { const task = state.tasks.find((item) => item.id === id); return task && !task.completedByMe && !task.pendingByMe && !task.rejectedByMe; });
+  if (!taskIds.length) return showToast('حدد مهمة واحدة على الأقل قبل التسليم (المهمات المنتهية أو المرفوضة مينفعش تتسلم تاني).', 'error');
   const links = $('#evidence-links').value.trim();
   const files = [...$('#evidence-files').files];
   if (!links && !files.length) return showToast('ضيف رابط دليل أو ارفع صورة/فيديو.', 'error');
@@ -501,7 +530,9 @@ async function submitTasks(event) {
       const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(-100) || 'evidence-file';
       const pathname = `evidence/${state.user.id}/${Date.now()}-${index}-${safeName}`;
       button.textContent = `جاري رفع الملف ${index + 1} من ${files.length}...`;
-      const blob = await uploadToBlob(pathname, file, {
+      let blob;
+      try {
+      blob = await uploadToBlob(pathname, file, {
         access: 'private',
         handleUploadUrl: '/api/uploads/token',
         multipart: file.size > 5 * 1024 * 1024,
@@ -511,6 +542,7 @@ async function submitTasks(event) {
           button.textContent = `رفع الملف ${index + 1}/${files.length} · ${percentage}%`;
         },
       });
+      } catch (uploadError) { throw new Error(await explainUploadError(uploadError, pathname)); }
       uploadedFiles.push({ pathname: blob.pathname, originalName: file.name, mimeType: file.type, size: file.size });
     }
     button.textContent = 'جاري تسجيل التسليم...';
@@ -533,6 +565,27 @@ async function submitTasks(event) {
   } catch (error) { showToast(error.message, 'error'); }
   finally { setButtonLoading(button, false); }
 }
+async function explainUploadError(error, pathname) {
+  const message = String(error?.message || '');
+  if (!/client token|upload/i.test(message)) return message || 'فشل رفع الملف.';
+  try {
+    const response = await fetch('/api/uploads/token', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'blob.generate-client-token', payload: { pathname, clientPayload: null, multipart: false } }),
+    });
+    const text = await response.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch { /* not json */ }
+    if (data?.error) return `فشل رفع الملف: ${data.error}`;
+    if (!response.ok) return `فشل رفع الملف: السيرفر رد بحالة ${response.status}. راجع Vercel → Logs.`;
+    if (!data?.clientToken) return 'فشل رفع الملف: رد السيرفر مش JSON صالح (غالبًا مسار /api/uploads/token مش واصل للـ API). أعد النشر وتأكد إن فولدر api/ مرفوع.';
+    return 'فشل رفع الملف مؤقتًا، جرّب تاني.';
+  } catch (probeError) {
+    return `فشل رفع الملف: تعذر الاتصال بالسيرفر (${probeError.message}).`;
+  }
+}
 async function loadSubmissions() {
   try {
     const result = await api('/api/submissions');
@@ -544,13 +597,80 @@ async function loadSubmissions() {
     $('#submissions-list').innerHTML = submissions.map((submission) => {
       const files = (submission.files || []).map((file) => `<a href="${escapeHtml(file.url)}" target="_blank" rel="noopener noreferrer">📎 ${escapeHtml(file.originalName || 'ملف مرفوع')}</a>`).join('');
       const links = (submission.evidenceLinks || []).map((link) => `<a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">↗ فتح رابط دليل</a>`).join('');
-      const tasks = (submission.tasks || []).map((task) => `<span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? 'إجباري' : 'اختياري'} · ${escapeHtml(task.title)}</span>`).join('');
-      return `<article class="submission-card"><div class="submission-top"><div class="submission-user"><img src="${escapeHtml(submission.avatarUrl || avatarFallback(submission.userId))}" alt=""><span>${escapeHtml(submission.username)}</span><span class="task-id">#${submission.id}</span><span class="task-tag ${submission.status === 'approved' ? 'completed' : submission.status === 'rejected' ? 'required' : 'optional'}">${submission.status === 'approved' ? 'تمت الموافقة' : submission.status === 'rejected' ? 'مرفوض' : 'بانتظار الموافقة'}</span></div><time class="submission-date">${formatDate(submission.submittedAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</time></div><div class="submission-task-list">${tasks}</div>${submission.note ? `<div class="submission-note">${escapeHtml(submission.note)}</div>` : ''}${files || links ? `<div class="submission-evidence">${files}${links}</div>` : ''}${state.user.canManage && submission.status === 'pending' ? `<div class="manager-actions"><button class="primary-button" data-review-submission="approve" data-id="${submission.id}">موافقة وإضافة النقاط</button><button class="secondary-button" data-review-submission="reject" data-id="${submission.id}">رفض التسليم</button></div>` : ''}</article>`;
+      const tasks = (submission.tasks || []).map((task) => {
+        const redoStatus = String(task.redoStatus || '');
+        const redoBadge = redoStatus === 'requested'
+          ? '<span class="task-tag required">🔁 مطلوب إعادة المهمة</span>'
+          : redoStatus === 'submitted'
+            ? '<span class="task-tag optional">🔁 تم إعادة التسليم</span>'
+            : '';
+        const redoButton = state.user.canManage && submission.status === 'approved' && task.canRequestRedo && !redoStatus
+          ? `<button type="button" class="task-redo-action" data-redo-task="${submission.id}" data-task-id="${task.id}" data-task-title="${escapeHtml(task.title)}">🔁 طلب إعادة المهمة</button>`
+          : '';
+        return `<span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? 'إجباري' : 'اختياري'} · ${escapeHtml(task.title)}</span>${redoBadge}${redoButton}`;
+      }).join('');
+      const duplicateWarning = state.user.canManage && (submission.duplicateImages || []).length ? `<div class="duplicate-image-warning"><b>⚠️ تنبيه: تم اكتشاف صورة مكررة</b>${submission.duplicateImages.map((duplicate) => `<div>${escapeHtml(duplicate.fileName)} — موجودة في ${duplicate.matches.slice(0, 5).map((match) => `التسليم #${match.submissionId} بواسطة ${escapeHtml(match.username)}`).join('، ')}</div>`).join('')}</div>` : '';
+      return `<article class="submission-card"><div class="submission-top"><div class="submission-user"><img src="${escapeHtml(submission.avatarUrl || avatarFallback(submission.userId))}" alt=""><span>${escapeHtml(submission.username)}</span><span class="task-id">#${submission.id}</span><span class="task-tag ${submission.status === 'approved' ? 'completed' : submission.status === 'rejected' ? 'required' : 'optional'}">${submission.status === 'approved' ? 'تمت الموافقة' : submission.status === 'rejected' ? 'مرفوض' : submission.status === 'reopened' ? 'أُعيد فتحه' : 'بانتظار الموافقة'}</span></div><time class="submission-date">${formatDate(submission.submittedAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</time></div><div class="submission-task-list">${tasks}</div>${submission.note ? `<div class="submission-note">${escapeHtml(submission.note)}</div>` : ''}${duplicateWarning}${files || links ? `<div class="submission-evidence">${files}${links}</div>` : ''}${state.user.canManage && submission.status === 'pending' ? `<div class="manager-actions"><button class="primary-button" data-review-submission="approve" data-id="${submission.id}">موافقة وإضافة النقاط</button><button class="secondary-button" data-review-submission="reject" data-id="${submission.id}">رفض التسليم</button></div>` : ''}${state.user.canManage && submission.status === 'rejected' ? `<div class="manager-actions"><button class="secondary-button" data-review-submission="reopen" data-id="${submission.id}">🔓 إعادة فتح المهمة للعضو</button></div>` : ''}</article>`;
     }).join('');
-    $$('[data-review-submission]').forEach(button => button.addEventListener('click', async () => { const action = button.dataset.reviewSubmission; const id = button.dataset.id; let reason = ''; if (action === 'reject') { reason = window.prompt('سبب رفض التسليم (اختياري):') || ''; } button.disabled = true; try { const result = await api(`/api/submissions/${id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason }) }); showToast(action === 'approve' ? `تمت الموافقة وإضافة ${result.awarded} نقطة.` : 'تم رفض التسليم.', 'success'); await Promise.all([loadSubmissions(), loadMyPoints()]); } catch (error) { showToast(error.message, 'error'); button.disabled = false; } }));
+    $$('[data-review-submission]').forEach(button => button.addEventListener('click', async () => { const action = button.dataset.reviewSubmission; const id = button.dataset.id; let reason = ''; if (action === 'reject') { reason = window.prompt('سبب رفض التسليم (اختياري):') || ''; } if (action === 'reopen') { if (!window.confirm('هتفتح التسليم ده تاني، والعضو هيقدر يسلّم نفس المهام من جديد. متأكد؟')) return; reason = window.prompt('ملاحظة للعضو (اختياري):') || ''; } button.disabled = true; try { const result = await api(`/api/submissions/${id}/${action}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason, note: reason }) }); showToast(result.message || (action === 'approve' ? `تمت الموافقة وإضافة ${result.awarded} نقطة.` : 'تم رفض التسليم.'), result.dmSent === false ? 'info' : 'success'); await Promise.all([loadSubmissions(), loadMyPoints(), loadTasks()]); } catch (error) { showToast(error.message, 'error'); button.disabled = false; } }));
+    $$('[data-redo-task]').forEach(button => button.addEventListener('click', async () => {
+      const submissionId = Number(button.dataset.redoTask);
+      const taskId = Number(button.dataset.taskId);
+      const title = button.dataset.taskTitle || `المهمة #${taskId}`;
+      if (!window.confirm(`طلب إعادة المهمة دي؟\n\n${title}\n\nهيتم خصم نقاط المهمة من رصيد العضو، وهيقدر يسلّمها مرة تانية.`)) return;
+      const reason = window.prompt('سبب طلب الإعادة (اختياري):') || '';
+      button.disabled = true;
+      try {
+        const result = await api(`/api/submissions/${submissionId}/redo-task`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ taskId, reason }) });
+        showToast(result.message || `تم طلب إعادة المهمة وخصم ${result.pointsDeducted} نقطة.`, result.dmSent === false ? 'info' : 'success');
+        await Promise.all([loadSubmissions(), loadMyPoints(), loadTasks()]);
+      } catch (error) { showToast(error.message || 'تعذر طلب إعادة المهمة.', 'error'); button.disabled = false; }
+    }));
   } catch (error) {
     $('#submissions-list').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
   }
+}
+
+function wireTaskInsights() {
+  $('#task-insights-refresh')?.addEventListener('click', () => loadTaskInsights(true));
+  $('#submission-audit-refresh')?.addEventListener('click', loadSubmissionAudit);
+  $('#submission-audit-export')?.addEventListener('click', () => { window.location.href = '/api/submission-audit.csv'; });
+}
+function renderMiniMemberList(items, mode) {
+  if (!items?.length) return '<div class="task-empty">لا توجد بيانات كافية حتى الآن.</div>';
+  return items.map((item, index) => {
+    const details = mode === 'active' ? `${Number(item.submissions || 0)} تسليم · ${Number(item.approved || 0)} مقبول · ${Number(item.rejected || 0)} مرفوض` : (item.lastSubmission ? `آخر تسليم: ${formatDate(item.lastSubmission, { day: 'numeric', month: 'short', year: 'numeric' })}` : 'لم يسجّل أي تسليم');
+    return `<div class="review-member-row"><span class="review-member-rank">${mode === 'active' ? `#${index + 1}` : '•'}</span><div><b>${escapeHtml(item.username || item.userId)}</b><small>${escapeHtml(details)}</small></div><code>${escapeHtml(item.userId)}</code></div>`;
+  }).join('');
+}
+async function loadTaskInsights(force = false) {
+  if (!state.user?.canManage) return;
+  const overview = $('#task-stats-overview');
+  if (force && overview) overview.innerHTML = '<div class="loading-state">جاري تحديث الإحصائيات...</div>';
+  try {
+    const result = await api('/api/task-stats');
+    const totals = result.totals || {};
+    if (overview) overview.innerHTML = [
+      ['إجمالي التسليمات', totals.total || 0], ['المقبولة', totals.approved || 0], ['المرفوضة', totals.rejected || 0], ['قيد المراجعة', totals.pending || 0],
+    ].map(([label, value]) => `<div class="task-stat-card"><small>${label}</small><b>${Number(value).toLocaleString('en-US')}</b></div>`).join('');
+    $('#task-most-active').innerHTML = renderMiniMemberList(result.mostActive, 'active');
+    $('#task-inactive-members').innerHTML = renderMiniMemberList(result.inactive, 'inactive');
+  } catch (error) {
+    if (overview) overview.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
+  }
+}
+async function loadSubmissionAudit() {
+  if (!state.user?.canManage) return;
+  const box = $('#submission-audit-list');
+  if (!box) return;
+  box.innerHTML = '<div class="loading-state">جاري تحميل سجل القرارات...</div>';
+  try {
+    const result = await api('/api/submission-audit');
+    const entries = result.entries || [];
+    if (!entries.length) { box.innerHTML = '<div class="task-empty">لسه مفيش قرارات محفوظة.</div>'; return; }
+    const labels = { approved: '✅ موافقة', rejected: '❌ رفض', reopened: '🔓 إعادة فتح' };
+    box.innerHTML = entries.map((entry) => `<article class="submission-audit-row"><div><b>${escapeHtml(labels[entry.decision] || entry.decision)} · التسليم #${entry.submissionId}</b><small>العضو: ${escapeHtml(entry.memberName)} (${escapeHtml(entry.memberId)}) · الأدمن: ${escapeHtml(entry.reviewerName)} (${escapeHtml(entry.reviewerId)})</small>${entry.reason ? `<p>${escapeHtml(entry.reason)}</p>` : ''}</div><time>${escapeHtml(formatDate(entry.createdAt, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Cairo' }))}</time></article>`).join('');
+  } catch (error) { box.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`; }
 }
 
 async function loadMyPoints() {
@@ -601,20 +721,21 @@ async function refreshPresence() {
     const discord = await api('/api/discord-presence');
     state.discordStatuses = discord.statuses || {};
     state.discordPresenceAvailable = Boolean(discord.available);
-  } catch { state.discordPresenceAvailable = false; }
+    state.discordPresenceMeta = { lastSeenAt: discord.lastSeenAt || null, ageSeconds: Number.isFinite(Number(discord.ageSeconds)) ? Number(discord.ageSeconds) : null, reason: discord.reason || null };
+  } catch { state.discordPresenceAvailable = false; state.discordPresenceMeta = { lastSeenAt: null, ageSeconds: null }; }
   renderRoster();
   renderAdminOverview();
   const footer = $('.roster-footer');
-  if (footer) footer.innerHTML = `<span class="status-dot"></span> ${state.discordPresenceAvailable ? Object.values(state.discordStatuses).filter(status => status !== 'offline').length + ' أونلاين على ديسكورد' : 'حالة ديسكورد غير متاحة — راجع إعدادات البوت'} · تحديث مباشر`;
+  if (footer) footer.innerHTML = `<span class="status-dot"></span> ${state.discordPresenceAvailable ? Object.values(state.discordStatuses).filter(status => ['online', 'idle', 'dnd'].includes(status)).length + ' متصلون على ديسكورد' : 'حالة ديسكورد غير متاحة — راجع إعدادات البوت'} · تحديث مباشر`;
 }
 function startPresenceHeartbeat() {
   const beat = async () => {
     if (!state.user) return;
     try { await api('/api/presence', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); } catch { /* Retry on the next heartbeat. */ }
-    await refreshPresence();
+    if (!document.hidden) await refreshPresence();
   };
   beat();
-  setInterval(beat, 30000);
+  setInterval(beat, 60000);
 }
 function renderRoster() {
   const query = $('#roster-search').value.trim().toLocaleLowerCase('ar');
@@ -629,7 +750,7 @@ function renderRoster() {
   $('#roster-content').innerHTML = groups.map((group) => `
     <section class="roster-group">
       <div class="roster-role-heading"><span class="role-pin" style="background:${/^#[0-9a-f]{6}$/i.test(group.color) ? group.color : '#64748b'}"></span><span>${escapeHtml(group.name)}</span><span class="role-line"></span></div>
-      ${group.members.map((member) => `<div class="member-row" role="button" tabindex="0" data-user-id="${escapeHtml(member.id)}" title="${escapeHtml(member.username)} — اضغط لفتح الملف، وكلك يمين لنسخ ID"><div class="member-avatar-wrap"><img class="member-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><span class="member-state ${['online','idle','dnd'].includes(state.discordStatuses[String(member.id)]) ? 'is-online' : 'is-offline'}" title="${state.discordPresenceAvailable ? ({online:'متصل على ديسكورد',idle:'خامل على ديسكورد',dnd:'عدم الإزعاج على ديسكورد',offline:'أوفلاين أو مخفي على ديسكورد'}[state.discordStatuses[String(member.id)] || 'offline']) : 'حالة ديسكورد غير متاحة'}"></span></div><div style="min-width:0"><div class="member-row-name">${escapeHtml(member.username)}${member.isAdmin ? '<span class="member-admin-tag">إدارة</span>' : ''}</div><div class="member-row-handle">@${escapeHtml(member.handle)}</div></div><span class="member-rank-dot" style="background:${/^#[0-9a-f]{6}$/i.test(member.roleColor) ? member.roleColor : '#64748b'}"></span></div>`).join('')}
+      ${group.members.map((member) => `<div class="member-row" role="button" tabindex="0" data-user-id="${escapeHtml(member.id)}" title="${escapeHtml(member.username)} — اضغط لفتح الملف، وكلك يمين لنسخ ID"><div class="member-avatar-wrap"><img class="member-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><span class="member-state ${['online','idle','dnd'].includes(state.discordStatuses[String(member.id)]) ? 'is-online' : (state.discordPresenceAvailable && !state.discordStatuses[String(member.id)] ? 'is-unknown' : 'is-offline')}" title="${state.discordPresenceAvailable ? ({online:'متصل على ديسكورد',idle:'خامل على ديسكورد',dnd:'عدم الإزعاج على ديسكورد',offline:'أوفلاين أو مخفي على ديسكورد',unknown:'حالة Discord لم تصل من البوت'}[state.discordStatuses[String(member.id)] || 'unknown']) : 'حالة ديسكورد غير متاحة'}"></span></div><div style="min-width:0"><div class="member-row-name">${escapeHtml(member.username)}${member.isAdmin ? '<span class="member-admin-tag">إدارة</span>' : ''}</div><div class="member-row-handle">@${escapeHtml(member.handle)}</div></div><span class="member-rank-dot" style="background:${/^#[0-9a-f]{6}$/i.test(member.roleColor) ? member.roleColor : '#64748b'}"></span></div>`).join('')}
     </section>
   `).join('');
 }
@@ -745,10 +866,10 @@ function renderAdminOverview() {
   }
   container.innerHTML = admins.map((member) => {
     const stats = statsById.get(String(member.id)) || {};
-    const discordStatus = state.discordStatuses[String(member.id)] || 'offline';
+    const discordStatus = state.discordStatuses[String(member.id)] || 'unknown';
     const online = ['online', 'idle', 'dnd'].includes(discordStatus);
-    const statusLabel = !state.discordPresenceAvailable ? 'غير متاح' : ({online:'أونلاين',idle:'خامل',dnd:'عدم الإزعاج',offline:'أوفلاين / مخفي'}[discordStatus] || 'أوفلاين / مخفي');
-    return `<button type="button" class="admin-overview-card" data-open-staff-profile="${escapeHtml(member.id)}"><div class="admin-overview-top"><img src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="admin-overview-name"><b>${escapeHtml(member.username)}</b><small>${escapeHtml(member.roleName || 'مسؤول')}</small></div><span class="online-pill ${state.discordPresenceAvailable ? (online ? 'online' : 'offline') : 'offline'}"><i></i>${statusLabel}</span></div><div class="admin-overview-metrics"><span><b>${Number(stats.dailyMessages || 0).toLocaleString('en-US')}</b><small>رسائل اليوم</small></span><span><b>${Number(stats.totalSubmissions || 0).toLocaleString('en-US')}</b><small>تسليمات</small></span><span><b>${Number(stats.totalPoints || 0).toLocaleString('en-US')}</b><small>نقاط</small></span><span><b>${Number(stats.adminRequests || 0).toLocaleString('en-US')}</b><small>طلبات إدارية</small></span></div><span class="admin-overview-link">فتح الملف الكامل ←</span></button>`;
+    const statusLabel = !state.discordPresenceAvailable ? 'غير متاح' : ({online:'أونلاين',idle:'خامل',dnd:'عدم الإزعاج',offline:'أوفلاين / مخفي',unknown:'الحالة غير مستلمة'}[discordStatus] || 'الحالة غير مستلمة');
+    return `<button type="button" class="admin-overview-card" data-open-staff-profile="${escapeHtml(member.id)}"><div class="admin-overview-top"><img src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="admin-overview-name"><b>${escapeHtml(member.username)}</b><small>${escapeHtml(member.roleName || 'مسؤول')}</small></div><span class="online-pill ${!state.discordPresenceAvailable || discordStatus === 'unknown' ? 'unknown' : (online ? 'online' : 'offline')}"><i></i>${statusLabel}</span></div><div class="admin-overview-metrics"><span><b>${Number(stats.dailyMessages || 0).toLocaleString('en-US')}</b><small>رسائل اليوم</small></span><span><b>${Number(stats.totalSubmissions || 0).toLocaleString('en-US')}</b><small>تسليمات</small></span><span><b>${Number(stats.totalPoints || 0).toLocaleString('en-US')}</b><small>نقاط</small></span><span><b>${Number(stats.adminRequests || 0).toLocaleString('en-US')}</b><small>طلبات إدارية</small></span></div><span class="admin-overview-link">فتح الملف الكامل ←</span></button>`;
   }).join('');
   $$('[data-open-staff-profile]', container).forEach((button) => button.addEventListener('click', () => openStaffProfile(button.dataset.openStaffProfile)));
 }
@@ -770,6 +891,271 @@ async function loadStaffProfile(userId, providedMember = null) {
     $('#staff-profile-content').innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
   }
 }
+
+function monitorFormatNumber(value) { return Number(value || 0).toLocaleString('en-US'); }
+function monitorAgo(value) {
+  if (!value) return 'لا يوجد سجل سابق';
+  const ts = new Date(value).getTime();
+  if (!Number.isFinite(ts)) return 'وقت غير معروف';
+  const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (seconds < 60) return `منذ ${seconds} ث`;
+  if (seconds < 3600) return `منذ ${Math.floor(seconds / 60)} د`;
+  if (seconds < 86400) return `منذ ${Math.floor(seconds / 3600)} س`;
+  return `منذ ${Math.floor(seconds / 86400)} يوم`;
+}
+function monitorStatusLabel(status, available = true) {
+  if (!available) return 'غير متاح';
+  return ({ online: 'أونلاين', idle: 'خامل', dnd: 'عدم الإزعاج', offline: 'أوفلاين / مخفي', unknown: 'الحالة غير مستلمة' })[status] || 'الحالة غير مستلمة';
+}
+function monitorSetStatusCard(title, detail, stateName, icon) {
+  const labels = { ok: 'سليم', warn: 'تحذير', bad: 'متعطل', unknown: 'غير معروف' };
+  return `<article class="monitor-service-card state-${stateName}"><span class="monitor-service-icon">${icon}</span><div class="monitor-service-copy"><b>${escapeHtml(title)}</b><small>${escapeHtml(detail || 'لا توجد تفاصيل')}</small></div><span class="monitor-service-status">${labels[stateName] || 'غير معروف'}</span></article>`;
+}
+async function loadAdminMonitoring(options = {}) {
+  if (!state.user?.canManage) return;
+  const button = $('#monitor-refresh');
+  if (button && !options.auditOnly) setButtonLoading(button, true, 'جاري التحديث...');
+  const boxIds = ['monitor-kpis', 'monitor-services', 'monitor-presence-stats', 'monitor-members-body', 'monitor-task-stats', 'monitor-pending-requests', 'monitor-audit-events', 'monitor-review-events'];
+  if (!options.auditOnly && !state.monitor.updatedAt) boxIds.forEach((id) => {
+    const node = $(`#${id}`); if (!node) return;
+    node.innerHTML = node.tagName === 'TBODY'
+      ? '<tr><td colspan="10" class="loading-state">جاري تحميل بيانات المراقبة...</td></tr>'
+      : '<div class="loading-state">جاري تحميل بيانات المراقبة...</div>';
+  });
+  const jobs = options.auditOnly
+    ? { audit: () => api('/api/audit-log'), reviewAudit: () => api('/api/submission-audit') }
+    : {
+        health: () => api('/api/health'), summary: () => api('/api/admin-monitoring'), roster: () => api('/api/roster'),
+        stats: () => api('/api/staff-stats'), presence: () => api('/api/discord-presence'), taskStats: () => api('/api/task-stats'),
+        audit: () => api('/api/audit-log'), reviewAudit: () => api('/api/submission-audit'),
+        leaveRequests: () => api('/api/leave-requests'), staffRequests: () => api('/api/staff-requests'),
+      };
+  try {
+    const keys = Object.keys(jobs);
+    const results = await Promise.allSettled(keys.map((key) => jobs[key]()));
+    const failures = [];
+    results.forEach((result, index) => {
+      const key = keys[index];
+      if (result.status === 'rejected') {
+        failures.push(`${key}: ${result.reason?.message || 'تعذر التحميل'}`);
+        // Remove the failed source's previous snapshot so stale data isn't presented as freshly checked.
+        if (key === 'stats') state.monitor.staffStats = [];
+        else if (key === 'audit') state.monitor.audit = [];
+        else if (key === 'reviewAudit') state.monitor.reviewAudit = [];
+        else if (key === 'leaveRequests') state.monitor.leaveRequests = [];
+        else if (key === 'staffRequests') state.monitor.staffRequests = [];
+        else state.monitor[key] = null;
+        return;
+      }
+      const data = result.value;
+      if (key === 'stats') state.monitor.staffStats = Array.isArray(data.stats) ? data.stats : [];
+      else if (key === 'audit') state.monitor.audit = Array.isArray(data.entries) ? data.entries : [];
+      else if (key === 'reviewAudit') state.monitor.reviewAudit = Array.isArray(data.entries) ? data.entries : [];
+      else if (key === 'leaveRequests') state.monitor.leaveRequests = Array.isArray(data.requests) ? data.requests : [];
+      else if (key === 'staffRequests') state.monitor.staffRequests = Array.isArray(data.requests) ? data.requests : [];
+      else state.monitor[key] = data;
+    });
+    state.monitor.loadErrors = options.auditOnly
+      ? [...state.monitor.loadErrors.filter((item) => !item.startsWith('audit:') && !item.startsWith('reviewAudit:')), ...failures]
+      : failures;
+    if (options.auditOnly) state.monitor.auditUpdatedAt = new Date().toISOString();
+    else state.monitor.updatedAt = new Date().toISOString();
+    renderAdminMonitoring(state.monitor.loadErrors);
+    if (failures.length) showToast(`تم التحديث جزئيًا؛ تعذر تحميل ${failures.length} من المصادر.`, 'info');
+    else if (!options.auditOnly) showToast('تم تحديث لوحة مراقبة الإدارة.', 'success');
+  } catch (error) {
+    showToast(error.message || 'تعذر تحديث لوحة المراقبة.', 'error');
+  } finally { if (button && !options.auditOnly) setButtonLoading(button, false); }
+}
+function renderAdminMonitoring(failures = []) {
+  const monitor = state.monitor;
+  const roster = monitor.roster || state.roster || { groups: [], memberCount: 0 };
+  const members = (roster.groups || []).flatMap((group) => (group.members || []).map((member) => ({ ...member, sourceRoleName: member.roleName || group.name })));
+  const statsById = new Map((monitor.staffStats || []).map((item) => [String(item.userId), item]));
+  const siteRows = monitor.summary?.siteActivity || [];
+  const siteById = new Map(siteRows.map((item) => [String(item.userId), item]));
+  // لا نستعمل Presence قديمة من حالة الواجهة كأنها فحص جديد، ولا نحوّل فشل المصدر إلى Offline.
+  const discord = monitor.presence || { available: false, statuses: {} };
+  const statuses = discord.available ? (discord.statuses || {}) : {};
+  const statCounts = { online: null, idle: null, dnd: null, offline: null, unknown: null };
+  if (discord.available) {
+    Object.keys(statCounts).forEach((key) => { statCounts[key] = 0; });
+    members.forEach((member) => { const status = statuses[String(member.id)] || 'unknown'; statCounts[statCounts.hasOwnProperty(status) ? status : 'unknown'] += 1; });
+  }
+  const hasSummary = Boolean(monitor.summary?.generatedAt);
+  const webOnline = hasSummary ? siteRows.filter((item) => Number.isFinite(new Date(item.lastSeen).getTime()) && Date.now() - new Date(item.lastSeen).getTime() < 150000) : null;
+  const admins = members.filter((member) => member.isAdmin);
+  const metrics = monitor.summary?.metrics || {};
+  const totalStats = (monitor.taskStats?.totals || {});
+  const cards = [
+    ['إجمالي أعضاء الاستاف', roster.memberCount ?? members.length, 'حسابًا في دليل الاستاف', '◉'],
+    ['مسؤولو الإدارة', admins.length, 'محددون حسب صلاحيات السيرفر الأساسي', '♜'],
+    ['Online على Discord', statCounts.online ?? '—', discord.available ? 'حالة حديثة من الـ Gateway' : 'Presence غير متاح؛ لا نفترض أنها Offline', '●'],
+    ['نشطون على الموقع', webOnline === null ? '—' : webOnline.length, hasSummary ? 'نبضة خلال آخر 150 ثانية' : 'بيانات النشاط غير متاحة', '⌁'],
+    ['المهمات النشطة', metrics.activeTasks ?? '—', monitor.summary ? `منها ${monitorFormatNumber(metrics.requiredActiveTasks)} إجبارية` : 'تفاصيل المهمات غير متاحة', '✓'],
+    ['تسليمات بانتظار المراجعة', totalStats.pending ?? metrics.pendingSubmissions ?? '—', 'مطلوب إجراء من الإدارة', '⏳'],
+    ['طلبات إدارية معلّقة', monitor.summary ? (Number(metrics.pendingStaffRequests || 0) + Number(metrics.pendingLeaveRequests || 0)) : '—', monitor.summary ? `${monitorFormatNumber(metrics.pendingStaffRequests)} طلب إداري · ${monitorFormatNumber(metrics.pendingLeaveRequests)} إجازة` : 'بيانات الطلبات غير متاحة', '✉'],
+    ['قرارات آخر 24 ساعة', metrics.reviewDecisions24h ?? '—', 'قرارات محفوظة في سجل التسليمات', '≣'],
+    ['إجمالي التسليمات', totalStats.total ?? metrics.totalSubmissions ?? '—', 'كل التسليمات المسجلة في قاعدة البيانات', '▤'],
+    ['قرارات المراجعة إجمالًا', metrics.totalReviewDecisions ?? '—', 'سجل مراجعات التسليمات بالكامل', '☷'],
+  ];
+  const kpis = $('#monitor-kpis');
+  if (kpis) kpis.innerHTML = cards.map(([label, value, note, icon], index) => `<article class="monitor-kpi"><div class="monitor-kpi-top"><span>${icon}</span><small>${escapeHtml(label)}</small></div><strong>${escapeHtml(value === '—' ? value : monitorFormatNumber(value))}</strong><p>${escapeHtml(note)}</p></article>`).join('');
+  const health = monitor.health || null;
+  const presenceFresh = Boolean(discord.available);
+  const apiOk = Boolean(health?.ok);
+  const lastPresenceAge = Number(monitor.presence?.ageSeconds);
+  const presenceError = String(monitor.presence?.lastError || '').trim();
+  const presenceFailureDetail = monitor.presence?.reason === 'stale-heartbeat'
+    ? `آخر نبضة منذ ${monitorAgo(monitor.presence?.lastSeenAt)}؛ تأكد أن worker شغال باستمرار وبنفس قاعدة البيانات`
+    : monitor.presence?.reason === 'sync-failed'
+      ? `الـ worker شغال لكن فشل في جلب الحالات: ${presenceError || 'راجع سجل تشغيل worker'}`
+      : monitor.presence?.reason === 'sync-not-complete'
+        ? 'الـ worker اتصل لكن المزامنة الأولى لم تكتمل بعد؛ راجع سجل تشغيل worker'
+        : 'لم تصل نبضة من bot-worker؛ شغّله على استضافة Node دائمة بنفس DATABASE_URL وDISCORD_BOT_TOKEN';
+  const presenceDetail = presenceFresh ? `آخر نبضة منذ ${monitorAgo(monitor.presence?.lastSeenAt)} · ${monitorFormatNumber(monitor.presence?.storedCount || 0)} حالة مستلمة` : presenceFailureDetail;
+  const services = $('#monitor-services');
+  if (services) services.innerHTML = [
+    monitorSetStatusCard('واجهة و API الموقع', health ? (apiOk ? 'وصل رد ناجح من API' : 'الخدمة ردّت بحالة غير سليمة') : 'تعذر الحصول على نتيجة الفحص', !health ? 'unknown' : apiOk ? 'ok' : 'warn', '⌂'),
+    monitorSetStatusCard('Discord Bot', health ? (health.botReady ? 'التوكن متصل و Discord رد بنجاح' : 'البوت غير متصل أو إعداداته ناقصة') : 'لم يتم التحقق من حالة البوت', !health ? 'unknown' : health.botReady ? 'ok' : 'bad', '◉'),
+    monitorSetStatusCard('قاعدة البيانات', health ? (health.databaseReady ? 'اتصال قاعدة البيانات مضبوط' : 'DATABASE_URL غير مضبوط أو الخدمة غير جاهزة') : 'لم يتم التحقق من قاعدة البيانات', !health ? 'unknown' : health.databaseReady ? 'ok' : 'bad', '▤'),
+    monitorSetStatusCard('تخزين المرفقات', health ? (health.storageReady ? 'تكوين التخزين موجود' : 'إعدادات التخزين غير مكتملة') : 'لم يتم التحقق من التخزين', !health ? 'unknown' : health.storageReady ? 'ok' : 'warn', '↥'),
+    monitorSetStatusCard('Discord Presence Worker', presenceDetail, presenceFresh ? (Number.isFinite(lastPresenceAge) && lastPresenceAge > 120 ? 'warn' : 'ok') : (monitor.presence?.reason === 'sync-failed' ? 'warn' : 'bad'), '◌'),
+    monitorSetStatusCard('رتب السيرفر الأساسي', monitor.loadErrors.some((item) => item.startsWith('roster:')) ? 'تعذر تحديث دليل الرتب' : roster.groups?.length ? `${members.length} عضو تم تحميلهم من دليل الاستاف` : 'تعذر تحميل دليل الرتب', monitor.loadErrors.some((item) => item.startsWith('roster:')) || !roster.groups?.length ? 'warn' : 'ok', '♜'),
+    monitorSetStatusCard('Discord Audit Log', monitor.loadErrors.some((item) => item.startsWith('audit:')) ? 'تعذر تحميل سجل الإجراءات' : 'تم تحميل سجل الإجراءات', monitor.loadErrors.some((item) => item.startsWith('audit:')) ? 'warn' : 'ok', '≣'),
+  ].join('');
+  const presNote = $('#monitor-presence-note');
+  if (presNote) presNote.textContent = presenceFresh
+    ? `آخر نبضة من البوت: ${formatDate(monitor.presence?.lastSeenAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' })}. آخر مزامنة ناجحة: ${monitor.presence?.lastSyncAt ? formatDate(monitor.presence.lastSyncAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'غير متاحة'}. الحالة غير المستلمة ليست Offline؛ وDiscord لا يميّز بين Offline وInvisible.`
+    : monitor.presence?.reason === 'stale-heartbeat'
+      ? `آخر نبضة منذ ${monitorAgo(monitor.presence?.lastSeenAt)}؛ تأكد أن الخدمة تعمل باستمرار وتستخدم DATABASE_URL نفسه الموجود في Vercel.`
+      : monitor.presence?.reason === 'sync-failed'
+        ? `الـ worker يعمل لكن فشل في مزامنة الأعضاء. الخطأ الأخير: ${presenceError || 'غير مسجل'}. افتح Logs على استضافة worker وتأكد أن البوت موجود في سيرفر الاستاف وأن STAFF_GUILD_ID صحيح.`
+        : monitor.presence?.reason === 'sync-not-complete'
+          ? 'وصلت نبضة الـ worker لكن لم تنجح مزامنة الأعضاء بعد. افتح Logs على استضافة worker لمعرفة خطأ [presence startup/retry].'
+          : 'لم تصل نبضة من bot-worker. شغّله على استضافة Node دائمة بنفس DISCORD_BOT_TOKEN وDATABASE_URL، وتأكد أن توكن البوت من نفس تطبيق Discord الذي فعّلت فيه Intents.';
+  const presenceStats = $('#monitor-presence-stats');
+  if (presenceStats) presenceStats.innerHTML = [
+    ['Online', statCounts.online, 'online'], ['Idle', statCounts.idle, 'idle'], ['Do Not Disturb', statCounts.dnd, 'dnd'], ['Offline / Invisible', statCounts.offline, 'offline'], ['حالة غير مستلمة', statCounts.unknown, 'unknown'],
+  ].map(([label, count, status]) => `<article class="monitor-presence-card status-${status}${count === null ? ' status-unknown' : ''}"><span class="monitor-presence-dot"></span><b>${count === null ? '—' : monitorFormatNumber(count)}</b><small>${label}</small></article>`).join('');
+  const activityBox = $('#monitor-top-active');
+  const topActive = [...members].map((member) => ({ member, stats: statsById.get(String(member.id)) || {} })).sort((a, b) => Number(b.stats.dailyMessages || 0) - Number(a.stats.dailyMessages || 0)).filter((row) => Number(row.stats.dailyMessages || 0) > 0).slice(0, 8);
+  const maxMessages = Math.max(1, ...topActive.map((row) => Number(row.stats.dailyMessages || 0)));
+  if (activityBox) activityBox.innerHTML = `<div class="monitor-subheading"><b>أعلى نشاط رسائل اليوم</b><small>من روم الإحصاء المحدد في إعدادات البوت</small></div>${monitor.loadErrors.some((item) => item.startsWith('stats:')) ? '<div class="task-empty">بيانات الرسائل غير متاحة؛ تعذر تحميل إحصائيات الاستاف.</div>' : topActive.length ? topActive.map(({ member, stats }, index) => `<div class="monitor-activity-row"><span class="monitor-activity-rank">${index + 1}</span><img src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="monitor-activity-main"><b>${escapeHtml(member.username)}</b><div class="monitor-activity-track"><span style="width:${Math.max(2, Number(stats.dailyMessages || 0) / maxMessages * 100)}%"></span></div></div><strong>${monitorFormatNumber(stats.dailyMessages)}</strong></div>`).join('') : '<div class="task-empty">لا توجد رسائل مسجلة لليوم حتى الآن.</div>'}`;
+  const memberCount = $('#monitor-member-count'); if (memberCount) memberCount.textContent = monitorFormatNumber(members.length) + ' عضو';
+  renderMonitorMembers(true);
+  const taskStats = $('#monitor-task-stats');
+  if (taskStats) taskStats.innerHTML = [
+    ['كل التسليمات', totalStats.total ?? metrics.totalSubmissions ?? '—'], ['مقبولة', totalStats.approved ?? metrics.approvedSubmissions ?? '—'], ['قيد المراجعة', totalStats.pending ?? metrics.pendingSubmissions ?? '—'], ['مرفوضة', totalStats.rejected ?? metrics.rejectedSubmissions ?? '—'], ['المهمات النشطة', metrics.activeTasks ?? '—'], ['الإجباري النشط', metrics.requiredActiveTasks ?? '—'], ['تنتهي خلال 24 ساعة', metrics.dueWithin24Hours ?? '—'], ['قرارات آخر 24 ساعة', metrics.reviewDecisions24h ?? '—'],
+  ].map(([label, value]) => `<div class="monitor-mini-stat"><small>${escapeHtml(label)}</small><b>${escapeHtml(value === '—' ? value : monitorFormatNumber(value))}</b></div>`).join('');
+  const bars = $('#monitor-task-bars');
+  if (bars) {
+    if (!monitor.taskStats && !monitor.summary) bars.innerHTML = '<div class="task-empty">بيانات توزيع التسليمات غير متاحة حاليًا.</div>';
+    else {
+      const total = Math.max(1, Number(totalStats.total ?? metrics.totalSubmissions ?? 0));
+      const segments = [['مقبول', totalStats.approved ?? metrics.approvedSubmissions ?? 0, 'green'], ['بانتظار المراجعة', totalStats.pending ?? metrics.pendingSubmissions ?? 0, 'amber'], ['مرفوض', totalStats.rejected ?? metrics.rejectedSubmissions ?? 0, 'red']];
+      bars.innerHTML = `<div class="monitor-progress-track">${segments.map(([, value, color]) => `<span class="fill-${color}" style="width:${Math.max(0, Number(value) / total * 100)}%"></span>`).join('')}</div><div class="monitor-legend">${segments.map(([label, value, color]) => `<span><i class="fill-${color}"></i>${escapeHtml(label)}: ${monitorFormatNumber(value)}</span>`).join('')}</div>`;
+    }
+  }
+  const pendingRequests = $('#monitor-pending-requests');
+  const reqs = [
+    ...(monitor.staffRequests || []).filter((item) => item.status === 'pending').map((item) => ({ kind: 'طلب إداري', title: item.subject || item.requestType || 'طلب بدون عنوان', reason: item.details || '', by: item.username, when: item.createdAt, id: item.id, href: 'staff-request' })),
+    ...(monitor.leaveRequests || []).filter((item) => item.status === 'pending').map((item) => ({ kind: 'طلب إجازة', title: `${item.startDate || '?'} — ${item.endDate || '?'}`, reason: item.reason || '', by: item.username, when: item.createdAt, id: item.id, href: 'leave' })),
+  ].sort((a, b) => new Date(b.when || 0) - new Date(a.when || 0)).slice(0, 8);
+  if (pendingRequests) {
+    const requestsUnavailable = monitor.loadErrors.some((item) => item.startsWith('staffRequests:')) && monitor.loadErrors.some((item) => item.startsWith('leaveRequests:'));
+    pendingRequests.innerHTML = reqs.length ? reqs.map((item) => `<article class="monitor-event"><span class="monitor-event-mark warn">!</span><div class="monitor-event-main"><b>${escapeHtml(item.kind)} #${escapeHtml(item.id)}: ${escapeHtml(item.title)}</b><small>${escapeHtml(item.by || 'عضو')} · ${escapeHtml(monitorAgo(item.when))}</small>${item.reason ? `<p>${escapeHtml(item.reason)}</p>` : ''}</div><span class="monitor-tag warn">معلّق</span></article>`).join('') : requestsUnavailable ? '<div class="task-empty">تعذر تحميل الطلبات من مصدريها؛ تحقق من تفاصيل الخطأ بالأعلى.</div>' : '<div class="task-empty">مفيش طلبات إدارية أو إجازات معلّقة.</div>';
+  }
+  const auditBox = $('#monitor-audit-events');
+  if (auditBox) auditBox.innerHTML = (monitor.audit || []).length ? monitor.audit.slice(0, 8).map((entry) => `<article class="monitor-event"><span class="monitor-event-mark ${entry.tone === 'danger' ? 'bad' : entry.tone === 'create' ? 'ok' : 'neutral'}">${entry.tone === 'danger' ? '!' : entry.tone === 'create' ? '+' : '≣'}</span><div class="monitor-event-main"><b>${escapeHtml(entry.label || 'إجراء إداري')}</b><small>${escapeHtml(entry.actor?.username || entry.actor?.id || 'غير معروف')}${entry.targetName ? ` ← ${escapeHtml(entry.targetName)}` : ''} · ${escapeHtml(monitorAgo(entry.createdAt))}</small>${entry.reason ? `<p>${escapeHtml(entry.reason)}</p>` : ''}</div><span class="monitor-tag ${entry.tone === 'danger' ? 'bad' : 'neutral'}">${escapeHtml(entry.tone === 'danger' ? 'حساس' : 'Discord')}</span></article>`).join('') : '<div class="task-empty">لا توجد إجراءات متاحة أو تعذّر تحميل السجل.</div>';
+  const reviewBox = $('#monitor-review-events');
+  if (reviewBox) reviewBox.innerHTML = (monitor.reviewAudit || []).length ? monitor.reviewAudit.slice(0, 8).map((entry) => { const status = entry.decision === 'approved' ? ['موافقة', 'ok'] : entry.decision === 'rejected' ? ['رفض', 'bad'] : ['إعادة فتح', 'warn']; return `<article class="monitor-event"><span class="monitor-event-mark ${status[1]}">${status[1] === 'ok' ? '✓' : status[1] === 'bad' ? '!' : '↻'}</span><div class="monitor-event-main"><b>${escapeHtml(status[0])} · التسليم #${entry.submissionId}</b><small>${escapeHtml(entry.reviewerName || entry.reviewerId)} راجع ${escapeHtml(entry.memberName || entry.memberId)} · ${escapeHtml(monitorAgo(entry.createdAt))}</small>${entry.reason ? `<p>${escapeHtml(entry.reason)}</p>` : ''}</div><span class="monitor-tag ${status[1]}">${escapeHtml(status[0])}</span></article>`; }).join('') : monitor.loadErrors.some((item) => item.startsWith('reviewAudit:')) ? '<div class="task-empty">تعذر تحميل سجل قرارات الإدارة.</div>' : '<div class="task-empty">لا توجد قرارات مراجعة مسجلة حتى الآن.</div>';
+  const alerts = $('#monitor-alerts');
+  if (alerts) {
+    const items = [];
+    if (health && !health.botReady) items.push(['bad', 'البوت غير جاهز — راجع التوكن أو صلاحيات Discord.']);
+    if (health && !health.databaseReady) items.push(['bad', 'اتصال قاعدة البيانات غير مؤكد.']);
+    if (!health) items.push(['warn', 'تعذر فحص صحة الخدمات؛ لا يمكن تأكيد أن البوت أو قاعدة البيانات متعطلان.']);
+    if (!presenceFresh) items.push(['warn', 'حالة Discord غير متاحة حاليًا؛ لا تعتبرها Offline.']);
+    const missingMain = members.filter((member) => member.roleId === 'not-in-main').length;
+    const noRole = members.filter((member) => member.roleId === 'none').length;
+    if (missingMain) items.push(['warn', `${missingMain} عضوًا في دليل الاستاف غير موجودين في السيرفر الأساسي.`]);
+    if (noRole) items.push(['warn', `${noRole} عضوًا ليس لديهم رتبة في السيرفر الأساسي.`]);
+    if (failures.length) {
+      items.push(['warn', `تعذّر تحميل ${failures.length} مصدر: ${failures.map((item) => item.split(':')[0]).join('، ')}.`]);
+      failures.forEach((failure) => items.push(['warn', failure]));
+    }
+    alerts.innerHTML = items.map(([tone, message]) => `<div class="monitor-alert ${tone}"><b>${tone === 'bad' ? 'مشكلة' : 'ملاحظة'}</b><span>${escapeHtml(message)}</span></div>`).join('');
+  }
+  const updated = $('#monitor-last-updated');
+  if (updated) updated.textContent = `آخر تحديث: ${formatDate(monitor.updatedAt || new Date(), { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Africa/Cairo' })} بتوقيت القاهرة`;
+}
+function renderMonitorMembers(resetLimit = false) {
+  const body = $('#monitor-members-body');
+  if (!body) return;
+  if (resetLimit) state.monitor.memberLimit = 100;
+  const monitor = state.monitor;
+  const roster = monitor.roster || state.roster || { groups: [], memberCount: 0 };
+  const members = (roster.groups || []).flatMap((group) => (group.members || []).map((member) => ({ ...member, sourceRoleName: member.roleName || group.name })));
+  const statsById = new Map((monitor.staffStats || []).map((item) => [String(item.userId), item]));
+  const siteById = new Map((monitor.summary?.siteActivity || []).map((item) => [String(item.userId), item]));
+  const discordReady = Boolean(monitor.presence?.available);
+  const statuses = discordReady ? (monitor.presence?.statuses || {}) : {};
+  const query = ($('#monitor-member-search')?.value || '').trim().toLocaleLowerCase('ar');
+  const filter = $('#monitor-member-filter')?.value || 'all';
+  const roleFilter = $('#monitor-role-filter')?.value || '';
+  const roleSelect = $('#monitor-role-filter');
+  if (roleSelect) {
+    const previousRole = roleSelect.value || roleFilter;
+    const roles = [...new Map(members.filter((member) => member.roleId && !['none','not-in-main'].includes(String(member.roleId))).map((member) => [String(member.roleId), String(member.roleName || member.roleId)])).entries()].sort((a, b) => a[1].localeCompare(b[1], 'ar'));
+    const options = '<option value="">كل الرتب الأساسية</option>' + roles.map(([id, name]) => `<option value="${escapeHtml(id)}">${escapeHtml(name)}</option>`).join('');
+    if (roleSelect.dataset.optionsKey !== JSON.stringify(roles)) { roleSelect.innerHTML = options; roleSelect.dataset.optionsKey = JSON.stringify(roles); }
+    roleSelect.value = roles.some(([id]) => id === previousRole) ? previousRole : '';
+  }
+  const selectedRole = roleSelect?.value || '';
+  const filtered = members.filter((member) => {
+    const id = String(member.id); const stats = statsById.get(id) || {}; const site = siteById.get(id);
+    const status = statuses[id] || 'unknown'; const siteOnline = Boolean(site && Date.now() - new Date(site.lastSeen).getTime() < 150000);
+    const roles = (member.roles || []).map((role) => role.name).join(' ');
+    const searchText = `${member.username} ${member.handle} ${id} ${member.roleName || ''} ${roles}`.toLocaleLowerCase('ar');
+    if (query && !searchText.includes(query)) return false;
+    if (selectedRole && String(member.roleId) !== selectedRole) return false;
+    if (filter === 'admins' && !member.isAdmin) return false;
+    if (filter === 'discord-online' && !(discordReady && ['online','idle','dnd'].includes(status))) return false;
+    if (filter === 'site-online' && !siteOnline) return false;
+    if (filter === 'not-main' && member.roleId !== 'not-in-main') return false;
+    if (filter === 'no-role' && member.roleId !== 'none') return false;
+    return true;
+  });
+  const shown = filtered.slice(0, state.monitor.memberLimit || 100);
+  if (!shown.length) body.innerHTML = '<tr><td colspan="10" class="loading-state">مفيش أعضاء مطابقين للفلاتر.</td></tr>';
+  else body.innerHTML = shown.map((member) => {
+    const id = String(member.id); const stats = statsById.get(id) || {}; const site = siteById.get(id);
+    const status = statuses[id] || 'unknown'; const siteOnline = Boolean(site && Date.now() - new Date(site.lastSeen).getTime() < 150000);
+    const statusTone = !discordReady || status === 'unknown' ? 'unknown' : ['online','idle','dnd'].includes(status) ? status : 'offline';
+    const roleNames = (member.roles || []).map((role) => role.name).join(' · ');
+    const submissions = `${monitorFormatNumber(stats.totalSubmissions || 0)}<small> ${monitorFormatNumber(stats.approvedSubmissions || 0)} مقبول · ${monitorFormatNumber(stats.pendingSubmissions || 0)} معلّق</small>`;
+    const requests = `${monitorFormatNumber(stats.adminRequests || 0)}<small> إداري · ${monitorFormatNumber(stats.leaveRequests || 0)} إجازة</small>`;
+    return `<tr><td><div class="monitor-member-cell"><img src="${escapeHtml(member.avatarUrl || avatarFallback(id))}" alt=""><div><b>${escapeHtml(member.username || id)}${member.isAdmin ? '<span class="monitor-admin-chip">إدارة</span>' : ''}</b><small>${escapeHtml(id)}</small></div></div></td><td><b>${escapeHtml(member.roleName || '—')}</b><small class="monitor-role-list">${escapeHtml(roleNames || 'بدون رتب مرئية')}</small></td><td><span class="monitor-status-pill ${statusTone}"><i></i>${escapeHtml(monitorStatusLabel(status, discordReady))}</span></td><td><span class="monitor-status-pill ${siteOnline ? 'online' : 'offline'}"><i></i>${siteOnline ? 'نشط بالموقع' : 'غير نشط'}</span></td><td>${monitorFormatNumber(stats.dailyMessages || 0)}</td><td>${monitorFormatNumber(stats.totalMessages || 0)}</td><td>${submissions}</td><td>${monitorFormatNumber(stats.totalPoints || 0)}</td><td>${requests}</td><td>${escapeHtml(monitorAgo(site?.lastSeen || stats.lastSeen))}</td></tr>`;
+  }).join('');
+  const shownLabel = $('#monitor-members-shown'); if (shownLabel) shownLabel.textContent = `عرض ${monitorFormatNumber(shown.length)} من ${monitorFormatNumber(filtered.length)} عضو مطابق`;
+  const more = $('#monitor-members-more'); if (more) { more.classList.toggle('hidden', shown.length >= filtered.length); more.disabled = shown.length >= filtered.length; }
+}
+function exportAdminMonitoringCsv() {
+  if (!state.user?.canManage) return;
+  const roster = state.monitor.roster || state.roster || { groups: [] };
+  const members = (roster.groups || []).flatMap((group) => group.members || []);
+  const statsById = new Map((state.monitor.staffStats || []).map((item) => [String(item.userId), item]));
+  const siteById = new Map((state.monitor.summary?.siteActivity || []).map((item) => [String(item.userId), item]));
+  const statuses = state.monitor.presence?.available ? (state.monitor.presence.statuses || {}) : {};
+  const quote = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+  const rows = [['Discord ID','Username','Main server highest role','Roles','Is admin','Discord status','Website last seen','Messages today','Total messages','Submissions','Approved','Pending','Rejected','Points','Leave requests','Admin requests']];
+  members.forEach((member) => { const id=String(member.id); const stats=statsById.get(id)||{}; const site=siteById.get(id); rows.push([id, member.username, member.roleName, (member.roles||[]).map((role)=>role.name).join(' | '), member.isAdmin?'yes':'no', state.monitor.presence?.available ? monitorStatusLabel(statuses[id]||'unknown',true) : 'unavailable', site?.lastSeen || '', stats.dailyMessages||0, stats.totalMessages||0, stats.totalSubmissions||0, stats.approvedSubmissions||0, stats.pendingSubmissions||0, stats.rejectedSubmissions||0, stats.totalPoints||0, stats.leaveRequests||0, stats.adminRequests||0]); });
+  const csv = '\uFEFF' + rows.map((row) => row.map(quote).join(',')).join('\r\n');
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+  const link = document.createElement('a'); link.href = url; link.download = `borg-management-monitor-${new Date().toISOString().slice(0,10)}.csv`; document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+}
+
 const LB_METRICS = {
   points: { field: 'totalPoints', unit: 'نقطة' },
   messages: { field: 'totalMessages', unit: 'رسالة' },
@@ -888,6 +1274,7 @@ function renderStaffProfile(member, response = {}, target = '#staff-profile-cont
   const leaves = response.recentLeaves || [];
   const points = response.recentPoints || [];
   const requests = response.recentRequests || [];
+  const restricted = Boolean(response.restricted);
   const online = state.onlineUserIds.has(String(member.id));
   const num = (value) => Number(value || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
   const dateOnly = (value) => (value ? escapeHtml(formatDate(value, { day: 'numeric', month: 'long', year: 'numeric' })) : '—');
@@ -895,7 +1282,7 @@ function renderStaffProfile(member, response = {}, target = '#staff-profile-cont
   const color = /^#[0-9a-f]{6}$/i.test(member.roleColor || '') ? member.roleColor : '#8972fb';
   const roles = (member.roles || []).map((role) => `<span class="profile-role-chip" style="${/^#[0-9a-f]{6}$/i.test(role.color) ? `border-color:${role.color}66;color:${role.color}` : ''}">${escapeHtml(role.name)}</span>`).join('') || '<span class="muted">لا توجد رتب إضافية</span>';
   const created = snowflakeDate(member.id);
-  const statusText = { approved: 'تمت الموافقة', submitted: 'بانتظار المراجعة', pending: 'بانتظار المراجعة', rejected: 'مرفوض' };
+  const statusText = { approved: 'تمت الموافقة', submitted: 'بانتظار المراجعة', pending: 'بانتظار المراجعة', rejected: 'مرفوض', reopened: 'أُعيد فتحه' };
   const statusClass = (status) => (status === 'approved' ? 'completed' : status === 'rejected' ? 'required' : 'optional');
   const typeText = { permission: 'طلب إذن / غياب', technical: 'مشكلة تقنية', 'data-change': 'تعديل بيانات', complaint: 'شكوى أو ملاحظة', other: 'طلب إداري آخر' };
 
@@ -933,8 +1320,8 @@ function renderStaffProfile(member, response = {}, target = '#staff-profile-cont
         <div class="pf-ranks">${rankBadge('💬', 'ترتيب الرسائل', ranks.messages)}${rankBadge('⭐', 'ترتيب النقاط', ranks.points)}</div>
       </div>
       <div class="pf-facts">
-        <div><small>دخل سيرفر الاستاف</small><b>${dateOnly(member.joinedAt)}</b></div>
-        <div><small>دخل السيرفر الأساسي</small><b>${dateOnly(member.mainJoinedAt)}</b></div>
+        ${member.joinedAt ? `<div><small>دخل سيرفر الاستاف</small><b>${dateOnly(member.joinedAt)}</b></div>` : ''}
+        ${member.mainJoinedAt ? `<div><small>دخل السيرفر الأساسي</small><b>${dateOnly(member.mainJoinedAt)}</b></div>` : ''}
         <div><small>تاريخ إنشاء الحساب</small><b>${dateOnly(created)}</b></div>
         <div><small>أعلى رتبة</small><b>${escapeHtml(member.roleName || 'عضو الاستاف')}</b></div>
       </div>
@@ -959,20 +1346,20 @@ function renderStaffProfile(member, response = {}, target = '#staff-profile-cont
     <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">PERFORMANCE</span><h2>الأداء والمهمات</h2></div></div>
       <div class="pf-kpis">
         ${kpi('النقاط المسجلة', stats.totalPoints, '', true)}
-        ${kpi('إجمالي التسليمات', totalSub)}
+        ${restricted ? '' : kpi('إجمالي التسليمات', totalSub)}
         ${kpi('التسليمات المقبولة', approvedSub)}
-        ${kpi('بانتظار المراجعة', stats.pendingSubmissions)}
-        ${kpi('المرفوضة', stats.rejectedSubmissions)}
-        ${kpi('طلبات الإجازة', stats.leaveRequests, `${num(stats.adminRequests)} طلب إداري`)}
+        ${restricted ? '' : kpi('بانتظار المراجعة', stats.pendingSubmissions)}
+        ${restricted ? '' : kpi('المرفوضة', stats.rejectedSubmissions)}
+        ${restricted ? '' : kpi('طلبات الإجازة', stats.leaveRequests, `${num(stats.adminRequests)} طلب إداري`)}
       </div>
-      <div class="pf-rate"><div class="pf-rate-top"><b>نسبة قبول التسليمات</b><span>${totalSub ? `${approvalRate}%` : '—'}</span></div><div class="pf-rate-track"><i style="width:${approvalRate}%"></i></div></div>
+      <div class="pf-rate${restricted ? ' hidden' : ''}"><div class="pf-rate-top"><b>نسبة قبول التسليمات</b><span>${totalSub ? `${approvalRate}%` : '—'}</span></div><div class="pf-rate-track"><i style="width:${approvalRate}%"></i></div></div>
     </section>
 
     <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">PERMISSIONS</span><h2>الرتب والصلاحيات</h2></div></div><div class="staff-profile-roles">${roles}</div></section>
-    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">POINTS HISTORY</span><h2>آخر حركات النقاط</h2></div></div><div class="profile-history-list">${pointsHtml}</div></section>
+    ${restricted ? '<section class="staff-profile-section"><p class="muted small-copy">🔒 السجل التفصيلي (حركات النقاط، التسليمات، الإجازات، الطلبات الإدارية) متاح لصاحب الحساب والمسؤولين فقط.</p></section>' : `<section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">POINTS HISTORY</span><h2>آخر حركات النقاط</h2></div></div><div class="profile-history-list">${pointsHtml}</div></section>
     <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">SUBMISSION HISTORY</span><h2>آخر التسليمات</h2></div></div><div class="profile-history-list">${submissionsHtml}</div></section>
     <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">LEAVE HISTORY</span><h2>طلبات الإجازة</h2></div></div><div class="profile-history-list">${leavesHtml}</div></section>
-    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">ADMIN REQUESTS</span><h2>الطلبات الإدارية</h2></div></div><div class="profile-history-list">${requestsHtml}</div></section>`;
+    <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">ADMIN REQUESTS</span><h2>الطلبات الإدارية</h2></div></div><div class="profile-history-list">${requestsHtml}</div></section>`}`;
   $('[data-copy-id]', root)?.addEventListener('click', async (event) => {
     const id = event.currentTarget.dataset.copyId;
     try { await navigator.clipboard.writeText(id); showToast(`تم نسخ Discord ID: ${id}`, 'success'); } catch { showToast(id, 'info'); }
@@ -1088,14 +1475,17 @@ function startChatPolling() {
   // Vercel serves the UI statically while the API runs on a persistent backend.
   // Poll only the currently visible chat so the interface works without a WebSocket proxy.
   setInterval(async () => {
+    if (document.hidden) return;
     const activePage = $('.page.active-page')?.id;
     const room = activePage === 'page-staff-chat' ? 'staff'
       : activePage === 'page-management-chat' && state.user?.canManage ? 'management'
       : null;
-    if (!room) return;
+    if (!room || !state.chatLoaded[room]) return;
     try {
-      const result = await api(`/api/chat/${room}`);
-      if (room === 'staff') updateDailyMessageStats(result);
+      // نطلب الرسائل الأحدث من آخر رسالة معروفة فقط (بدل آخر 100 رسالة كل مرة).
+      const lastId = state.chatMessages[room].reduce((max, message) => Math.max(max, Number(message.id) || 0), 0);
+      const result = await api(`/api/chat/${room}?after=${lastId}`);
+      if (room === 'staff' && !result.incremental) updateDailyMessageStats(result);
       let added = false;
       for (const message of (result.messages || [])) {
         if (!state.chatMessageIds[room].has(message.id)) {
@@ -1105,7 +1495,7 @@ function startChatPolling() {
       }
       if (added) renderChat(room);
     } catch { /* Keep the current chat visible during brief network errors. */ }
-  }, 4000);
+  }, 6000);
 }
 function wireChats() {
   $('#staff-chat-form').addEventListener('submit', (event) => sendChat(event, 'staff'));
@@ -1181,6 +1571,82 @@ $$('.chat-composer textarea').forEach((textarea) => textarea.addEventListener('i
   textarea.style.height = 'auto';
   textarea.style.height = `${Math.min(textarea.scrollHeight, 130)}px`;
 }));
+
+// ───────── إشعارات داخل الموقع للمسؤولين ─────────
+const NOTIF_TARGETS = {
+  submission: { page: 'tasks', selector: '#submissions-list', reload: () => loadSubmissions() },
+  leave: { page: 'overview', selector: '#manager-leave-section', reload: () => loadLeaveRequests() },
+  'staff-request': { page: 'overview', selector: '#manager-staff-request-section', reload: () => loadStaffRequests() },
+};
+const BASE_TITLE = document.title;
+function wireNotifications() {
+  const button = $('#notif-btn');
+  const panel = $('#notif-panel');
+  if (!button || !panel) return;
+  const close = () => { state.notif.open = false; panel.classList.add('hidden'); button.setAttribute('aria-expanded', 'false'); };
+  button.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    if (state.notif.open) return close();
+    state.notif.open = true;
+    panel.classList.remove('hidden');
+    button.setAttribute('aria-expanded', 'true');
+    await loadNotifications();
+    renderNotifications();
+    markNotificationsRead();
+  });
+  $('#notif-mark-read')?.addEventListener('click', (event) => { event.stopPropagation(); markNotificationsRead(); });
+  document.addEventListener('click', (event) => { if (state.notif.open && !event.target.closest('.notif-wrap')) close(); });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && state.notif.open) close(); });
+  $('#notif-list')?.addEventListener('click', (event) => {
+    const row = event.target.closest('[data-notif-type]');
+    if (!row) return;
+    const target = NOTIF_TARGETS[row.dataset.notifType];
+    close();
+    if (!target) return;
+    openPage(target.page);
+    target.reload();
+    setTimeout(() => $(target.selector)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 120);
+  });
+}
+function renderNotificationBadge() {
+  const badge = $('#notif-badge');
+  const unread = state.notif.unread;
+  if (badge) { badge.textContent = unread > 99 ? '99+' : String(unread); badge.classList.toggle('hidden', unread < 1); }
+  document.title = unread > 0 ? `(${unread > 99 ? '99+' : unread}) ${BASE_TITLE}` : BASE_TITLE;
+}
+function renderNotifications() {
+  const list = $('#notif-list');
+  if (!list) return;
+  if (!state.notif.items.length) { list.innerHTML = '<div class="task-empty">لا توجد إشعارات حتى الآن.</div>'; return; }
+  list.innerHTML = state.notif.items.map((item) => `<button type="button" class="notif-item${item.unread ? ' unread' : ''}" data-notif-type="${escapeHtml(item.type)}"><b>${escapeHtml(item.title)}</b>${item.body ? `<span>${escapeHtml(item.body)}</span>` : ''}<time>${escapeHtml(formatDate(item.createdAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</time></button>`).join('');
+}
+async function loadNotifications() {
+  if (!state.user?.canManage) return;
+  try {
+    const result = await api('/api/notifications');
+    const items = Array.isArray(result.items) ? result.items : [];
+    const previousMax = state.notif.maxId;
+    const fresh = previousMax === null ? [] : items.filter((item) => item.unread && item.id > previousMax);
+    state.notif.items = items;
+    state.notif.unread = Number(result.unread) || 0;
+    state.notif.maxId = items.reduce((max, item) => Math.max(max, item.id), previousMax ?? 0);
+    renderNotificationBadge();
+    if (state.notif.open) renderNotifications();
+    // إشعار جديد وصل أثناء فتح الموقع: نعرضه ونحدّث القائمة المرتبطة بيه تلقائيًا.
+    for (const item of fresh.slice(0, 3).reverse()) showToast(`${item.title}${item.body ? ` — ${item.body}` : ''}`, 'info');
+    for (const type of new Set(fresh.map((item) => item.type))) NOTIF_TARGETS[type]?.reload();
+  } catch { /* الإشعارات مش حرجة؛ نحاول تاني في الدورة الجاية */ }
+}
+async function markNotificationsRead() {
+  if (!state.notif.unread && !state.notif.items.some((item) => item.unread)) return;
+  try {
+    await api('/api/notifications/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    state.notif.unread = 0;
+    renderNotificationBadge();
+    // نسيب علامة "جديد" ظاهرة جوه اللوحة لحد ما تتقفل، بعدها تختفي.
+    if (!state.notif.open) { state.notif.items = state.notif.items.map((item) => ({ ...item, unread: false })); }
+  } catch (error) { showToast(error.message, 'error'); }
+}
 
 async function runIntroThenInitialize() {
   const splash = $('#boot-splash');

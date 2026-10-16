@@ -43,6 +43,7 @@ const client = new Client({
 
 let presenceSchemaPromise;
 let presenceSnapshotReady = false;
+let presenceSnapshotRunning = false;
 const validPresenceStatuses = new Set(['online', 'idle', 'dnd', 'offline']);
 function normalizePresenceStatus(status) {
   // Missing data is not proof that a member is offline.
@@ -65,7 +66,11 @@ async function ensureDiscordPresenceSchema() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (guild_id, user_id)
       )`;
       await sql`CREATE INDEX IF NOT EXISTS idx_discord_presence_guild_status ON discord_presence(guild_id, status)`;
-      await sql`CREATE TABLE IF NOT EXISTS discord_presence_meta (guild_id TEXT PRIMARY KEY, last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
+      await sql`CREATE TABLE IF NOT EXISTS discord_presence_meta (guild_id TEXT PRIMARY KEY, last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(), last_sync_at TIMESTAMPTZ, last_error TEXT, member_count INTEGER NOT NULL DEFAULT 0, known_count INTEGER NOT NULL DEFAULT 0)`;
+      await sql`ALTER TABLE discord_presence_meta ADD COLUMN IF NOT EXISTS last_sync_at TIMESTAMPTZ`;
+      await sql`ALTER TABLE discord_presence_meta ADD COLUMN IF NOT EXISTS last_error TEXT`;
+      await sql`ALTER TABLE discord_presence_meta ADD COLUMN IF NOT EXISTS member_count INTEGER NOT NULL DEFAULT 0`;
+      await sql`ALTER TABLE discord_presence_meta ADD COLUMN IF NOT EXISTS known_count INTEGER NOT NULL DEFAULT 0`;
     })().catch((error) => { presenceSchemaPromise = null; throw error; });
   }
   return presenceSchemaPromise;
@@ -101,11 +106,47 @@ async function syncStaffPresenceSnapshot() {
       WHERE p.guild_id = ${STAFF_GUILD_ID} AND p.user_id = missing.user_id
         AND p.updated_at <= ${snapshotAt}::timestamptz`;
   }
-  await sql`INSERT INTO discord_presence_meta(guild_id, last_seen) VALUES (${STAFF_GUILD_ID}, NOW())
-    ON CONFLICT (guild_id) DO UPDATE SET last_seen = NOW()`;
+  await sql`INSERT INTO discord_presence_meta(guild_id, last_seen, last_sync_at, last_error, member_count, known_count)
+    VALUES (${STAFF_GUILD_ID}, NOW(), NOW(), NULL, ${snapshot.length}, ${rows.length})
+    ON CONFLICT (guild_id) DO UPDATE SET last_seen = NOW(), last_sync_at = NOW(), last_error = NULL,
+      member_count = EXCLUDED.member_count, known_count = EXCLUDED.known_count`;
   presenceSnapshotReady = true;
   const counts = rows.reduce((result, row) => { result[row.status] = (result[row.status] || 0) + 1; return result; }, {});
   console.log(`[presence] synced snapshot=${snapshot.length} known=${rows.length} unknown=${missingIds.length}: ${JSON.stringify(counts)}`);
+}
+async function recordPresenceHeartbeat() {
+  if (!client.isReady()) return;
+  try {
+    await ensureDiscordPresenceSchema();
+    await sql`INSERT INTO discord_presence_meta(guild_id, last_seen) VALUES (${STAFF_GUILD_ID}, NOW())
+      ON CONFLICT (guild_id) DO UPDATE SET last_seen = NOW()`;
+  } catch (error) {
+    console.error('[presence heartbeat] failed:', error.stack || error.message || error);
+  }
+}
+async function runPresenceSnapshot(label = 'sync') {
+  if (presenceSnapshotRunning) return;
+  presenceSnapshotRunning = true;
+  try {
+    await syncStaffPresenceSnapshot();
+  } catch (error) {
+    const message = String(error?.message || error || 'Unknown presence sync error').slice(0, 500);
+    console.error(`[presence ${label}]`, error.stack || message);
+    try {
+      await ensureDiscordPresenceSchema();
+      await sql`INSERT INTO discord_presence_meta(guild_id, last_seen, last_error) VALUES (${STAFF_GUILD_ID}, NOW(), ${message})
+        ON CONFLICT (guild_id) DO UPDATE SET last_seen = NOW(), last_error = EXCLUDED.last_error`;
+    } catch (metaError) {
+      console.error('[presence diagnostic write] failed:', metaError.stack || metaError.message || metaError);
+    }
+    // If the first snapshot fails, retry soon and keep retrying rather than waiting five minutes.
+    if (!presenceSnapshotReady && client.isReady()) {
+      const retry = setTimeout(() => { void runPresenceSnapshot('retry'); }, 30_000);
+      retry.unref?.();
+    }
+  } finally {
+    presenceSnapshotRunning = false;
+  }
 }
 async function saveDiscordPresence(presence) {
   if (!presence || String(presence.guild?.id || '') !== STAFF_GUILD_ID) return;
@@ -325,17 +366,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 client.once(Events.ClientReady, () => {
   console.log(`[points-worker] connected as ${client.user.tag}`);
-  syncStaffPresenceSnapshot().catch((error) => console.error('[presence startup sync]', error.message));
+  console.log(`[presence] target guild=${STAFF_GUILD_ID}; database configured=${Boolean(DB_URL)}`);
+  // Record worker liveness separately from successful presence sync. This lets the monitor
+  // distinguish a stopped process from a running worker whose first member fetch failed.
+  void recordPresenceHeartbeat();
+  void runPresenceSnapshot('startup');
   setInterval(() => {
-    if (client.isReady()) syncStaffPresenceSnapshot().catch((error) => console.error('[presence periodic sync]', error.message));
+    if (client.isReady()) void runPresenceSnapshot('periodic');
   }, 5 * 60 * 1000).unref();
-  setInterval(async () => {
-    if (!client.isReady() || !presenceSnapshotReady) return;
-    try {
-      await sql`INSERT INTO discord_presence_meta(guild_id, last_seen) VALUES (${STAFF_GUILD_ID}, NOW())
-        ON CONFLICT (guild_id) DO UPDATE SET last_seen = NOW()`;
-    } catch (error) { console.error('[presence heartbeat]', error.message); }
-  }, 60 * 1000).unref();
+  setInterval(() => { void recordPresenceHeartbeat(); }, 60 * 1000).unref();
   runTaskMessageSync().catch((error) => console.error('[task message sync startup]', error.message));
   setInterval(() => runTaskMessageSync(), 5 * 60 * 1000).unref();
 });
