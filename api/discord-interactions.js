@@ -201,8 +201,9 @@ async function handleTaskReportCommand(interaction, res) {
       const content = report.skipped
         ? 'تم إرسال التقرير اليوم بالفعل تلقائيًا؛ لم يتم تكرار الرسالة.'
         : `✅ تم إرسال تقرير المهمات إلى <#${report.channelId}>.
-الأعضاء الذين لديهم مهمات إجبارية غير مكتملة: **${report.membersWithIncompleteTasks}**.
-عدد المهمات الإجبارية النشطة: **${report.activeRequiredTasks}**.`;
+أعضاء الاستاف العادي الذين لديهم مهمات إجبارية غير مكتملة: **${report.membersWithIncompleteTasks}**.
+عدد المهمات الإجبارية النشطة: **${report.activeRequiredTasks}**.
+تم استبعاد المسؤولين وحسابات Administrator من القائمة.`;
       const response = await fetch(followup, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content, allowed_mentions: { parse: [] } }) });
       if (!response.ok) throw new Error(`Discord interaction webhook HTTP ${response.status}`);
     } catch (error) {

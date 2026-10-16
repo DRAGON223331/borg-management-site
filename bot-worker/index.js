@@ -181,7 +181,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       });
       const content = report.skipped
         ? 'تم إرسال التقرير اليوم بالفعل تلقائيًا؛ لم يتم تكرار الرسالة.'
-        : `✅ تم إرسال تقرير المهمات إلى <#${report.channelId}>.\nالأعضاء الذين لديهم مهمات إجبارية غير مكتملة: **${report.membersWithIncompleteTasks}**.\nعدد المهمات الإجبارية النشطة: **${report.activeRequiredTasks}**.`;
+        : `✅ تم إرسال تقرير المهمات إلى <#${report.channelId}>.\nأعضاء الاستاف العادي الذين لديهم مهمات إجبارية غير مكتملة: **${report.membersWithIncompleteTasks}**.\nعدد المهمات الإجبارية النشطة: **${report.activeRequiredTasks}**.\nتم استبعاد المسؤولين وحسابات Administrator من القائمة.`;
       return interaction.editReply({ content });
     } catch (error) {
       console.error('[task report command]', error.stack || error.message || error);
