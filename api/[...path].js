@@ -457,6 +457,7 @@ async function syncChannelMessageCounts(sql, { force = false, budgetMs = 9000 } 
 // ───────── تسجيل أمر السلاش (mypoints فقط) ─────────
 const SLASH_COMMANDS = [
   { name: 'mypoints', type: 1, description: 'Show how many points you have', description_localizations: { ar: 'اعرف عندك كام نقطة' } },
+  { name: 'task-report', type: 1, dm_permission: false, description: 'Post staff members who have incomplete required tasks', description_localizations: { ar: 'إرسال قائمة الاستاف الذين لم يكملوا المهمات الإجبارية' }, name_localizations: { ar: 'تقرير-المهمات' } },
   {
     name: 'csv', type: 1, dm_permission: false,
     description: 'Export staff data as a CSV file (managers only)',
@@ -1302,6 +1303,27 @@ async function handleApi(parts, req, res) {
       await Promise.all(workers);
     }
     return sendJson(res, 200, { ok: true, closed: closed.length, reminderTasks: reminders.length, recipients: recipients.length, dmSent, dmFailed, backfilledImages });
+  }
+  if (route === 'cron' && parts[1] === 'missing-tasks-report' && req.method === 'GET') {
+    const secret = process.env.CRON_SECRET || '';
+    const bearer = String(req.headers?.authorization || '');
+    const authorizedCron = Boolean(secret) && bearer === `Bearer ${secret}`;
+    if (!authorizedCron && !canManage(user)) return sendError(res, 401, 'غير مصرح. اضبط CRON_SECRET على Vercel.');
+    const cairoParts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Africa/Cairo', hour: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
+    const cairoHour = Number(cairoParts.find((part) => part.type === 'hour')?.value || -1);
+    // Two daily UTC schedules account for Egypt's summer/winter time. Send only in Cairo's 23:00 hour.
+    if (cairoHour !== 23) return sendJson(res, 200, { ok: true, skipped: true, reason: 'outside-cairo-23-hour', cairoHour });
+    await ensureSchema();
+    const reportDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Cairo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    const reportSql = await getSql();
+    const report = await require('../lib/missing-tasks-report.js').sendMissingTasksReport({
+      sql: reportSql,
+      token: BOT_TOKEN,
+      staffGuildId: STAFF_GUILD_ID,
+      channelId: process.env.TASK_INCOMPLETE_REPORT_CHANNEL_ID || '1556945732957765722',
+      dailyDate: reportDate,
+    });
+    return sendJson(res, 200, { ok: true, ...report });
   }
   if (route === 'evidence') return sendPrivateEvidence(req, res);
   if (route === 'uploads' && parts[1] === 'token') return handleUploadToken(req, res);

@@ -17,6 +17,7 @@ const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY || '';
 const { buildSubmissionNotifications, mergeSubmissionDecisionEmbed } = require('../lib/submission-notifications.js');
 const { loadSubmissionEvidence, appendEvidenceLinks } = require('../lib/submission-evidence.js');
+const { sendMissingTasksReport } = require('../lib/missing-tasks-report.js');
 
 function send(res, payload, status = 200) {
   res.statusCode = status;
@@ -182,9 +183,40 @@ async function handleCsvCommand(interaction, res) {
   await work;
 }
 const fmtPoints = (n) => (Math.round(Number(n || 0) * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 });
+async function handleTaskReportCommand(interaction, res) {
+  if (!(await isCsvAuthorized(interaction))) return send(res, { type: 4, data: { content: 'أمر تقرير المهمات متاح لمسؤولي الإدارة فقط.', flags: 64 } });
+  // Defer quickly, then publish the report in the configured channel.
+  send(res, { type: 5, data: { flags: 64 } });
+  const followup = `${DISCORD_API}/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`;
+  const work = (async () => {
+    try {
+      const sql = await getSql();
+      const report = await sendMissingTasksReport({
+        sql,
+        token: BOT_TOKEN,
+        staffGuildId: STAFF_GUILD_ID,
+        channelId: process.env.TASK_INCOMPLETE_REPORT_CHANNEL_ID || '1556945732957765722',
+      });
+      const content = report.skipped
+        ? 'تم إرسال التقرير اليوم بالفعل تلقائيًا؛ لم يتم تكرار الرسالة.'
+        : `✅ تم إرسال تقرير المهمات إلى <#${report.channelId}>.
+الأعضاء الذين لديهم مهمات إجبارية غير مكتملة: **${report.membersWithIncompleteTasks}**.
+عدد المهمات الإجبارية النشطة: **${report.activeRequiredTasks}**.`;
+      const response = await fetch(followup, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content, allowed_mentions: { parse: [] } }) });
+      if (!response.ok) throw new Error(`Discord interaction webhook HTTP ${response.status}`);
+    } catch (error) {
+      console.error('[task report command]', cleanText(error?.message || error, 200));
+      try { await fetch(followup, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: `تعذر إرسال تقرير المهمات: ${cleanText(error?.message || error, 160)}`, allowed_mentions: { parse: [] } }) }); } catch { /* preserve original error */ }
+    }
+  })();
+  try { require('@vercel/functions').waitUntil(work); } catch { /* locally continue below */ }
+  await work;
+}
+
 async function handleCommand(interaction, res) {
   const name = String(interaction.data?.name || '');
   if (name === 'csv') return handleCsvCommand(interaction, res);
+  if (name === 'task-report' || name === 'تقرير-المهمات') return handleTaskReportCommand(interaction, res);
   if (name !== 'نقاطي' && name !== 'mypoints') return send(res, { type: 4, data: { content: 'الأمر ده مش مدعوم.', flags: 64 } });
   const userId = String(interaction.member?.user?.id || interaction.user?.id || '');
   let responded = false;

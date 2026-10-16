@@ -6,6 +6,7 @@ const { Client, GatewayIntentBits, Partials, Events, EmbedBuilder, AttachmentBui
 const { neon } = require('@neondatabase/serverless');
 const { buildSubmissionNotifications, mergeSubmissionDecisionEmbed } = require('../lib/submission-notifications.js');
 const { loadSubmissionEvidence, appendEvidenceLinks } = require('../lib/submission-evidence.js');
+const { sendMissingTasksReport } = require('../lib/missing-tasks-report.js');
 
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DB_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || process.env.DATABASE_URL_UNPOOLED || process.env.POSTGRES_PRISMA_URL;
@@ -138,6 +139,30 @@ async function processSubmissionReview(interaction, submissionId, status, reason
   return { status, amount, totalAfter, taskRows };
 }
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (interaction.isChatInputCommand?.() && ['task-report', 'تقرير-المهمات'].includes(String(interaction.commandName || ''))) {
+    try {
+      if (!(await isReviewManagerAnywhere(interaction))) {
+        return interaction.reply({ content: 'أمر تقرير المهمات متاح لمسؤولي الإدارة فقط.', ephemeral: true });
+      }
+      await interaction.deferReply({ ephemeral: true });
+      const report = await sendMissingTasksReport({
+        sql,
+        token: TOKEN,
+        staffGuildId: STAFF_GUILD_ID,
+        channelId: process.env.TASK_INCOMPLETE_REPORT_CHANNEL_ID || '1556945732957765722',
+      });
+      const content = report.skipped
+        ? 'تم إرسال التقرير اليوم بالفعل تلقائيًا؛ لم يتم تكرار الرسالة.'
+        : `✅ تم إرسال تقرير المهمات إلى <#${report.channelId}>.\nالأعضاء الذين لديهم مهمات إجبارية غير مكتملة: **${report.membersWithIncompleteTasks}**.\nعدد المهمات الإجبارية النشطة: **${report.activeRequiredTasks}**.`;
+      return interaction.editReply({ content });
+    } catch (error) {
+      console.error('[task report command]', error.stack || error.message || error);
+      try {
+        if (interaction.deferred || interaction.replied) return interaction.editReply({ content: `تعذر إرسال تقرير المهمات: ${clean(error.message || 'خطأ غير معروف', 160)}` });
+        return interaction.reply({ content: `تعذر إرسال تقرير المهمات: ${clean(error.message || 'خطأ غير معروف', 160)}`, ephemeral: true });
+      } catch { return; }
+    }
+  }
   const customId = String(interaction.customId || '');
   const buttonMatch = customId.match(/^submission:(approve|reject):(\d+)$/);
   const modalMatch = customId.match(/^submission:rejectmodal:(\d+)$/);
