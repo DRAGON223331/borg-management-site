@@ -166,7 +166,29 @@ function wireNavigation() {
   $('#staff-profile-back')?.addEventListener('click', () => { state.activeStaffProfileId = null; openPage('overview'); });
   const chip = $('.profile-chip');
   if (chip) { chip.style.cursor = 'pointer'; chip.title = 'افتح ملفي الكامل'; chip.addEventListener('click', () => state.user?.id && openStaffProfile(state.user.id)); }
-  $$('.nav-tab').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.page)));
+  $$('.nav-tab[data-page]').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.page)));
+  $$('.nav-menu-item[data-page]').forEach((button) => button.addEventListener('click', () => openPage(button.dataset.page)));
+  const menuToggle = $('#management-menu-toggle');
+  const menuWrap = $('#management-navigation');
+  const menu = $('#management-nav-menu');
+  const setMenuOpen = (open) => {
+    menu?.classList.toggle('hidden', !open);
+    menuWrap?.classList.toggle('is-open', open);
+    menuToggle?.setAttribute('aria-expanded', String(open));
+  };
+  menuToggle?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    setMenuOpen(menu?.classList.contains('hidden'));
+  });
+  document.addEventListener('click', (event) => {
+    if (menuWrap && !menuWrap.contains(event.target)) setMenuOpen(false);
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && menu && !menu.classList.contains('hidden')) {
+      setMenuOpen(false);
+      menuToggle?.focus();
+    }
+  });
   $('#personal-refresh-btn')?.addEventListener('click', () => loadPersonal(true));
   $$('#lb-tabs [data-lb]').forEach((button) => button.addEventListener('click', () => {
     state.lbMetric = button.dataset.lb;
@@ -192,7 +214,13 @@ function openPage(page) {
   if (page === 'staff-profile' && !state.activeStaffProfileId) return;
   $$('.page').forEach((element) => element.classList.remove('active-page'));
   $(`#page-${page}`)?.classList.add('active-page');
-  $$('.nav-tab').forEach((element) => element.classList.toggle('active', element.dataset.page === page));
+  $$('.nav-tab[data-page]').forEach((element) => element.classList.toggle('active', element.dataset.page === page));
+  $$('.nav-menu-item[data-page]').forEach((element) => element.classList.toggle('active', element.dataset.page === page));
+  const menuHasActivePage = Boolean($(`#management-nav-menu [data-page="${page}"]`));
+  $('#management-menu-toggle')?.classList.toggle('active', menuHasActivePage);
+  $('#management-nav-menu')?.classList.add('hidden');
+  $('#management-navigation')?.classList.remove('is-open');
+  $('#management-menu-toggle')?.setAttribute('aria-expanded', 'false');
   if (page === 'staff-chat') loadChat('staff');
   if (page === 'management-chat') loadChat('management');
   if (page === 'staff-profile') loadStaffProfile(state.activeStaffProfileId);
@@ -1145,4 +1173,15 @@ $$('.chat-composer textarea').forEach((textarea) => textarea.addEventListener('i
   textarea.style.height = `${Math.min(textarea.scrollHeight, 130)}px`;
 }));
 
-initialize();
+async function runIntroThenInitialize() {
+  const splash = $('#boot-splash');
+  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  // Intro animation completes first; only then do we start authentication and page data requests.
+  await new Promise((resolve) => setTimeout(resolve, reducedMotion ? 120 : 2050));
+  splash?.classList.add('boot-splash-exit');
+  await new Promise((resolve) => setTimeout(resolve, reducedMotion ? 0 : 340));
+  splash?.remove();
+  await initialize();
+}
+
+runIntroThenInitialize();

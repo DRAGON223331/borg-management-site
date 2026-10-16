@@ -623,3 +623,75 @@ input:focus-visible, textarea:focus-visible, select:focus-visible, button:focus-
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+
+/* Compact three-control navigation and polished dropdown */
+.topbar { z-index: 100; background: rgba(18, 15, 19, .94); border-bottom-color: rgba(226, 61, 79, .16); }
+.top-nav { overflow: visible; flex-wrap: nowrap; gap: 8px; }
+.top-nav > .nav-tab, .nav-dropdown-toggle { min-height: 42px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 10px 17px; }
+.nav-dropdown { position: relative; flex: 0 0 auto; }
+.nav-dropdown-toggle { width: 100%; }
+.nav-dropdown-toggle .nav-chevron { margin-inline-start: 2px; color: #b7a8ac; font-size: 13px; transition: transform .18s ease; }
+.nav-dropdown.is-open .nav-chevron { transform: rotate(180deg); color: #ff9aa5; }
+.nav-dropdown-menu {
+  position: absolute; top: calc(100% + 11px); inset-inline-end: 0; z-index: 140;
+  width: 258px; max-width: calc(100vw - 24px); padding: 9px;
+  background: rgba(25, 22, 27, .98); border: 1px solid rgba(226, 61, 79, .24);
+  border-radius: 16px; box-shadow: 0 22px 58px rgba(0,0,0,.42), 0 0 0 1px rgba(255,255,255,.015) inset;
+  backdrop-filter: blur(20px); transform-origin: top right; animation: nav-menu-enter .18s ease both;
+}
+@keyframes nav-menu-enter { from { opacity: 0; transform: translateY(-5px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+.nav-menu-heading { padding: 10px 11px 7px; color: #f18a96; font-size: 10px; font-weight: 900; letter-spacing: .35px; }
+.nav-menu-heading:not(:first-child) { margin-top: 7px; border-top: 1px solid rgba(255,255,255,.07); }
+.nav-menu-item { width: 100%; display: flex; align-items: center; gap: 11px; text-align: right; border: 1px solid transparent; background: transparent; color: #d4cdd2; border-radius: 10px; padding: 11px 12px; font-size: 12px; font-weight: 700; transition: background .16s ease, border-color .16s ease, color .16s ease, transform .16s ease; }
+.nav-menu-item > span:first-child { display: inline-grid; width: 22px; height: 22px; flex: 0 0 22px; place-items: center; color: #ff8795; background: rgba(226,61,79,.10); border-radius: 7px; }
+.nav-menu-item:hover { background: rgba(226,61,79,.09); color: #fff; border-color: rgba(226,61,79,.14); transform: translateX(-2px); }
+.nav-menu-item.active { color: #fff; background: linear-gradient(110deg, rgba(226,61,79,.20), rgba(180,35,54,.08)); border-color: rgba(226,61,79,.24); }
+.nav-tab:focus-visible, .nav-menu-item:focus-visible { outline: 2px solid #ff8795; outline-offset: 2px; }
+
+/* Intro gate: the app initializes only after this sequence ends */
+.boot-splash { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; overflow: hidden; padding: 24px; isolation: isolate; background: #0d0b0e; color: #fff4f5; opacity: 1; visibility: visible; transition: opacity .32s ease, visibility .32s ease; }
+.boot-splash::before { content: ""; position: absolute; inset: 0; z-index: -2; opacity: .2; background-image: linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px); background-size: 42px 42px; mask-image: radial-gradient(ellipse at center, black, transparent 78%); }
+.boot-splash-exit { opacity: 0; visibility: hidden; pointer-events: none; }
+.boot-splash-glow { position: absolute; z-index: -1; width: min(70vw, 580px); aspect-ratio: 1; border-radius: 50%; filter: blur(90px); pointer-events: none; opacity: .2; }
+.boot-glow-one { background: #a8192d; left: -18%; top: -28%; animation: boot-glow-drift 2.2s ease-in-out both; }
+.boot-glow-two { background: #e23d4f; right: -20%; bottom: -36%; opacity: .13; animation: boot-glow-drift 2s ease-in-out reverse both; }
+.boot-splash-card { width: min(100%, 390px); display: flex; flex-direction: column; align-items: center; text-align: center; padding: 36px 26px 28px; border: 1px solid rgba(255,118,136,.15); border-radius: 28px; background: linear-gradient(145deg, rgba(33,27,32,.88), rgba(17,15,18,.78)); box-shadow: 0 30px 100px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.035); animation: boot-card-reveal 1.9s cubic-bezier(.2,.75,.25,1) both; }
+.boot-mark-wrap { position: relative; width: 110px; height: 110px; display: grid; place-items: center; margin-bottom: 23px; }
+.boot-mark { position: relative; z-index: 2; width: 78px; height: 78px; object-fit: cover; border-radius: 22px; border: 1px solid rgba(255,124,143,.48); box-shadow: 0 12px 36px rgba(180,35,54,.28); animation: boot-logo-float 1.9s cubic-bezier(.25,.7,.35,1) both; }
+.boot-ring { position: absolute; inset: 1px; border: 1px solid rgba(255,114,133,.25); border-radius: 31px; transform: rotate(0deg); }
+.boot-ring-one { animation: boot-ring-one 1.9s ease-in-out both; }
+.boot-ring-two { inset: 10px -7px; border-color: rgba(255,255,255,.09); border-radius: 36px; transform: rotate(45deg); animation: boot-ring-two 1.9s ease-in-out both; }
+.boot-eyebrow { color: #ff8e9c; font-size: 9px; font-weight: 900; letter-spacing: 2.8px; }
+.boot-splash-card h1 { margin: 9px 0 6px; font-size: clamp(27px, 5vw, 35px); line-height: 1.3; letter-spacing: -.6px; }
+.boot-splash-card p { margin: 0; color: #b7aab0; font-size: 12px; }
+.boot-progress { width: min(100%, 250px); height: 4px; margin-top: 26px; overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.09); }
+.boot-progress span { display: block; width: 100%; height: 100%; border-radius: inherit; transform: scaleX(0); transform-origin: right; background: linear-gradient(90deg, #9e1f31, #ff7789); box-shadow: 0 0 16px rgba(226,61,79,.65); animation: boot-progress-fill 1.9s cubic-bezier(.55,.03,.35,1) both; }
+.boot-status { display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 15px; font-size: 10px; color: #8d838a; }
+.boot-status-dot { width: 6px; height: 6px; border-radius: 50%; background: #e75b6e; box-shadow: 0 0 12px rgba(231,91,110,.8); animation: boot-dot-pulse .8s ease-in-out infinite alternate; }
+.boot-splash-footer { position: absolute; inset-inline: 12px; bottom: max(20px, env(safe-area-inset-bottom)); text-align: center; color: #64575e; font-size: 8px; font-weight: 800; letter-spacing: 2px; }
+.boot-splash-footer span { color: #df4b5f; padding: 0 7px; }
+@keyframes boot-card-reveal { 0% { opacity: 0; transform: translateY(18px) scale(.97); filter: blur(5px); } 48% { opacity: 1; filter: blur(0); } 100% { opacity: 1; transform: translateY(0) scale(1); filter: blur(0); } }
+@keyframes boot-logo-float { 0% { opacity: 0; transform: translateY(9px) scale(.82) rotate(-8deg); } 45% { opacity: 1; transform: translateY(-3px) scale(1.04) rotate(2deg); } 72% { transform: translateY(0) scale(1) rotate(0); } 100% { transform: translateY(0) scale(1) rotate(0); } }
+@keyframes boot-ring-one { 0% { opacity: 0; transform: rotate(-24deg) scale(.78); } 45% { opacity: 1; transform: rotate(14deg) scale(1.04); } 100% { opacity: .7; transform: rotate(0) scale(1); } }
+@keyframes boot-ring-two { 0% { opacity: 0; transform: rotate(23deg) scale(.88); } 55% { opacity: 1; transform: rotate(48deg) scale(1.03); } 100% { opacity: .65; transform: rotate(45deg) scale(1); } }
+@keyframes boot-progress-fill { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes boot-dot-pulse { from { opacity: .4; transform: scale(.8); } to { opacity: 1; transform: scale(1.15); } }
+@keyframes boot-glow-drift { 0% { transform: scale(.8) translateY(15px); opacity: 0; } 55% { opacity: .2; } 100% { transform: scale(1.08) translateY(0); } }
+@media (max-width: 760px) {
+  .top-nav { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; overflow: visible; padding: 8px 0 10px; }
+  .top-nav > .nav-tab, .nav-dropdown-toggle { width: 100%; min-width: 0; min-height: 40px; padding: 9px 8px; font-size: 11px; }
+  .nav-dropdown { min-width: 0; }
+  .nav-dropdown-menu { inset-inline-end: 0; width: min(258px, calc(100vw - 24px)); }
+  .boot-splash-card { padding: 31px 21px 24px; }
+  .boot-mark-wrap { width: 100px; height: 100px; }
+  .boot-mark { width: 72px; height: 72px; }
+}
+@media (max-width: 360px) {
+  .top-nav > .nav-tab, .nav-dropdown-toggle { gap: 4px; font-size: 10px; padding-inline: 5px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .boot-splash-card, .boot-mark, .boot-ring-one, .boot-ring-two, .boot-progress span, .boot-glow-one, .boot-glow-two, .boot-status-dot { animation: none !important; }
+  .boot-splash-card { opacity: 1; transform: none; filter: none; }
+  .nav-dropdown-menu { animation: none; }
+}

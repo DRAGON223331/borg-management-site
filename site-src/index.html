@@ -24,6 +24,24 @@
 <body>
   <div id="toast-region" class="toast-region" aria-live="polite"></div>
 
+  <section id="boot-splash" class="boot-splash" aria-label="تحميل إدارة البرج">
+    <div class="boot-splash-glow boot-glow-one"></div>
+    <div class="boot-splash-glow boot-glow-two"></div>
+    <div class="boot-splash-card">
+      <div class="boot-mark-wrap">
+        <span class="boot-ring boot-ring-one" aria-hidden="true"></span>
+        <span class="boot-ring boot-ring-two" aria-hidden="true"></span>
+        <img class="boot-mark" src="/assets/borg-staff-server.jpg" alt="شعار سيرفر الاستاف">
+      </div>
+      <div class="boot-eyebrow">BORG STAFF SPACE</div>
+      <h1>إدارة البرج</h1>
+      <p>بنجهّز مساحة الاستاف...</p>
+      <div class="boot-progress" aria-hidden="true"><span></span></div>
+      <div class="boot-status"><span class="boot-status-dot"></span> تجربة منظمة. إدارة أوضح.</div>
+    </div>
+    <div class="boot-splash-footer">BORG MANAGEMENT <span>•</span> STAFF CONTROL CENTER</div>
+  </section>
+
   <section id="login-screen" class="login-screen hidden">
     <div class="login-card">
       <img class="brand-mark brand-image large-mark" src="/assets/borg-staff-server.jpg" alt="شعار سيرفر الاستاف">
@@ -50,13 +68,20 @@
       <nav class="top-nav" aria-label="التنقل الرئيسي">
         <button class="nav-tab active" data-page="overview"><span>⌂</span> الرئيسية</button>
         <button class="nav-tab" data-page="tasks"><span>✓</span> المهمات</button>
-        <button class="nav-tab" data-page="leaderboard"><span>★</span> ليدر بورد</button>
-        <button class="nav-tab" data-page="personal"><span>☺</span> شخصي</button>
-        <span class="nav-separator" aria-hidden="true"></span>
-        <button class="nav-tab" data-page="staff-chat"><span>☷</span> شات الاستاف</button>
-        <span class="nav-separator manager-only hidden" aria-hidden="true"></span>
-        <button class="nav-tab manager-only hidden" data-page="management-chat"><span>♧</span> شات المسؤولين</button>
-        <button class="nav-tab manager-only hidden" data-page="audit-log"><span>≣</span> سجل السيرفر</button>
+        <div class="nav-dropdown" id="management-navigation">
+          <button class="nav-tab nav-dropdown-toggle" id="management-menu-toggle" type="button" aria-expanded="false" aria-controls="management-nav-menu">
+            <span>▦</span> الإدارة <span class="nav-chevron" aria-hidden="true">⌄</span>
+          </button>
+          <div class="nav-dropdown-menu hidden" id="management-nav-menu" role="menu" aria-labelledby="management-menu-toggle">
+            <div class="nav-menu-heading">مساحة الاستاف</div>
+            <button class="nav-menu-item" type="button" role="menuitem" data-page="personal"><span>☺</span><span>ملفي الشخصي</span></button>
+            <button class="nav-menu-item" type="button" role="menuitem" data-page="leaderboard"><span>★</span><span>ليدر بورد</span></button>
+            <button class="nav-menu-item" type="button" role="menuitem" data-page="staff-chat"><span>☷</span><span>شات الاستاف</span></button>
+            <div class="nav-menu-heading manager-only hidden">إدارة النظام</div>
+            <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="management-chat"><span>♧</span><span>شات المسؤولين</span></button>
+            <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="audit-log"><span>≣</span><span>سجل السيرفر</span></button>
+          </div>
+        </div>
       </nav>
       <div class="user-tools">
         <div class="notif-wrap manager-only hidden">
