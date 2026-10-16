@@ -138,6 +138,10 @@ async function initialize() {
     wireRoster();
     wireLeaveRequests();
     wireStaffRequests();
+    if (state.user.isOwner) {
+      $$('.owner-only').forEach((element) => element.classList.remove('hidden'));
+      wireSiteManagerAccess();
+    }
     if (state.user.canManage) {
       $('#task-manager').classList.remove('hidden');
       $$('.manager-only').forEach((element) => element.classList.remove('hidden'));
@@ -170,7 +174,7 @@ async function initialize() {
 function renderProfile() {
   const user = state.user;
   $('#top-username').textContent = user.username || user.handle || 'مستخدم ديسكورد';
-  $('#top-role').textContent = user.isManager ? 'مسؤول إدارة' : user.isAdmin ? 'Administrator' : 'عضو الاستاف';
+  $('#top-role').textContent = user.isOwner ? 'مالك الموقع' : user.isManager ? 'مسؤول إدارة' : user.isAdmin ? 'Administrator' : 'عضو الاستاف';
   $('#welcome-name').textContent = user.username || 'يا بطل';
   $('#top-avatar').src = user.avatarUrl || avatarFallback(user.id);
   $('#top-avatar').alt = `صورة ${user.username || 'المستخدم'}`;
@@ -232,10 +236,81 @@ function wireNavigation() {
     location.href = '/';
   });
 }
+function wireSiteManagerAccess() {
+  const form = $('#site-manager-add-form');
+  const list = $('#site-manager-list');
+  const refresh = $('#site-manager-refresh');
+  if (!form || form.dataset.wired === '1') return;
+  form.dataset.wired = '1';
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!state.user?.isOwner) return;
+    const input = $('#site-manager-user-id');
+    const userId = String(input?.value || '').trim();
+    if (!/^\d{15,22}$/.test(userId)) return showToast('اكتب Discord ID صحيح من 15 إلى 22 رقمًا.', 'error');
+    const submit = form.querySelector('button[type="submit"]');
+    if (submit) submit.disabled = true;
+    try {
+      await api('/api/site-managers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'grant', userId }) });
+      if (input) input.value = '';
+      showToast('تمت إضافة المسؤول وحفظ الصلاحية.', 'success');
+      await loadSiteManagers();
+      await loadRoster();
+    } catch (error) { showToast(error.message || 'تعذرت إضافة المسؤول.', 'error'); }
+    finally { if (submit) submit.disabled = false; }
+  });
+  refresh?.addEventListener('click', () => loadSiteManagers(true));
+  list?.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-site-access-action]');
+    if (!button || !state.user?.isOwner) return;
+    const userId = button.dataset.userId;
+    const action = button.dataset.siteAccessAction;
+    if (!/^\d{15,22}$/.test(String(userId || '')) || !['deny', 'auto', 'grant'].includes(action)) return;
+    const prompt = action === 'deny' ? 'هل تريد سحب صلاحية إدارة الموقع من هذا الحساب؟ سيظل ممنوعًا من الإدارة حتى لو كان معه Administrator في Discord.' : action === 'auto' ? 'هل تريد إزالة الاستثناء وإرجاع الحساب لقواعد Discord التلقائية؟' : 'هل تريد منح هذا الحساب صلاحية إدارة الموقع؟';
+    if (!window.confirm(prompt)) return;
+    button.disabled = true;
+    try {
+      await api('/api/site-managers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, userId }) });
+      showToast(action === 'deny' ? 'تم سحب صلاحية الموقع.' : action === 'auto' ? 'تمت إعادة الصلاحيات للوضع التلقائي.' : 'تمت إضافة المسؤول.', 'success');
+      await loadSiteManagers(true);
+      await loadRoster();
+    } catch (error) { showToast(error.message || 'تعذر تحديث الصلاحيات.', 'error'); }
+    finally { button.disabled = false; }
+  });
+}
+
+async function loadSiteManagers(force = false) {
+  const list = $('#site-manager-list');
+  if (!list || !state.user?.isOwner) return;
+  list.innerHTML = '<div class="loading-state">جاري التحقق من Administrator والاستثناءات المحفوظة...</div>';
+  try {
+    const result = await api('/api/site-managers' + (force ? '?refresh=1' : ''));
+    const managers = Array.isArray(result.managers) ? result.managers : [];
+    if (!managers.length) {
+      list.innerHTML = '<div class="task-empty">لا توجد صلاحيات إدارة مسجلة غير المالكين الثابتين.</div>';
+      return;
+    }
+    list.innerHTML = managers.map((item) => {
+      const isOwner = Boolean(item.isOwner);
+      const denied = item.action === 'deny';
+      const autoAdmin = Boolean(item.hasAdministrator);
+      const status = isOwner ? '<span class="site-manager-tag active">مالك ثابت</span>' : denied ? '<span class="site-manager-tag denied">ممنوع من الموقع</span>' : item.action === 'grant' ? '<span class="site-manager-tag active">مضاف من المالك</span>' : '<span class="site-manager-tag active">Administrator في Discord</span>';
+      const source = !isOwner && autoAdmin ? '<span class="site-manager-tag">Administrator فعلي</span>' : '';
+      let actionButton = '';
+      if (!isOwner && denied) actionButton = '<button type="button" class="secondary-button compact" data-site-access-action="auto" data-user-id="' + escapeHtml(item.id) + '">إرجاع تلقائي</button>';
+      else if (!isOwner) actionButton = '<button type="button" class="danger-button" data-site-access-action="deny" data-user-id="' + escapeHtml(item.id) + '">سحب الصلاحية</button>';
+      return '<article class="site-manager-card"><img src="' + escapeHtml(item.avatarUrl || avatarFallback(item.id)) + '" alt=""><div class="site-manager-card-main"><b>' + escapeHtml(item.username || item.id) + '</b><small>' + escapeHtml(item.id) + '</small><div class="site-manager-card-tags">' + status + source + '</div></div>' + actionButton + '</article>';
+    }).join('');
+  } catch (error) {
+    list.innerHTML = '<div class="task-empty">' + escapeHtml(error.message || 'تعذر تحميل قائمة المسؤولين.') + '</div>';
+  }
+}
+
 function openPage(page) {
   if (page === 'management-chat' && !state.user?.canManage) return;
   if (page === 'audit-log' && !state.user?.canManage) return;
   if (page === 'admin-monitor' && !state.user?.canManage) return;
+  if (page === 'site-managers' && !state.user?.isOwner) return;
   if (page === 'staff-profile' && !state.activeStaffProfileId) return;
   $$('.page').forEach((element) => element.classList.remove('active-page'));
   $(`#page-${page}`)?.classList.add('active-page');
@@ -253,6 +328,7 @@ function openPage(page) {
   if (page === 'leaderboard') { renderLeaderboard(); loadStaffStats(); }
   if (page === 'audit-log') loadAudit(true);
   if (page === 'admin-monitor') loadAdminMonitoring();
+  if (page === 'site-managers' && state.user?.isOwner) loadSiteManagers();
   if (page === 'tasks') {
     loadTasks();
     loadSubmissions();

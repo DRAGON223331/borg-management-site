@@ -543,6 +543,27 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .lb-value strong { font-size: 16px; }
 
 /* ===== Audit log ===== */
+
+.site-manager-add-form { display: flex; align-items: flex-end; gap: 12px; padding: 16px; margin: 18px 0 26px; background: var(--surface, #17171d); border: 1px solid var(--border); border-radius: 14px; }
+.site-manager-add-form > div { display: grid; gap: 8px; flex: 1 1 260px; }
+.site-manager-add-form label { font-size: 11px; font-weight: 800; color: var(--muted); }
+.site-manager-add-form input { width: 100%; min-width: 0; background: #1a1a20; color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 12px; direction: ltr; text-align: left; }
+.site-manager-list-heading { align-items: center; margin-bottom: 14px; }
+.site-manager-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.site-manager-card { display: flex; align-items: center; gap: 12px; min-width: 0; background: var(--surface, #17171d); border: 1px solid var(--border); border-radius: 13px; padding: 13px; }
+.site-manager-card img { width: 42px; height: 42px; border-radius: 50%; object-fit: cover; background: #23232c; flex: 0 0 auto; }
+.site-manager-card-main { flex: 1 1 auto; min-width: 0; }
+.site-manager-card-main b { display: block; font-size: 12px; overflow-wrap: anywhere; }
+.site-manager-card-main small { display: block; color: var(--muted); font-size: 10px; margin-top: 4px; direction: ltr; text-align: right; overflow-wrap: anywhere; }
+.site-manager-card-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.site-manager-tag { border: 1px solid var(--border); background: rgba(255,255,255,.035); color: var(--muted); border-radius: 999px; padding: 3px 7px; font-size: 9px; }
+.site-manager-tag.active { color: #86efac; border-color: rgba(34,197,94,.25); background: rgba(34,197,94,.07); }
+.site-manager-tag.denied { color: #fda4af; border-color: rgba(244,63,94,.25); background: rgba(244,63,94,.07); }
+.site-manager-card .secondary-button, .site-manager-card .danger-button { flex: 0 0 auto; padding: 8px 10px; font-size: 10px; }
+.danger-button { background: rgba(239,68,68,.1); color: #fda4af; border: 1px solid rgba(239,68,68,.28); border-radius: 9px; font-weight: 800; cursor: pointer; }
+.danger-button:hover { background: rgba(239,68,68,.18); }
+@media (max-width: 560px) { .site-manager-add-form { align-items: stretch; flex-direction: column; } .site-manager-add-form .primary-button { width: 100%; } .site-manager-card { flex-wrap: wrap; } .site-manager-card .secondary-button, .site-manager-card .danger-button { margin-inline-start: auto; } }
+
 .audit-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 14px 0; }
 .audit-toolbar select, .audit-toolbar input { background: #1a1a20; color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 11px; min-width: 0; }
 .audit-toolbar input { flex: 1 1 160px; }

@@ -7,8 +7,7 @@ const SUBMISSION_REVIEW_CHANNEL_ID = process.env.SUBMISSION_REVIEW_CHANNEL_ID ||
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
 const TASK_APPROVED_CHANNEL_ID = (process.env.TASK_APPROVED_CHANNEL_ID || process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504').trim();
 const LEAVE_NOTICE_CHANNEL_ID = process.env.LEAVE_NOTICE_CHANNEL_ID || '1558102515885678734'; // accepted/rejected notices go here
-const MANAGER_IDS = new Set((process.env.MANAGER_IDS || '').split(',').map((x) => x.trim()).filter(Boolean));
-const MANAGEMENT_MAIN_ROLE_ID = process.env.MANAGEMENT_MAIN_ROLE_ID || '1538623033806168135';
+const SITE_OWNER_IDS = new Set(['848304089057460254', '1286035404323164172']);
 const MANAGEMENT_STAFF_ROLE_ID = process.env.MANAGEMENT_STAFF_ROLE_ID || '1559628523809804288';
 const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID || '883871561474539630';
 const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
@@ -162,16 +161,26 @@ async function getPrimaryGuildAuthData() {
 }
 async function isMainGuildManager(userId) {
   const id = String(userId || '');
-  if (MANAGER_IDS.has(id)) return true;
-  if (!id || !BOT_TOKEN) return false;
+  if (SITE_OWNER_IDS.has(id)) return true;
+  if (!/^\d{15,22}$/.test(id) || !BOT_TOKEN) return false;
   try {
+    const sql = await getSql();
+    await sql`CREATE TABLE IF NOT EXISTS site_manager_access (
+      user_id TEXT PRIMARY KEY, username TEXT NOT NULL DEFAULT '',
+      action TEXT NOT NULL CHECK (action IN ('grant','deny')),
+      updated_by TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`;
+    const rows = await sql`SELECT action FROM site_manager_access WHERE user_id = ${id}`;
+    const action = rows[0]?.action || null;
+    if (action === 'deny') return false;
+    if (action === 'grant') return true;
     const [member, auth] = await Promise.all([
       discordApi(`/guilds/${MAIN_GUILD_ID}/members/${id}`),
       getPrimaryGuildAuthData(),
     ]);
     if (auth.ownerId === id) return true;
     const assigned = new Set((member.roles || []).map(String));
-    return assigned.has(MANAGEMENT_MAIN_ROLE_ID) || auth.adminRoleIds.some((roleId) => assigned.has(roleId));
+    return auth.adminRoleIds.some((roleId) => assigned.has(roleId));
   } catch (error) {
     console.warn('[interaction primary-guild authorization]', cleanText(error?.message || error, 160));
     return false;

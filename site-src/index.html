@@ -81,6 +81,8 @@
             <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="admin-monitor"><span>◉</span><span>مراقبة الإدارة</span></button>
             <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="management-chat"><span>♧</span><span>شات المسؤولين</span></button>
             <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="audit-log"><span>≣</span><span>سجل السيرفر</span></button>
+            <div class="nav-menu-heading owner-only hidden">إعدادات المالك</div>
+            <button class="nav-menu-item owner-only hidden" type="button" role="menuitem" data-page="site-managers"><span>♜</span><span>إدارة مسؤولي الموقع</span></button>
           </div>
         </div>
       </nav>
@@ -309,6 +311,20 @@
               <div id="monitor-review-events" class="monitor-events"><div class="loading-state">جاري تحميل قرارات الإدارة...</div></div>
             </section>
           </div>
+        </section>
+
+        <section id="page-site-managers" class="page">
+          <div class="page-heading">
+            <div><div class="eyebrow">SITE ACCESS CONTROL</div><h1>إدارة مسؤولي الموقع</h1><p>أضف مسؤولًا أو اسحب صلاحية إدارة الموقع. الصلاحيات تُحفظ في قاعدة البيانات وتُطبّق على كل طلب فور التحديث.</p></div>
+            <div class="page-heading-badge"><span class="status-dot"></span> للمالكين فقط</div>
+          </div>
+          <div class="private-note"><span>🔒</span><div><b>المالكان الأساسيان محميان</b><p>صلاحية المالكين ثابتة ولا يمكن سحبها من هذه الصفحة. المسؤول الذي لديه Administrator يحصل على صلاحيات الموقع تلقائيًا، ويمكن للمالك منعه من الموقع أو إضافة عضو آخر يدويًا.</p></div></div>
+          <form id="site-manager-add-form" class="site-manager-add-form">
+            <div><label for="site-manager-user-id">Discord ID للعضو</label><input id="site-manager-user-id" type="text" inputmode="numeric" maxlength="22" placeholder="مثال: 123456789012345678" required pattern="[0-9]{15,22}"></div>
+            <button class="primary-button" type="submit">＋ إضافة مسؤول</button>
+          </form>
+          <div class="section-title-row site-manager-list-heading"><div><span class="tiny-label">ACCESS LIST</span><h2>المسؤولون وصلاحياتهم</h2><p class="muted small-copy">تشمل مسؤولي Administrator، والإضافات اليدوية، والحسابات التي منعها المالك.</p></div><button id="site-manager-refresh" type="button" class="secondary-button compact">تحديث ↻</button></div>
+          <div id="site-manager-list" class="site-manager-list"><div class="loading-state">جاري فحص صلاحيات أعضاء السيرفر الأساسي...</div></div>
         </section>
 
         <section id="page-audit-log" class="page">

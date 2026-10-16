@@ -33,7 +33,6 @@ const DISCORD_REDIRECT_URI = process.env.DISCORD_REDIRECT_URI || `${SITE_URL}/au
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID || '883871561474539630';
 const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
-const MANAGEMENT_MAIN_ROLE_ID = process.env.MANAGEMENT_MAIN_ROLE_ID || '1538623033806168135';
 const MANAGEMENT_STAFF_ROLE_ID = process.env.MANAGEMENT_STAFF_ROLE_ID || '1559628523809804288';
 const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 // الروم الوحيد الذي تُحسب منه رسائل الاستاف.
@@ -45,8 +44,7 @@ const SUBMISSION_REVIEW_CHANNEL_ID = '1556945732957765722';
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
 const LEAVE_REQUEST_CHANNEL_ID = '1556945732957765722'; // ثابت: روم طلبات الإجازة ومراجعتها
 const STAFF_REQUEST_CHANNEL_ID = '1560142058826768425'; // ثابت: روم كل الطلبات الإدارية غير الإجازات، وسجلات قبولها ورفضها
-const MANAGER_IDS = new Set((process.env.MANAGER_IDS || '')
-  .split(',').map((x) => x.trim()).filter(Boolean));
+const SITE_OWNER_IDS = new Set(['848304089057460254', '1286035404323164172']);
 const ATTACHMENT_LIMIT_MB = Math.max(1, Number(process.env.DISCORD_ATTACHMENT_LIMIT_MB || 8));
 const MAX_UPLOAD_MB = Math.max(1, Number(process.env.MAX_UPLOAD_MB || 100));
 const ROOT = __dirname;
@@ -199,6 +197,16 @@ for (const statement of [
 ]) {
   try { db.exec(statement); } catch (error) { if (!/duplicate column name/i.test(error.message)) throw error; }
 }
+db.exec(`
+  CREATE TABLE IF NOT EXISTS site_manager_access (
+    user_id TEXT PRIMARY KEY,
+    username TEXT NOT NULL DEFAULT '',
+    action TEXT NOT NULL CHECK (action IN ('grant','deny')),
+    updated_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_site_manager_access_action ON site_manager_access(action, updated_at DESC);
+`);
 db.exec(`
   CREATE TABLE IF NOT EXISTS submission_review_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -366,7 +374,11 @@ function profileAvatar(sessionUser) {
   if (!sessionUser) return null;
   return sessionUser.avatarUrl || avatarUrl(sessionUser);
 }
-function canManage(user) { return Boolean(user && (user.isManager || user.isAdmin)); }
+function isSiteOwner(userOrId) {
+  const id = typeof userOrId === 'string' ? userOrId : String(userOrId?.id || '');
+  return SITE_OWNER_IDS.has(id);
+}
+function canManage(user) { return Boolean(user && (isSiteOwner(user) || user.canManage || user.isManager || user.isAdmin)); }
 function canReadRoom(user, room) { return Boolean(user && (room === 'staff' || canManage(user))); }
 function hasAdministratorPermission(guildObject) {
   if (!guildObject || !guildObject.permissions) return false;
@@ -374,41 +386,56 @@ function hasAdministratorPermission(guildObject) {
   catch { return false; }
 }
 const liveMainGuildAccessCache = new Map();
+async function getSiteManagerAction(userId) {
+  const row = db.prepare('SELECT action FROM site_manager_access WHERE user_id = ?').get(String(userId || ''));
+  return row?.action || null;
+}
 async function refreshSessionManagerAccess(sessionUser) {
   if (!sessionUser) return null;
   const userId = String(sessionUser.id || '');
-  if (MANAGER_IDS.has(userId)) return { ...sessionUser, isManager: true, isAdmin: false };
-  if (!(sessionUser.isAdmin || sessionUser.isManager)) return sessionUser;
+  if (isSiteOwner(userId)) return { ...sessionUser, isOwner: true, isManager: false, isAdmin: true, canManage: true, permissionCheckError: false, siteAccessOverride: 'owner' };
+  let action;
+  try { action = await getSiteManagerAction(userId); }
+  catch (error) {
+    console.warn('[site access override]', error.message);
+    return { ...sessionUser, isOwner: false, isManager: false, isAdmin: false, canManage: false, permissionCheckError: true };
+  }
+  if (action === 'deny') return { ...sessionUser, isOwner: false, isManager: false, isAdmin: false, canManage: false, permissionCheckError: false, siteAccessOverride: 'deny' };
+  if (action === 'grant') return { ...sessionUser, isOwner: false, isManager: true, isAdmin: false, canManage: true, permissionCheckError: false, siteAccessOverride: 'grant' };
   const cached = liveMainGuildAccessCache.get(userId);
   if (cached && cached.expiresAt > Date.now()) return { ...sessionUser, ...cached.value };
   try {
     const mainGuild = await client.guilds.fetch(MAIN_GUILD_ID);
     const member = await mainGuild.members.fetch(userId);
-    const isAdmin = Boolean(member.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID) || member.permissions.has(PermissionsBitField.Flags.Administrator));
-    const value = { isAdmin, isManager: false, isPrimaryServerMember: true, permissionCheckError: false };
-    liveMainGuildAccessCache.set(userId, { value, expiresAt: Date.now() + 25_000 });
+    const isAdmin = String(mainGuild.ownerId || '') === userId || Boolean(member.permissions.has(PermissionsBitField.Flags.Administrator));
+    const value = { isOwner: false, isAdmin, isManager: false, canManage: isAdmin, isPrimaryServerMember: true, permissionCheckError: false, siteAccessOverride: null };
+    liveMainGuildAccessCache.set(userId, { value, expiresAt: Date.now() + 20_000 });
     return { ...sessionUser, ...value };
   } catch (error) {
     console.warn('[manager permission refresh]', error.message);
-    const value = { isAdmin: false, isManager: false, isPrimaryServerMember: false, permissionCheckError: true };
+    const value = { isOwner: false, isAdmin: false, isManager: false, canManage: false, isPrimaryServerMember: false, permissionCheckError: true };
     liveMainGuildAccessCache.set(userId, { value, expiresAt: Date.now() + 8000 });
     return { ...sessionUser, ...value };
   }
 }
 async function refreshRequestSessionUser(req) {
   const current = req.session?.user;
-  if (!current || !(current.isAdmin || current.isManager)) return current || null;
+  if (!current) return null;
   req.session.user = await refreshSessionManagerAccess(current);
   return req.session.user;
 }
 async function isMainServerManager(userId) {
   const id = String(userId || '');
-  if (MANAGER_IDS.has(id)) return true;
-  if (!id) return false;
+  if (isSiteOwner(id)) return true;
+  if (!/^\d{15,22}$/.test(id)) return false;
+  let action;
+  try { action = await getSiteManagerAction(id); } catch { return false; }
+  if (action === 'deny') return false;
+  if (action === 'grant') return true;
   try {
     const guild = await client.guilds.fetch(MAIN_GUILD_ID);
     const member = await guild.members.fetch(id);
-    return Boolean(member.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID) || member.permissions.has(PermissionsBitField.Flags.Administrator));
+    return String(guild.ownerId || '') === id || Boolean(member.permissions.has(PermissionsBitField.Flags.Administrator));
   } catch (error) {
     console.warn('[review permission check]', error.message);
     return false;
@@ -851,6 +878,7 @@ async function getStaffRoster() {
   const roleGroups = new Map();
   const plainMembers = [];
   const missingMainGuild = [];
+  const siteAccessById = new Map(db.prepare('SELECT user_id, action FROM site_manager_access').all().map((row) => [String(row.user_id), row.action]));
 
   for (const member of staffMembers.values()) {
     if (member.user.bot) continue;
@@ -870,7 +898,9 @@ async function getStaffRoster() {
       joinedAt: member.joinedAt ? new Date(member.joinedAt).toISOString() : null,
       roleColor: highest ? highest.hexColor : '#64748b',
       roles: assignedRoles.map((role) => ({ id: role.id, name: role.name, position: role.position, color: role.hexColor })),
-      isAdmin: MANAGER_IDS.has(member.id) || Boolean(mainMember?.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID)) || Boolean(mainMember?.permissions.has(PermissionsBitField.Flags.Administrator)),
+      isOwner: isSiteOwner(member.id),
+      isDiscordAdministrator: Boolean(mainMember && (String(mainGuild.ownerId || '') === String(member.id) || mainMember.permissions.has(PermissionsBitField.Flags.Administrator))),
+      isAdmin: isSiteOwner(member.id) || siteAccessById.get(String(member.id)) === 'grant' || (siteAccessById.get(String(member.id)) !== 'deny' && Boolean(mainMember && (String(mainGuild.ownerId || '') === String(member.id) || mainMember.permissions.has(PermissionsBitField.Flags.Administrator)))),
     };
     if (!mainMember) {
       missingMainGuild.push(row);
@@ -944,16 +974,18 @@ app.get('/auth/callback', authLimiter, async (req, res) => {
     const guilds = await guildsResponse.json();
     const staffGuild = guilds.find((guild) => guild.id === STAFF_GUILD_ID);
     const mainGuild = guilds.find((guild) => guild.id === MAIN_GUILD_ID);
-    const isManager = MANAGER_IDS.has(discordUser.id);
+    const isOwner = isSiteOwner(discordUser.id);
     const [mainMemberForRoles, staffMemberForRoles] = await Promise.all([
       client.guilds.fetch(MAIN_GUILD_ID).then((guild) => guild.members.fetch(discordUser.id)).catch(() => null),
       client.guilds.fetch(STAFF_GUILD_ID).then((guild) => guild.members.fetch(discordUser.id)).catch(() => null),
     ]);
-    const hasManagementRole = Boolean(mainMemberForRoles?.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID));
-    // الإدارة في الموقع تُحدد من السيرفر الأساسي فقط، وليس من رتب سيرفر الاستاف.
-    const isAdmin = hasAdministratorPermission(mainGuild) || hasManagementRole;
+    const accessAction = getSiteManagerAction(discordUser.id);
+    const action = await accessAction;
+    const deniedByOwner = !isOwner && action === 'deny';
+    const isManager = !isOwner && !deniedByOwner && action === 'grant';
+    const isAdmin = !deniedByOwner && (isOwner || Boolean(mainGuild?.owner) || hasAdministratorPermission(mainGuild) || Boolean(mainMemberForRoles && (String(mainMemberForRoles.guild?.ownerId || '') === String(discordUser.id) || mainMemberForRoles.permissions.has(PermissionsBitField.Flags.Administrator))));
     if (!staffGuild && !isAdmin && !isManager) {
-      return res.status(403).send(`الحساب ده مش عضو في سيرفر الاستاف، ومش معاه صلاحية Administrator في السيرفر الأساسي. ادخل سيرفر الاستاف (${STAFF_GUILD_ID}) ثم جرّب تاني.`);
+      return res.status(403).send(`الحساب ده مش عضو في سيرفر الاستاف، ومش معاه صلاحية Administrator أو صلاحية مضافة من مالك الموقع. ادخل سيرفر الاستاف (${STAFF_GUILD_ID}) ثم جرّب تاني.`);
     }
     req.session.user = {
       id: discordUser.id,
@@ -961,8 +993,10 @@ app.get('/auth/callback', authLimiter, async (req, res) => {
       handle: discordUser.username,
       avatar: discordUser.avatar || null,
       avatarUrl: avatarUrl(discordUser),
+      isOwner,
       isAdmin,
       isManager,
+      canManage: Boolean(isOwner || isAdmin || isManager),
       isStaffGuildMember: Boolean(staffGuild),
     };
     req.session.save((error) => {
@@ -989,6 +1023,66 @@ app.get('/api/me', async (req, res) => {
   await refreshRequestSessionUser(req);
   res.set('Cache-Control', 'no-store');
   res.json({ authenticated: true, user: { ...req.session.user, avatarUrl: profileAvatar(req.session.user), canManage: canManage(req.session.user) } });
+});
+
+app.get('/api/site-managers', requireAuth, async (req, res) => {
+  if (!isSiteOwner(req.session.user)) return res.status(403).json({ error: 'إدارة صلاحيات الموقع متاحة لمالكي الموقع فقط.' });
+  if (!botReady) return res.status(503).json({ error: 'البوت غير متصل بديسكورد؛ تعذر فحص رتب الأعضاء.' });
+  try {
+    const guild = await client.guilds.fetch(MAIN_GUILD_ID);
+    const [members, overrides] = await Promise.all([
+      guild.members.fetch(),
+      Promise.resolve(db.prepare('SELECT user_id, username, action, updated_by, updated_at FROM site_manager_access ORDER BY updated_at DESC').all()),
+    ]);
+    const overrideById = new Map(overrides.map((row) => [String(row.user_id), row]));
+    const allIds = new Set([...members.filter((m) => !m.user.bot).map((m) => String(m.id)), ...overrideById.keys(), ...SITE_OWNER_IDS]);
+    const managers = [...allIds].map((id) => {
+      const member = members.get(id);
+      const override = overrideById.get(id);
+      const isOwner = SITE_OWNER_IDS.has(id);
+      const hasAdministrator = Boolean(member?.permissions.has(PermissionsBitField.Flags.Administrator));
+      const action = isOwner ? 'owner' : (override?.action || null);
+      const isSiteManager = isOwner || action === 'grant' || (action !== 'deny' && hasAdministrator);
+      if (!isSiteManager && action !== 'deny') return null;
+      return {
+        id, username: member?.displayName || member?.user?.globalName || member?.user?.username || override?.username || (isOwner ? 'مالك الموقع' : id),
+        avatarUrl: member?.displayAvatarURL({ extension: 'png', size: 64 }) || (member?.user ? avatarUrl(member.user) : avatarFallback(id)),
+        isOwner, hasAdministrator, isSiteManager, action,
+        updatedBy: override?.updated_by || null, updatedAt: override?.updated_at || null,
+      };
+    }).filter(Boolean).sort((a, b) => Number(b.isOwner) - Number(a.isOwner) || Number(b.isSiteManager) - Number(a.isSiteManager) || a.username.localeCompare(b.username, 'ar'));
+    res.set('Cache-Control', 'no-store');
+    res.json({ owners: [...SITE_OWNER_IDS], managers });
+  } catch (error) {
+    console.error('[site managers list]', error.message);
+    res.status(503).json({ error: `تعذر تحميل المسؤولين: ${cleanText(error.message, 180)}` });
+  }
+});
+app.post('/api/site-managers', requireAuth, async (req, res) => {
+  if (!isSiteOwner(req.session.user)) return res.status(403).json({ error: 'إدارة صلاحيات الموقع متاحة لمالكي الموقع فقط.' });
+  const targetId = cleanText(req.body?.userId, 24);
+  const action = cleanText(req.body?.action, 12);
+  if (!/^\d{15,22}$/.test(targetId)) return res.status(400).json({ error: 'Discord ID غير صالح.' });
+  if (SITE_OWNER_IDS.has(targetId)) return res.status(400).json({ error: 'لا يمكن إزالة أو تعديل مالكي الموقع الأساسيين.' });
+  if (!['grant', 'deny', 'auto'].includes(action)) return res.status(400).json({ error: 'الإجراء غير صالح.' });
+  let username = targetId;
+  if (action === 'grant') {
+    try {
+      const guild = await client.guilds.fetch(MAIN_GUILD_ID);
+      const member = await guild.members.fetch(targetId);
+      username = cleanText(member.displayName || member.user.globalName || member.user.username || targetId, 100);
+    } catch { return res.status(400).json({ error: 'لازم الشخص يكون عضوًا في السيرفر الأساسي قبل إضافته كمسؤول.' }); }
+    db.prepare(`INSERT INTO site_manager_access(user_id, username, action, updated_by, updated_at) VALUES (?, ?, 'grant', ?, datetime('now')) ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, action='grant', updated_by=excluded.updated_by, updated_at=datetime('now')`).run(targetId, username, String(req.session.user.id));
+  } else if (action === 'deny') {
+    try {
+      const guild = await client.guilds.fetch(MAIN_GUILD_ID);
+      const member = await guild.members.fetch(targetId);
+      username = cleanText(member.displayName || member.user.globalName || member.user.username || targetId, 100);
+    } catch { username = db.prepare('SELECT username FROM site_manager_access WHERE user_id = ?').get(targetId)?.username || targetId; }
+    db.prepare(`INSERT INTO site_manager_access(user_id, username, action, updated_by, updated_at) VALUES (?, ?, 'deny', ?, datetime('now')) ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, action='deny', updated_by=excluded.updated_by, updated_at=datetime('now')`).run(targetId, username, String(req.session.user.id));
+  } else db.prepare('DELETE FROM site_manager_access WHERE user_id = ?').run(targetId);
+  liveMainGuildAccessCache.delete(targetId);
+  res.json({ ok: true, userId: targetId, action });
 });
 
 app.get('/api/roster', requireAuth, async (req, res) => {

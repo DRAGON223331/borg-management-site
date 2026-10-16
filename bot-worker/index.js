@@ -22,9 +22,8 @@ const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '155959870687
 const TASK_APPROVED_CHANNEL_ID = (process.env.TASK_APPROVED_CHANNEL_ID || process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504').trim();
 const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID || '883871561474539630';
 const STAFF_GUILD_ID = process.env.STAFF_GUILD_ID || '1556647204255568063';
-const MANAGEMENT_MAIN_ROLE_ID = process.env.MANAGEMENT_MAIN_ROLE_ID || '1538623033806168135';
 const MANAGEMENT_STAFF_ROLE_ID = process.env.MANAGEMENT_STAFF_ROLE_ID || '1559628523809804288';
-const MANAGER_IDS = new Set((process.env.MANAGER_IDS || '').split(',').map((x) => x.trim()).filter(Boolean));
+const SITE_OWNER_IDS = new Set(['848304089057460254', '1286035404323164172']);
 const cooldown = new Map();
 const normalize = (text) => String(text || '').replace(/[\u064B-\u065F\u0670\u0640]/g, '').replace(/[!؟?.،,\s]+$/g, '').replace(/\s+/g, ' ').trim();
 const fmt = (n) => (Math.round(Number(n || 0) * 100) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 });
@@ -228,20 +227,32 @@ client.on(Events.GuildMemberRemove, async (member) => {
   } catch (error) { console.error('[presence member leave]', error.message); }
 });
 
-function isReviewManager(interaction) {
-  // IDs in MANAGER_IDS are explicit overrides; all other grants are checked against MAIN_GUILD_ID.
-  return MANAGER_IDS.has(String(interaction.user?.id || ''));
-}
 async function isReviewManagerAnywhere(interaction) {
-  if (isReviewManager(interaction)) return true;
   const userId = String(interaction.user?.id || '');
   if (!userId) return false;
+  // مالكا الموقع الأساسيان لا يمكن سحب صلاحياتهما من إعدادات الموقع.
+  if (SITE_OWNER_IDS.has(userId)) return true;
   try {
+    // نفس جدول صلاحيات الموقع المستخدم في الـ API؛ الرفض الصريح يسبق Administrator.
+    await sql`CREATE TABLE IF NOT EXISTS site_manager_access (
+      user_id TEXT PRIMARY KEY,
+      username TEXT NOT NULL DEFAULT '',
+      action TEXT NOT NULL CHECK(action IN ('grant','deny')),
+      updated_by TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`;
+    const overrides = await sql`SELECT action FROM site_manager_access WHERE user_id = ${userId}`;
+    const action = overrides[0]?.action || null;
+    if (action === 'deny') return false;
+    if (action === 'grant') return true;
     const guild = await client.guilds.fetch(MAIN_GUILD_ID);
     const member = await guild.members.fetch(userId);
-    return Boolean(member.permissions.has('Administrator') || member.roles.cache.has(MANAGEMENT_MAIN_ROLE_ID));
-  } catch { /* تعذر التحقق من عضوية وصلاحيات السيرفر الأساسي: رفض مغلق */ }
-  return false;
+    return String(guild.ownerId || '') === userId || Boolean(member.permissions.has('Administrator'));
+  } catch (error) {
+    console.warn('[review permission check]', error?.message || error);
+    // تعذر التحقق من الصلاحيات أو قاعدة البيانات: رفض مغلق.
+    return false;
+  }
 }
 async function getSubmissionMessage(submission) {
   const channelId = String(submission.discord_channel_id || REVIEW_CHANNEL_ID);
