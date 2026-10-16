@@ -7,6 +7,7 @@ const { neon } = require('@neondatabase/serverless');
 const { buildSubmissionNotifications, mergeSubmissionDecisionEmbed } = require('../lib/submission-notifications.js');
 const { loadSubmissionEvidence, appendEvidenceLinks } = require('../lib/submission-evidence.js');
 const { sendMissingTasksReport } = require('../lib/missing-tasks-report.js');
+const { reconcileDeletedTaskMessages, deactivateTasksForDeletedMessage } = require('../lib/task-message-sync.js');
 
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DB_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || process.env.DATABASE_URL_UNPOOLED || process.env.POSTGRES_PRISMA_URL;
@@ -16,6 +17,7 @@ const sql = neon(DB_URL);
 
 const TRIGGER = /^(?:نقاطي|نقاطى|mypoints|my points)$/i;
 const REVIEW_CHANNEL_ID = process.env.SUBMISSION_REVIEW_CHANNEL_ID || '1556945732957765722';
+const TASKS_CHANNEL_ID = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
 const POINTS_LOG_CHANNEL_ID = process.env.POINTS_LOG_CHANNEL_ID || '1559598706871767172';
 const TASK_APPROVED_CHANNEL_ID = (process.env.TASK_APPROVED_CHANNEL_ID || process.env.TASK_SUBMISSIONS_CHANNEL_ID || '1556651404154642504').trim();
 const MAIN_GUILD_ID = process.env.MAIN_GUILD_ID || '883871561474539630';
@@ -30,7 +32,7 @@ const clean = (v, max) => String(v ?? '').replace(/[\u0000-\u001F\u007F]/g, '').
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
-  partials: [Partials.Channel],
+  partials: [Partials.Message, Partials.Channel],
 });
 
 function isReviewManager(interaction) {
@@ -138,7 +140,33 @@ async function processSubmissionReview(interaction, submissionId, status, reason
   } catch (error) { console.error('[review DM]', error.message); }
   return { status, amount, totalAfter, taskRows };
 }
+let taskMessageSyncRunning = false;
+async function runTaskMessageSync({ reportToLog = true } = {}) {
+  if (taskMessageSyncRunning) return { skipped: true, reason: 'already-running' };
+  taskMessageSyncRunning = true;
+  try {
+    const result = await reconcileDeletedTaskMessages({ sql, token: TOKEN, channelId: TASKS_CHANNEL_ID });
+    if (reportToLog && (result.deletedMessages || result.errors.length)) console.log('[task message sync]', JSON.stringify(result));
+    return result;
+  } catch (error) {
+    console.error('[task message sync] failed:', error.message);
+    return { checkedMessages: 0, deletedMessages: 0, deactivatedTasks: 0, errors: [{ error: clean(error.message, 160) }] };
+  } finally { taskMessageSyncRunning = false; }
+}
+
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (interaction.isChatInputCommand?.() && ['sync-tasks', 'مزامنة-المهمات'].includes(String(interaction.commandName || ''))) {
+    try {
+      if (!(await isReviewManagerAnywhere(interaction))) return interaction.reply({ content: 'أمر مزامنة المهمات متاح لمسؤولي الإدارة فقط.', ephemeral: true });
+      await interaction.deferReply({ ephemeral: true });
+      const result = await runTaskMessageSync();
+      return interaction.editReply(`✅ انتهت مزامنة المهمات.\nالرسائل التي تم فحصها: **${result.checkedMessages || 0}**\nالرسائل المحذوفة: **${result.deletedMessages || 0}**\nالمهمات التي أُخفيت من الموقع: **${result.deactivatedTasks || 0}**${result.errors?.length ? `\n⚠️ تعذّر التحقق من ${result.errors.length} رسالة.` : ''}`);
+    } catch (error) {
+      console.error('[sync-tasks command]', error.stack || error.message || error);
+      try { if (interaction.deferred || interaction.replied) return interaction.editReply(`تعذرت مزامنة المهمات: ${clean(error.message || 'خطأ غير معروف', 160)}`); } catch { /* ignore */ }
+      return;
+    }
+  }
   if (interaction.isChatInputCommand?.() && ['task-report', 'تقرير-المهمات'].includes(String(interaction.commandName || ''))) {
     try {
       if (!(await isReviewManagerAnywhere(interaction))) {
@@ -204,7 +232,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-client.once(Events.ClientReady, () => console.log(`[points-worker] connected as ${client.user.tag}`));
+client.once(Events.ClientReady, () => {
+  console.log(`[points-worker] connected as ${client.user.tag}`);
+  runTaskMessageSync().catch((error) => console.error('[task message sync startup]', error.message));
+  setInterval(() => runTaskMessageSync(), 5 * 60 * 1000).unref();
+});
+client.on(Events.MessageDelete, async (message) => {
+  try {
+    if (String(message.channelId || message.channel?.id || '') !== TASKS_CHANNEL_ID) return;
+    const result = await deactivateTasksForDeletedMessage({ sql, channelId: TASKS_CHANNEL_ID, messageId: message.id });
+    if (result.deactivatedTasks) console.log(`[task message delete] message ${message.id}: deactivated ${result.deactivatedTasks} task(s)`);
+  } catch (error) { console.error('[task message delete]', error.message); }
+});
+client.on(Events.MessageDeleteBulk, async (messages) => {
+  for (const message of messages.values()) {
+    if (String(message.channelId || message.channel?.id || '') !== TASKS_CHANNEL_ID) continue;
+    try {
+      const result = await deactivateTasksForDeletedMessage({ sql, channelId: TASKS_CHANNEL_ID, messageId: message.id });
+      if (result.deactivatedTasks) console.log(`[task bulk delete] message ${message.id}: deactivated ${result.deactivatedTasks} task(s)`);
+    } catch (error) { console.error('[task bulk delete]', error.message); }
+  }
+});
 client.on(Events.MessageCreate, async (message) => {
   try {
     if (!message.guild || !message.author || message.author.bot || message.webhookId) return;

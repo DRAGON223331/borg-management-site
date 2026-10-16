@@ -18,6 +18,7 @@ const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY || '';
 const { buildSubmissionNotifications, mergeSubmissionDecisionEmbed } = require('../lib/submission-notifications.js');
 const { loadSubmissionEvidence, appendEvidenceLinks } = require('../lib/submission-evidence.js');
 const { sendMissingTasksReport } = require('../lib/missing-tasks-report.js');
+const { reconcileDeletedTaskMessages } = require('../lib/task-message-sync.js');
 
 function send(res, payload, status = 200) {
   res.statusCode = status;
@@ -213,9 +214,31 @@ async function handleTaskReportCommand(interaction, res) {
   await work;
 }
 
+async function handleTaskSyncCommand(interaction, res) {
+  if (!(await isCsvAuthorized(interaction))) return send(res, { type: 4, data: { content: 'أمر مزامنة المهمات متاح لمسؤولي الإدارة فقط.', flags: 64 } });
+  send(res, { type: 5, data: { flags: 64 } });
+  const followup = `${DISCORD_API}/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`;
+  const work = (async () => {
+    try {
+      const sql = await getSql();
+      const channelId = process.env.TASKS_CHANNEL_ID || '1556647204960346215';
+      const result = await reconcileDeletedTaskMessages({ sql, token: BOT_TOKEN, channelId });
+      const content = `✅ انتهت مزامنة المهمات.\nالرسائل التي تم فحصها: **${result.checkedMessages}**\nالرسائل المحذوفة التي تم اكتشافها: **${result.deletedMessages}**\nالمهمات التي أُخفيت من الموقع: **${result.deactivatedTasks}**${result.errors.length ? `\n⚠️ تعذّر التحقق من ${result.errors.length} رسالة بسبب صلاحيات أو أخطاء Discord.` : ''}`;
+      const response = await fetch(followup, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content, allowed_mentions: { parse: [] } }) });
+      if (!response.ok) throw new Error(`Discord interaction webhook HTTP ${response.status}`);
+    } catch (error) {
+      console.error('[task sync command]', cleanText(error?.message || error, 200));
+      try { await fetch(followup, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: `تعذرت مزامنة المهمات: ${cleanText(error?.message || error, 160)}` }) }); } catch { /* preserve original error */ }
+    }
+  })();
+  try { require('@vercel/functions').waitUntil(work); } catch { /* local fallback */ }
+  await work;
+}
+
 async function handleCommand(interaction, res) {
   const name = String(interaction.data?.name || '');
   if (name === 'csv') return handleCsvCommand(interaction, res);
+  if (name === 'sync-tasks' || name === 'مزامنة-المهمات') return handleTaskSyncCommand(interaction, res);
   if (name === 'task-report' || name === 'تقرير-المهمات') return handleTaskReportCommand(interaction, res);
   if (name !== 'نقاطي' && name !== 'mypoints') return send(res, { type: 4, data: { content: 'الأمر ده مش مدعوم.', flags: 64 } });
   const userId = String(interaction.member?.user?.id || interaction.user?.id || '');

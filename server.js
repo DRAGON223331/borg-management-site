@@ -84,6 +84,7 @@ db.exec(`
     created_at TEXT NOT NULL,
     source_message_id TEXT,
     source_line_index INTEGER,
+    source_message_deleted_at TEXT,
     points REAL NOT NULL DEFAULT 1,
     UNIQUE(source_message_id, source_line_index)
   );
@@ -194,6 +195,7 @@ for (const statement of [
   'ALTER TABLE submissions ADD COLUMN reviewed_at TEXT',
   'ALTER TABLE submission_tasks ADD COLUMN points_awarded REAL',
   'ALTER TABLE tasks ADD COLUMN points REAL NOT NULL DEFAULT 1',
+  'ALTER TABLE tasks ADD COLUMN source_message_deleted_at TEXT',
 ]) {
   try { db.exec(statement); } catch (error) { if (!/duplicate column name/i.test(error.message)) throw error; }
 }
@@ -482,6 +484,47 @@ client.on(Events.MessageCreate, async (message) => {
   catch (error) { console.error('[discord] Task import failed:', error.message); }
 });
 
+let taskDeleteReconcileRunning = false;
+async function reconcileDeletedTaskMessagesLocal() {
+  if (taskDeleteReconcileRunning || !BOT_TOKEN) return;
+  taskDeleteReconcileRunning = true;
+  try {
+    const known = db.prepare('SELECT DISTINCT source_message_id FROM tasks WHERE active = 1 AND source_message_id IS NOT NULL').all();
+    if (!known.length) return;
+    const channel = await client.channels.fetch(TASKS_CHANNEL_ID);
+    if (!channel || typeof channel.messages?.fetch !== 'function') return;
+    for (const row of known) {
+      const messageId = String(row.source_message_id || '');
+      if (!/^\d{15,22}$/.test(messageId)) continue;
+      try { await channel.messages.fetch(messageId); }
+      catch (error) {
+        // Only Unknown Message proves deletion; permissions/rate-limit/channel errors are not deletion.
+        if (Number(error?.code) === 10008) {
+          const result = db.prepare('UPDATE tasks SET active = 0, source_message_deleted_at = ? WHERE source_message_id = ? AND active = 1').run(nowIso(), messageId);
+          if (result.changes) console.log(`[discord] Deleted task message ${messageId}; deactivated ${result.changes} task(s).`);
+        } else if (error?.status !== 404) {
+          console.warn('[discord] Task-message reconciliation error:', error.message);
+        }
+      }
+    }
+  } catch (error) { console.warn('[discord] Could not reconcile deleted task messages:', error.message); }
+  finally { taskDeleteReconcileRunning = false; }
+}
+client.on(Events.MessageDelete, async (message) => {
+  try {
+    if (String(message.channelId || message.channel?.id || '') !== TASKS_CHANNEL_ID) return;
+    const result = db.prepare('UPDATE tasks SET active = 0, source_message_deleted_at = ? WHERE source_message_id = ? AND active = 1').run(nowIso(), String(message.id));
+    if (result.changes) console.log(`[discord] Deleted task message ${message.id}; deactivated ${result.changes} task(s).`);
+  } catch (error) { console.error('[task message delete]', error.message); }
+});
+client.on(Events.MessageDeleteBulk, async (messages) => {
+  for (const message of messages.values()) {
+    if (String(message.channelId || message.channel?.id || '') !== TASKS_CHANNEL_ID) continue;
+    try { db.prepare('UPDATE tasks SET active = 0, source_message_deleted_at = ? WHERE source_message_id = ? AND active = 1').run(nowIso(), String(message.id)); }
+    catch (error) { console.error('[task bulk message delete]', error.message); }
+  }
+});
+
 // ───────── عدّ رسائل الروم (يزيد مع كل رسالة جديدة وينقص عند الحذف) ─────────
 const COUNTED_MESSAGE_TYPES = new Set([0, 19]); // رسالة عادية + رد
 const upsertMessageLog = db.prepare(`INSERT INTO discord_message_log(message_id, channel_id, user_id, username, created_at)
@@ -544,6 +587,8 @@ async function reconcileCountedMessages() {
 client.once(Events.ClientReady, () => {
   reconcileCountedMessages();
   setInterval(reconcileCountedMessages, 10 * 60 * 1000).unref?.();
+  reconcileDeletedTaskMessagesLocal();
+  setInterval(reconcileDeletedTaskMessagesLocal, 5 * 60 * 1000).unref?.();
 });
 
 // ───────── أمر "نقاطي" كرسالة عادية بدون بريفكس ─────────

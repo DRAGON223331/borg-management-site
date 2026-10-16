@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { Readable } = require('node:stream');
 const { notifyReview } = require('./_lib/notify.js');
 const { buildSubmissionNotifications, mergeSubmissionDecisionEmbed } = require('../lib/submission-notifications.js');
+const { reconcileDeletedTaskMessages } = require('../lib/task-message-sync.js');
 
 const DISCORD_API = 'https://discord.com/api/v10';
 const COOKIE_NAME = 'borg.sid';
@@ -41,7 +42,7 @@ let lastMessageSyncAt = 0;
 let messageSyncPromise;
 
 // ───────── تخفيف الضغط: كاش في الذاكرة + حد للطلبات ─────────
-const SCHEMA_VERSION = 5; // ارفعه كل ما تضيف جدول/عمود جديد في ensureSchema
+const SCHEMA_VERSION = 6; // ارفعه كل ما تضيف جدول/عمود جديد في ensureSchema
 const PRESENCE_WINDOW_SECONDS = 150; // مدة اعتبار العضو "متصل" بعد آخر نبضة (النبضة كل 60 ثانية)
 const MESSAGE_SYNC_MIN_MS = Math.max(15, Number(process.env.MESSAGE_SYNC_MIN_SECONDS || 45)) * 1000;
 const memCache = new Map();
@@ -206,10 +207,12 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       source_message_id TEXT,
       source_line_index INTEGER,
+      source_message_deleted_at TIMESTAMPTZ,
       UNIQUE(source_message_id, source_line_index)
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_tasks_active ON tasks(active, required DESC, id DESC)`;
     await sql`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS points NUMERIC(10,2) NOT NULL DEFAULT 1`;
+    await sql`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS source_message_deleted_at TIMESTAMPTZ`;
     await sql`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deadline_at TIMESTAMPTZ`;
     await sql`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deadline_reminded_at TIMESTAMPTZ`;
     await sql`CREATE TABLE IF NOT EXISTS submissions (
@@ -458,6 +461,7 @@ async function syncChannelMessageCounts(sql, { force = false, budgetMs = 9000 } 
 const SLASH_COMMANDS = [
   { name: 'mypoints', type: 1, description: 'Show how many points you have', description_localizations: { ar: 'اعرف عندك كام نقطة' } },
   { name: 'task-report', type: 1, dm_permission: false, description: 'Post staff members who have incomplete required tasks', description_localizations: { ar: 'إرسال قائمة الاستاف الذين لم يكملوا المهمات الإجبارية' }, name_localizations: { ar: 'تقرير-المهمات' } },
+  { name: 'sync-tasks', type: 1, dm_permission: false, description: 'Remove website tasks whose Discord source messages were deleted', description_localizations: { ar: 'مزامنة المهمات وحذف المهمات التي حُذفت رسائلها من ديسكورد' }, name_localizations: { ar: 'مزامنة-المهمات' } },
   {
     name: 'csv', type: 1, dm_permission: false,
     description: 'Export staff data as a CSV file (managers only)',
@@ -710,6 +714,9 @@ async function syncDiscordTasks(sql) {
   if (Date.now() - lastTaskSyncAt < 30_000) return taskSyncPromise;
   if (taskSyncPromise) return taskSyncPromise;
   taskSyncPromise = (async () => { try {
+    // Reconcile linked records first, then import currently-present messages.
+    try { await reconcileDeletedTaskMessages({ sql, token: BOT_TOKEN, channelId: TASKS_CHANNEL_ID }); }
+    catch (error) { console.error('[task deletion sync]', cleanText(error?.message || error, 180)); }
     const messages = await discordApi(`/channels/${TASKS_CHANNEL_ID}/messages?limit=50`);
     const ordered = (messages || []).slice().reverse();
     for (const message of ordered) {
@@ -1304,6 +1311,14 @@ async function handleApi(parts, req, res) {
     }
     return sendJson(res, 200, { ok: true, closed: closed.length, reminderTasks: reminders.length, recipients: recipients.length, dmSent, dmFailed, backfilledImages });
   }
+  if (route === 'cron' && parts[1] === 'task-message-sync' && req.method === 'GET') {
+    const secret = process.env.CRON_SECRET || '';
+    const authorizedCron = Boolean(secret) && String(req.headers?.authorization || '') === `Bearer ${secret}`;
+    if (!authorizedCron && !canManage(user)) return sendError(res, 401, 'غير مصرح. اضبط CRON_SECRET على Vercel.');
+    await ensureSchema();
+    const result = await reconcileDeletedTaskMessages({ sql: await getSql(), token: BOT_TOKEN, channelId: TASKS_CHANNEL_ID });
+    return sendJson(res, 200, { ok: true, ...result });
+  }
   if (route === 'cron' && parts[1] === 'missing-tasks-report' && req.method === 'GET') {
     const secret = process.env.CRON_SECRET || '';
     const bearer = String(req.headers?.authorization || '');
@@ -1510,7 +1525,7 @@ async function handleApi(parts, req, res) {
   if (route === 'tasks' && parts.length === 1 && req.method === 'GET') {
     await syncDiscordTasks(sql);
     await sql`UPDATE tasks SET active = FALSE WHERE active = TRUE AND deadline_at IS NOT NULL AND deadline_at <= NOW()`;
-    const rows = await sql`SELECT t.id, t.title, t.points, t.required, t.active, t.created_by_name, t.created_at, t.deadline_at FROM tasks t WHERE (t.active = TRUE AND (t.deadline_at IS NULL OR t.deadline_at > NOW())) OR EXISTS (SELECT 1 FROM task_rework_requests tr WHERE tr.user_id = ${user.id} AND tr.task_id = t.id AND tr.status IN ('requested','submitted')) ORDER BY t.required DESC, t.id DESC`;
+    const rows = await sql`SELECT t.id, t.title, t.points, t.required, t.active, t.created_by_name, t.created_at, t.deadline_at FROM tasks t WHERE t.source_message_deleted_at IS NULL AND ((t.active = TRUE AND (t.deadline_at IS NULL OR t.deadline_at > NOW())) OR EXISTS (SELECT 1 FROM task_rework_requests tr WHERE tr.user_id = ${user.id} AND tr.task_id = t.id AND tr.status IN ('requested','submitted'))) ORDER BY t.required DESC, t.id DESC`;
     const completedRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'approved' AND NOT EXISTS (SELECT 1 FROM task_rework_requests tr WHERE tr.user_id = s.user_id AND tr.task_id = st.task_id AND tr.status IN ('requested','submitted'))`;
     const completed = new Set(completedRows.map((row) => String(row.task_id)));
     const pendingRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'pending'`;
