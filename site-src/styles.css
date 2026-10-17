@@ -1607,3 +1607,12 @@ html[data-motion="calm"] .roll-col .roll-track, html[data-motion="calm"] .roll.i
 @keyframes rtNewRow { from { opacity:0; transform:translateY(-12px) scale(.97); background:rgba(var(--neon-a-rgb),.22); } }
 @media (max-width:900px) { .rt-kpis { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 @media (max-width:560px) { .rt-grid { grid-template-columns:1fr; } .rt-options { gap:5px; } .rt-opt .rt-emoji { font-size:21px; } .rt-metrics, .rt-modal-stats { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+
+.rt-history-tools { display:flex; align-items:center; gap:10px; }
+.rt-danger-btn { border:1px solid rgba(255,101,95,.35); background:rgba(255,101,95,.08); color:var(--red); border-radius:9px; padding:6px 10px; font-size:10px; font-weight:800; transition:.15s ease; }
+.rt-danger-btn:hover:not(:disabled) { background:rgba(255,101,95,.2); transform:translateY(-1px); }
+.rt-hist-row { grid-template-columns:auto 1fr auto; }
+.rt-hist-del { align-self:start; width:28px; height:28px; border-radius:8px; border:1px solid rgba(255,101,95,.25); background:transparent; color:var(--red); font-size:13px; transition:.15s ease; }
+.rt-hist-del:hover:not(:disabled) { background:rgba(255,101,95,.18); }
+.rt-hist-row.removing { animation:rtRemove .35s ease both; }
+@keyframes rtRemove { to { opacity:0; transform:translateX(30px) scale(.96); } }

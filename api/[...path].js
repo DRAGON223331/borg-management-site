@@ -1860,6 +1860,35 @@ async function handleApi(parts, req, res) {
     return sendJson(res, 201, { ok: true, discordPosted, rating: { id, targetId, targetName, raterId: String(user.id), raterName: user.username, rating, note, createdAt: inserted[0].createdAt }, summary: { count, avg }, message: discordPosted ? 'تم حفظ التقييم وإرساله لروم التقييمات.' : 'تم حفظ التقييم، لكن تعذر إرساله لروم ديسكورد. راجع توكن البوت وصلاحياته.' });
   }
 
+  if (route === 'staff-ratings' && req.method === 'DELETE' && (parts.length === 2 || (parts.length === 3 && parts[1] === 'user'))) {
+    if (!canManage(user)) return sendError(res, 403, 'مسح التقييمات متاح لمسؤولي الإدارة فقط.');
+    if (rateLimited(req, res, user, 'staff-ratings-delete', 20)) return;
+    let removed;
+    let label;
+    if (parts.length === 2) {
+      const id = Number(parts[1]);
+      if (!Number.isSafeInteger(id) || id < 1) return sendError(res, 400, 'رقم التقييم غير صالح.');
+      removed = await sql`DELETE FROM staff_ratings WHERE id = ${id} RETURNING id, target_id AS "targetId", rating`;
+      label = `تقييم #${id}`;
+    } else {
+      const targetId = cleanText(parts[2], 24);
+      if (!/^\d{15,22}$/.test(targetId)) return sendError(res, 400, 'Discord ID غير صالح.');
+      removed = await sql`DELETE FROM staff_ratings WHERE target_id = ${targetId} RETURNING id, target_id AS "targetId", rating`;
+      label = `كل تقييمات <@${targetId}>`;
+    }
+    if (!removed.length) return sendError(res, 404, 'التقييم غير موجود أو اتمسح بالفعل.');
+    try {
+      await postDiscordEmbed(STAFF_RATING_CHANNEL_ID, {
+        title: '🗑️ تم مسح تقييمات',
+        description: `${label}\nعدد المحذوف: **${removed.length}**\nبواسطة: <@${user.id}>`,
+        color: 0x6b7280,
+        timestamp: new Date().toISOString(),
+        footer: { text: 'إدارة البرج • سجل التقييمات' },
+      });
+    } catch (error) { console.error('[staff rating delete log]', cleanText(error?.message || error, 200)); }
+    return sendJson(res, 200, { ok: true, deleted: removed.length, ids: removed.map((row) => Number(row.id)) });
+  }
+
   if (route === 'staff-requests' && parts.length === 1 && req.method === 'POST') {
     const requestType = cleanText(req.body?.requestType, 40);
     const subject = cleanText(req.body?.subject, 140);

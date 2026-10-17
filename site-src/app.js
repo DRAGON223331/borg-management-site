@@ -2214,8 +2214,9 @@ function renderRatingModalBody() {
   const history = $('#rt-history');
   history.innerHTML = items.length ? items.slice(0, 40).map((item, index) => {
     const meta = RATING_META[item.rating];
-    return `<article class="rt-hist-row${item.id === state.ratings.justAddedId ? ' new' : ''}" style="--i:${Math.min(index, 8)}"><span class="rt-emoji">${meta.emoji}</span><div><b style="color:${meta.color}">${meta.label} · ${item.rating}/5</b><small>بواسطة ${escapeHtml(item.raterName || 'مسؤول')} · ${escapeHtml(formatDate(item.createdAt, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}</small>${item.note ? `<p>${escapeHtml(item.note)}</p>` : ''}</div></article>`;
+    return `<article class="rt-hist-row${item.id === state.ratings.justAddedId ? ' new' : ''}" style="--i:${Math.min(index, 8)}"><span class="rt-emoji">${meta.emoji}</span><div><b style="color:${meta.color}">${meta.label} · ${item.rating}/5</b><small>بواسطة ${escapeHtml(item.raterName || 'مسؤول')} · ${escapeHtml(formatDate(item.createdAt, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}</small>${item.note ? `<p>${escapeHtml(item.note)}</p>` : ''}</div><button type="button" class="rt-hist-del" data-rt-del="${item.id}" title="مسح التقييم ده" aria-label="مسح التقييم">🗑</button></article>`;
   }).join('') : '<div class="task-empty">مفيش تقييمات سابقة للعضو ده.</div>';
+  $('#rt-clear-all')?.classList.toggle('hidden', !items.length);
 }
 function updateRatingSubmitState() {
   const button = $('#rt-submit');
@@ -2283,6 +2284,21 @@ async function submitRating(event) {
     updateRatingSubmitState();
   }
 }
+async function deleteRatings(url, confirmText, ids, row) {
+  if (!window.confirm(confirmText)) return;
+  try {
+    if (row) { row.classList.add('removing'); await new Promise((resolve) => setTimeout(resolve, 300)); }
+    await api(url, { method: 'DELETE' });
+    const gone = new Set(ids);
+    state.ratings.items = state.ratings.items.filter((item) => !gone.has(item.id));
+    showToast('تم مسح التقييم.', 'success');
+    renderRatings();
+    renderRatingModalBody();
+  } catch (error) {
+    row?.classList.remove('removing');
+    showToast(error.message || 'تعذر مسح التقييم.', 'error');
+  }
+}
 function wireRatings() {
   const root = $('#page-staff-ratings');
   if (!root || root.dataset.wired === '1') return;
@@ -2311,6 +2327,18 @@ function wireRatings() {
   });
   $('#rt-note')?.addEventListener('input', (event) => { $('#rt-note-count').textContent = `${event.target.value.length} / 600`; });
   $('#rt-form')?.addEventListener('submit', submitRating);
+  $('#rt-history')?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-rt-del]');
+    if (!button) return;
+    const id = Number(button.dataset.rtDel);
+    deleteRatings(`/api/staff-ratings/${id}`, 'متأكد إنك عايز تمسح التقييم ده؟', [id], button.closest('.rt-hist-row'));
+  });
+  $('#rt-clear-all')?.addEventListener('click', () => {
+    const target = state.ratings.targetId;
+    const ids = state.ratings.items.filter((item) => item.targetId === String(target)).map((item) => item.id);
+    if (!ids.length) return;
+    deleteRatings(`/api/staff-ratings/user/${encodeURIComponent(target)}`, `هتمسح كل التقييمات (${ids.length}) للعضو ده نهائيًا. متأكد؟`, ids, null);
+  });
   // تحديث هادئ: لو مسؤول تاني قيّم، الأرقام هنا تتحرك لوحدها.
   setInterval(() => { if (!document.hidden && $('.page.active-page')?.id === 'page-staff-ratings') loadRatings(true); }, 45000);
 }
