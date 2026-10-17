@@ -29,6 +29,11 @@ const COOKIE_SECRET = process.env.SESSION_SECRET || '';
 const MAX_UPLOAD_MB = Math.max(1, Number(process.env.MAX_UPLOAD_MB || 100));
 // الروم الوحيد الذي تُحسب منه رسائل الاستاف (رسائل ديسكورد الحقيقية، وليس شات الموقع).
 const MESSAGE_COUNT_CHANNEL_ID = (process.env.MESSAGE_COUNT_CHANNEL_ID || '1552049641913065552').trim();
+// روم نتايج تقييم الإداريين: أي تقييم جديد من الموقع بيتبعت هنا فورًا.
+const STAFF_RATING_CHANNEL_ID = (process.env.STAFF_RATING_CHANNEL_ID || '1560854120850653244').trim();
+const RATING_LABELS = { 1: 'سيئ', 2: 'ضعيف', 3: 'مقبول', 4: 'جيد', 5: 'ممتاز' };
+const RATING_COLORS = { 1: 0xef4444, 2: 0xf97316, 3: 0xeab308, 4: 0x22c55e, 5: 0x06b6d4 };
+const RATING_EMOJI = { 1: '😡', 2: '🙁', 3: '😐', 4: '🙂', 5: '🤩' };
 const MESSAGE_FULL_SCAN_MINUTES = Math.max(1, Number(process.env.MESSAGE_FULL_SCAN_MINUTES || 10));
 
 let sqlClient;
@@ -42,7 +47,7 @@ let lastMessageSyncAt = 0;
 let messageSyncPromise;
 
 // ───────── تخفيف الضغط: كاش في الذاكرة + حد للطلبات ─────────
-const SCHEMA_VERSION = 11; // v11 يضيف منع الوصول للموقع وسجل حذف رسائل الشات
+const SCHEMA_VERSION = 12; // v12 يضيف جدول تقييمات الإداريين (staff_ratings)
 const PRESENCE_WINDOW_SECONDS = 150; // مدة اعتبار العضو "متصل" بعد آخر نبضة (النبضة كل 60 ثانية)
 const MESSAGE_SYNC_MIN_MS = Math.max(15, Number(process.env.MESSAGE_SYNC_MIN_SECONDS || 45)) * 1000;
 const memCache = new Map();
@@ -408,6 +413,18 @@ async function ensureSchema() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_site_manager_access_action ON site_manager_access(action, updated_at DESC)`;
+    await sql`CREATE TABLE IF NOT EXISTS staff_ratings (
+      id BIGSERIAL PRIMARY KEY,
+      target_id TEXT NOT NULL,
+      target_name TEXT NOT NULL DEFAULT '',
+      rater_id TEXT NOT NULL,
+      rater_name TEXT NOT NULL DEFAULT '',
+      rating SMALLINT NOT NULL CHECK (rating BETWEEN 1 AND 5),
+      note TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_staff_ratings_target ON staff_ratings(target_id, created_at DESC)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_staff_ratings_created ON staff_ratings(created_at DESC)`;
     await sql`CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`;
     await sql`INSERT INTO app_meta(key, value) VALUES ('schema_version', ${String(SCHEMA_VERSION)}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
   })().catch((error) => { schemaPromise = null; throw error; });
@@ -1791,6 +1808,56 @@ async function handleApi(parts, req, res) {
       recentSubmissions: submissionRows.map((row) => ({ ...row, id: Number(row.id) })),
       recentLeaves: leaveRows.map((row) => ({ ...row, id: Number(row.id), startDate: String(row.startDate).slice(0, 10), endDate: String(row.endDate).slice(0, 10) })),
     });
+  }
+
+  // ───────── تقييم الإداريين (للمسؤولين فقط) ─────────
+  if (route === 'staff-ratings' && parts.length === 1 && req.method === 'GET') {
+    if (!canManage(user)) return sendError(res, 403, 'صفحة التقييمات متاحة لمسؤولي الإدارة فقط.');
+    if (rateLimited(req, res, user, 'staff-ratings-get', 40)) return;
+    const rows = await sql`SELECT id, target_id AS "targetId", target_name AS "targetName", rater_id AS "raterId", rater_name AS "raterName", rating, note, created_at AS "createdAt" FROM staff_ratings ORDER BY id DESC LIMIT 3000`;
+    return sendJson(res, 200, { ratings: rows.map((row) => ({ ...row, id: Number(row.id), targetId: String(row.targetId), raterId: String(row.raterId), rating: Number(row.rating) })) });
+  }
+  if (route === 'staff-ratings' && parts.length === 1 && req.method === 'POST') {
+    if (!canManage(user)) return sendError(res, 403, 'تقييم الإداريين متاح لمسؤولي الإدارة فقط.');
+    if (rateLimited(req, res, user, 'staff-ratings-post', 15)) return;
+    const targetId = cleanText(req.body?.targetId, 24);
+    const rating = Number(req.body?.rating);
+    const note = cleanText(req.body?.note, 600);
+    if (!/^\d{15,22}$/.test(targetId)) return sendError(res, 400, 'Discord ID غير صالح.');
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) return sendError(res, 400, 'اختار تقييم من سيئ إلى ممتاز.');
+    if (targetId === String(user.id)) return sendError(res, 400, 'مينفعش تقيّم نفسك.');
+    let targetName = cleanText(req.body?.targetName, 80);
+    try {
+      const roster = await cached('roster', 120_000, getRoster);
+      const found = (roster.groups || []).flatMap((group) => group.members || []).find((member) => String(member.id) === targetId);
+      if (found) targetName = cleanText(found.username || targetName, 80);
+      else if ((roster.groups || []).length) return sendError(res, 404, 'العضو ده مش موجود في قائمة الاستاف.');
+    } catch { /* لو القائمة فشلت نكمل بالاسم المرسل */ }
+    if (!targetName) targetName = targetId;
+    const inserted = await sql`INSERT INTO staff_ratings(target_id, target_name, rater_id, rater_name, rating, note, created_at) VALUES (${targetId}, ${targetName}, ${user.id}, ${user.username}, ${rating}, ${note}, NOW()) RETURNING id, created_at AS "createdAt"`;
+    const id = Number(inserted[0].id);
+    const agg = await sql`SELECT COUNT(*)::int AS count, ROUND(AVG(rating)::numeric, 2) AS avg FROM staff_ratings WHERE target_id = ${targetId}`;
+    const count = Number(agg[0]?.count || 1);
+    const avg = Number(agg[0]?.avg || rating);
+    let discordPosted = false;
+    try {
+      await postDiscordEmbed(STAFF_RATING_CHANNEL_ID, {
+        title: `${RATING_EMOJI[rating]} تقييم جديد: ${RATING_LABELS[rating]}`,
+        description: `تم تقييم <@${targetId}> من لوحة إدارة البرج.`,
+        color: RATING_COLORS[rating],
+        fields: [
+          { name: '👤 الإداري', value: `<@${targetId}>\n\`${targetId}\``, inline: true },
+          { name: '🧑‍⚖️ المُقيِّم', value: `<@${user.id}>`, inline: true },
+          { name: '⭐ التقييم', value: `${'★'.repeat(rating)}${'☆'.repeat(5 - rating)}  **${RATING_LABELS[rating]}** (${rating}/5)`, inline: false },
+          { name: '📝 الملاحظة', value: note ? note.slice(0, 1024) : 'بدون ملاحظة', inline: false },
+          { name: '📊 المتوسط الحالي', value: `${avg.toFixed(2)}/5 من ${count} ${count === 1 ? 'تقييم' : 'تقييمات'}`, inline: false },
+        ],
+        timestamp: new Date().toISOString(),
+        footer: { text: `إدارة البرج • تقييم #${id}` },
+      });
+      discordPosted = true;
+    } catch (error) { console.error('[staff rating post]', cleanText(error?.message || error, 200)); }
+    return sendJson(res, 201, { ok: true, discordPosted, rating: { id, targetId, targetName, raterId: String(user.id), raterName: user.username, rating, note, createdAt: inserted[0].createdAt }, summary: { count, avg }, message: discordPosted ? 'تم حفظ التقييم وإرساله لروم التقييمات.' : 'تم حفظ التقييم، لكن تعذر إرساله لروم ديسكورد. راجع توكن البوت وصلاحياته.' });
   }
 
   if (route === 'staff-requests' && parts.length === 1 && req.method === 'POST') {

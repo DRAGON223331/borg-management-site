@@ -93,6 +93,7 @@
             <button class="nav-menu-item" type="button" role="menuitem" data-page="staff-chat"><span>☷</span><span>شات الاستاف</span></button>
             <div class="nav-menu-heading manager-only hidden">إدارة النظام</div>
             <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="admin-monitor"><span>◉</span><span>مراقبة الإدارة</span></button>
+            <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="staff-ratings"><span>✪</span><span>تقييم الإداريين</span></button>
             <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="management-chat"><span>♧</span><span>شات المسؤولين</span></button>
             <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="audit-log"><span>≣</span><span>سجل السيرفر</span></button>
             <div class="nav-menu-heading owner-only hidden">إعدادات المالك</div>
@@ -357,6 +358,29 @@
           </div>
         </section>
 
+        <section id="page-staff-ratings" class="page manager-only hidden">
+          <div class="page-heading">
+            <div><div class="eyebrow">STAFF RATINGS</div><h1>تقييم الإداريين</h1><p>قيّم كل إداري من سيئ إلى ممتاز حسب تفاعله وشغله، وأضف ملاحظتك. كل تقييم جديد بيتبعت لروم التقييمات في ديسكورد أول ما تحفظه.</p></div>
+            <div class="monitor-heading-actions"><span class="page-heading-badge"><span class="status-dot"></span> للمسؤولين فقط</span><button id="rt-refresh" type="button" class="secondary-button compact">تحديث ↻</button></div>
+          </div>
+          <div id="rt-kpis" class="rt-kpis"></div>
+          <div class="rt-toolbar">
+            <div class="filter-tabs" id="rt-scope-tabs">
+              <button class="filter-tab active" data-rt-scope="admins" type="button">🛡️ الإداريين</button>
+              <button class="filter-tab" data-rt-scope="all" type="button">👥 كل الاستاف</button>
+            </div>
+            <div class="roster-search-wrap rt-search"><span>⌕</span><input id="rt-search" type="search" placeholder="ابحث عن إداري..." aria-label="ابحث عن إداري"></div>
+            <select id="rt-sort" class="rt-sort" aria-label="ترتيب القائمة">
+              <option value="avg-desc">الأعلى تقييمًا</option>
+              <option value="avg-asc">الأقل تقييمًا</option>
+              <option value="recent">آخر تقييم</option>
+              <option value="unrated">غير المقيَّمين أولًا</option>
+              <option value="name">الاسم</option>
+            </select>
+          </div>
+          <div id="rt-grid" class="rt-grid"><div class="loading-state">جاري تحميل التقييمات...</div></div>
+        </section>
+
         <section id="page-site-managers" class="page">
           <div class="page-heading">
             <div><div class="eyebrow">SITE ACCESS CONTROL</div><h1>إدارة مسؤولي الموقع</h1><p>أضف مسؤولًا أو اسحب صلاحية إدارة الموقع. الصلاحيات تُحفظ في قاعدة البيانات وتُطبّق على كل طلب فور التحديث.</p></div>
@@ -433,6 +457,29 @@
       </main>
     </div>
   </section>
+  <section id="rating-modal" class="appearance-modal hidden" role="dialog" aria-modal="true" aria-labelledby="rt-modal-title">
+    <button class="appearance-backdrop" type="button" data-rating-close aria-label="إغلاق نافذة التقييم"></button>
+    <div class="appearance-panel rt-panel">
+      <header class="rt-modal-head">
+        <img id="rt-modal-avatar" alt="" src="">
+        <div><span class="tiny-label">NEW RATING</span><h2 id="rt-modal-title">—</h2><p id="rt-modal-role" class="muted small-copy"></p></div>
+        <button id="rt-modal-close" class="icon-button" type="button" aria-label="إغلاق" data-rating-close>×</button>
+      </header>
+      <div id="rt-modal-stats" class="rt-modal-stats"></div>
+      <form id="rt-form" class="rt-form" autocomplete="off">
+        <div class="appearance-setting-heading"><b>اختار التقييم</b><small>RATING</small></div>
+        <div class="rt-options" id="rt-options" role="radiogroup" aria-label="التقييم"></div>
+        <label class="rt-note-label" for="rt-note">ملاحظة (اختياري)</label>
+        <textarea id="rt-note" maxlength="600" rows="3" placeholder="اكتب ملاحظتك على تفاعل الإداري وشغله..."></textarea>
+        <div class="rt-note-meta"><small id="rt-note-count">0 / 600</small><small class="muted">هتتبعت تلقائيًا لروم التقييمات في ديسكورد.</small></div>
+        <button id="rt-submit" class="primary-button" type="submit" disabled>اختار تقييم الأول</button>
+        <p id="rt-self-warning" class="rt-self-warning hidden">ده حسابك، مينفعش تقيّم نفسك.</p>
+      </form>
+      <div class="appearance-setting-heading rt-history-heading"><b>سجل التقييمات</b><small id="rt-history-count">0</small></div>
+      <div id="rt-history" class="rt-history"></div>
+    </div>
+  </section>
+
   <section id="appearance-modal" class="appearance-modal hidden" role="dialog" aria-modal="true" aria-labelledby="appearance-title">
     <button class="appearance-backdrop" type="button" data-appearance-close aria-label="إغلاق إعدادات المظهر"></button>
     <div class="appearance-panel">

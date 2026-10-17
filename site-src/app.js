@@ -22,6 +22,7 @@ const state = {
   staffStats: [],
   notif: { items: [], unread: 0, maxId: null, open: false },
   lbMetric: 'points',
+  ratings: { items: [], loaded: false, scope: 'admins', sort: 'avg-desc', search: '', targetId: null, selected: 0, justAddedId: null },
   audit: { entries: [], nextBefore: null, hasMore: false, loading: false },
   activeStaffProfileId: null,
   cyberTrendPeriod: '24h',
@@ -224,23 +225,86 @@ function wireRosterCollapse() {
     button.textContent = collapsed ? 'عرض القائمة +' : 'طي القائمة −';
   });
 }
-function animateCounter(node, target, duration = 1150) {
+// ───────── أرقام متحركة (Odometer): لفوق لو زادت، ولتحت لو نقصت ─────────
+const rollPrev = new Map();
+function rollMotionOff() { return Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches || document.documentElement.dataset.motion === 'calm'); }
+function rollFormat(value, digits = 0) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value ?? '—');
+  return n.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+const rollDigits = (value) => (Number.isInteger(Number(value)) ? 0 : 2);
+function rollNumeric(text) { const n = parseFloat(String(text).replace(/[^0-9.-]/g, '')); return Number.isFinite(n) ? n : 0; }
+function rollBuild(node, from, to) {
   if (!node) return;
-  const finalValue = Number(target);
-  if (!Number.isFinite(finalValue)) { node.textContent = String(target ?? '—'); return; }
-  const startValue = Number.isFinite(Number(node.dataset.currentCount)) ? Number(node.dataset.currentCount) : (Number(node.textContent.replace(/[^0-9.-]/g, '')) || 0);
-  node.dataset.currentCount = String(finalValue);
-  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches || document.documentElement.dataset.motion === 'calm';
-  const format = (value) => Math.round(value).toLocaleString('en-US');
-  if (reduced) { node.textContent = format(finalValue); return; }
-  const startTime = performance.now();
-  const tick = (now) => {
-    const progress = Math.min(1, (now - startTime) / duration);
-    const eased = 1 - Math.pow(1 - progress, 4);
-    node.textContent = format(startValue + (finalValue - startValue) * eased);
-    if (progress < 1) requestAnimationFrame(tick);
-  };
-  requestAnimationFrame(tick);
+  if (rollMotionOff() || from === to) { node.textContent = to; return; }
+  const up = rollNumeric(to) >= rollNumeric(from);
+  const len = Math.max(from.length, to.length);
+  const A = [...from]; while (A.length < len) A.unshift('');
+  const B = [...to]; while (B.length < len) B.unshift('');
+  let html = '';
+  for (let i = 0; i < len; i += 1) {
+    if (A[i] === B[i]) { html += `<span class="roll-ch">${escapeHtml(B[i])}</span>`; continue; }
+    const delay = (len - 1 - i) * 40; // الآحاد تتحرك الأول
+    html += `<span class="roll-col ${up ? 'up' : 'down'}" style="--d:${delay}ms"><span class="roll-track"><span>${escapeHtml(up ? A[i] : B[i])}</span><span>${escapeHtml(up ? B[i] : A[i])}</span></span></span>`;
+  }
+  node.classList.add('roll');
+  node.classList.remove('is-up', 'is-down');
+  void node.offsetWidth;
+  node.classList.add(up ? 'is-up' : 'is-down');
+  node.innerHTML = html;
+  node.setAttribute('aria-label', to);
+  clearTimeout(node._rollTimer);
+  node._rollTimer = setTimeout(() => node.classList.remove('is-up', 'is-down'), 1700);
+}
+// للعناصر الثابتة في الصفحة (بتفتكر آخر قيمة لوحدها)
+function rollSet(node, value, digits = 0) {
+  if (!node) return;
+  const to = rollFormat(value, digits);
+  if (to === '—' || !Number.isFinite(Number(value))) { node.textContent = to; return; }
+  const from = node.dataset.rollText;
+  node.dataset.rollText = to;
+  if (from === to) return;
+  rollBuild(node, from === undefined ? rollFormat(0, digits) : from, to);
+}
+// للقوائم اللي بتتعمل لها innerHTML من جديد: بنفتكر آخر قيمة بمفتاح ثابت
+function rollMarkup(key, value, digits = rollDigits(value)) {
+  const to = rollFormat(value, digits);
+  const prev = rollPrev.get(key);
+  rollPrev.set(key, to);
+  const from = prev === undefined ? rollFormat(0, digits) : prev;
+  return `<span class="roll" data-roll-from="${escapeHtml(from)}" data-roll-to="${escapeHtml(to)}">${escapeHtml(to)}</span>`;
+}
+function rollPlay(root = document) {
+  $$('.roll[data-roll-to]', root).forEach((node) => {
+    const from = node.dataset.rollFrom;
+    const to = node.dataset.rollTo;
+    delete node.dataset.rollFrom;
+    delete node.dataset.rollTo;
+    if (from !== to) rollBuild(node, from, to);
+  });
+}
+function rollReset(prefix) { for (const key of [...rollPrev.keys()]) if (key.startsWith(prefix)) rollPrev.delete(key); }
+// FLIP: الصفوف اللي ترتيبها بيتغير بتتحرك لفوق/لتحت بدل ما تقفز
+function flipCapture(container, attr) {
+  const positions = new Map();
+  if (container) $$(`[${attr}]`, container).forEach((el) => positions.set(el.getAttribute(attr), el.getBoundingClientRect().top));
+  return positions;
+}
+function flipPlay(container, attr, before) {
+  if (!container || !before?.size || rollMotionOff() || typeof Element.prototype.animate !== 'function') return;
+  $$(`[${attr}]`, container).forEach((el) => {
+    const old = before.get(el.getAttribute(attr));
+    if (old === undefined) return;
+    const dy = old - el.getBoundingClientRect().top;
+    if (Math.abs(dy) < 2) return;
+    el.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }], { duration: 650, easing: 'cubic-bezier(.22,1,.36,1)' });
+  });
+}
+function animateCounter(node, target) {
+  if (!node) return;
+  if (!Number.isFinite(Number(target))) { node.textContent = String(target ?? '—'); return; }
+  rollSet(node, target, 0);
 }
 
 function showLogin() {
@@ -293,6 +357,7 @@ async function initialize() {
       $('#manager-leave-section').classList.remove('hidden');
       $('#manager-staff-request-section')?.classList.remove('hidden');
       wireNotifications();
+      wireRatings();
     }
     await Promise.allSettled([loadTasks(), loadRoster(), checkBotStatus(), loadSubmissions(), loadMyPoints(), loadLeaveRequests(), loadStaffRequests(), loadStaffStats(), loadNotifications(), ...(state.user.canManage ? [loadTaskInsights(), loadSubmissionAudit(), loadAdminMonitoring({ silent: true })] : [])]);
     startChatPolling();
@@ -504,6 +569,7 @@ function openPage(page) {
   if (page === 'management-chat' && !state.user?.canManage) return;
   if (page === 'audit-log' && !state.user?.canManage) return;
   if (page === 'admin-monitor' && !state.user?.canManage) return;
+  if (page === 'staff-ratings' && !state.user?.canManage) return;
   if (page === 'site-managers' && !state.user?.isOwner) return;
   if (page === 'staff-profile' && !state.activeStaffProfileId) return;
   $$('.page').forEach((element) => element.classList.remove('active-page'));
@@ -515,11 +581,12 @@ function openPage(page) {
   $('#management-nav-menu')?.classList.add('hidden');
   $('#management-navigation')?.classList.remove('is-open');
   $('#management-menu-toggle')?.setAttribute('aria-expanded', 'false');
-  if (page === 'staff-chat') loadChat('staff');
+  if (page === 'staff-chat') { rollReset('daily:'); const totalNode = $('#daily-message-total'); if (totalNode) delete totalNode.dataset.rollText; renderDailyMessageStats(); loadChat('staff'); }
   if (page === 'management-chat') loadChat('management');
   if (page === 'staff-profile') loadStaffProfile(state.activeStaffProfileId);
   if (page === 'personal') loadPersonal();
-  if (page === 'leaderboard') { renderLeaderboard(); loadStaffStats(); }
+  if (page === 'leaderboard') { rollReset('lb:'); renderLeaderboard(); loadStaffStats(); }
+  if (page === 'staff-ratings') { rollReset('rt:'); renderRatings(); loadRatings(); }
   if (page === 'audit-log') loadAudit(true);
   if (page === 'admin-monitor') loadAdminMonitoring({ silent: true });
   if (page === 'site-managers' && state.user?.isOwner) loadSiteManagers();
@@ -1113,6 +1180,7 @@ async function loadStaffStats() {
     renderDailyMessageStats();
     renderAdminOverview();
     renderLeaderboard();
+    if ($('.page.active-page')?.id === 'page-staff-ratings') renderRatings();
   } catch (error) {
     const node = $('#admin-overview-cards');
     if (node && !state.staffStats.length) node.innerHTML = `<div class="loading-state">${escapeHtml(error.message)}</div>`;
@@ -1139,9 +1207,10 @@ function renderAdminOverview() {
     const discordStatus = state.discordStatuses[String(member.id)] || 'unknown';
     const online = ['online', 'idle', 'dnd'].includes(discordStatus);
     const statusLabel = !state.discordPresenceAvailable ? 'غير متاح' : ({online:'أونلاين',idle:'خامل',dnd:'عدم الإزعاج',offline:'أوفلاين / مخفي',unknown:'الحالة غير مستلمة'}[discordStatus] || 'الحالة غير مستلمة');
-    return `<button type="button" class="admin-overview-card" data-open-staff-profile="${escapeHtml(member.id)}"><div class="admin-overview-top"><img src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="admin-overview-name"><b>${escapeHtml(member.username)}</b><small>${escapeHtml(member.roleName || 'مسؤول')}</small></div><span class="online-pill ${!state.discordPresenceAvailable || discordStatus === 'unknown' ? 'unknown' : (online ? 'online' : 'offline')}"><i></i>${statusLabel}</span></div><div class="admin-overview-metrics"><span><b>${Number(stats.dailyMessages || 0).toLocaleString('en-US')}</b><small>رسائل اليوم</small></span><span><b>${Number(stats.totalSubmissions || 0).toLocaleString('en-US')}</b><small>تسليمات</small></span><span><b>${Number(stats.totalPoints || 0).toLocaleString('en-US')}</b><small>نقاط</small></span><span><b>${Number(stats.adminRequests || 0).toLocaleString('en-US')}</b><small>طلبات إدارية</small></span></div><span class="admin-overview-link">فتح الملف الكامل ←</span></button>`;
+    return `<button type="button" class="admin-overview-card" data-open-staff-profile="${escapeHtml(member.id)}"><div class="admin-overview-top"><img src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="admin-overview-name"><b>${escapeHtml(member.username)}</b><small>${escapeHtml(member.roleName || 'مسؤول')}</small></div><span class="online-pill ${!state.discordPresenceAvailable || discordStatus === 'unknown' ? 'unknown' : (online ? 'online' : 'offline')}"><i></i>${statusLabel}</span></div><div class="admin-overview-metrics"><span><b>${rollMarkup(`ov:${member.id}:daily`, Number(stats.dailyMessages || 0))}</b><small>رسائل اليوم</small></span><span><b>${rollMarkup(`ov:${member.id}:subs`, Number(stats.totalSubmissions || 0))}</b><small>تسليمات</small></span><span><b>${rollMarkup(`ov:${member.id}:pts`, Number(stats.totalPoints || 0))}</b><small>نقاط</small></span><span><b>${rollMarkup(`ov:${member.id}:req`, Number(stats.adminRequests || 0))}</b><small>طلبات إدارية</small></span></div><span class="admin-overview-link">فتح الملف الكامل ←</span></button>`;
   }).join('');
   $$('[data-open-staff-profile]', container).forEach((button) => button.addEventListener('click', () => openStaffProfile(button.dataset.openStaffProfile)));
+  rollPlay(container);
 }
 async function openStaffProfile(userId) {
   const member = findStaffProfileMember(userId);
@@ -1571,14 +1640,19 @@ function renderLeaderboard() {
   }
   const medals = ['🥇', '🥈', '🥉'];
   const mineId = String(state.user?.id || '');
-  const card = (row) => `<button type="button" class="lb-podium-card rank-${row.rank}${row.id === mineId ? ' is-me' : ''}" data-open-staff-profile="${escapeHtml(row.id)}"><span class="lb-medal">${medals[row.rank - 1]}</span><img src="${escapeHtml(row.avatar)}" alt=""><b>${escapeHtml(row.name)}</b><small>${escapeHtml(row.role)}</small><strong>${num(row.value)}</strong><em>${metric.unit}</em></button>`;
+  const rollKey = (row) => `lb:${state.lbMetric}:${row.id}`;
+  const beforeFlip = flipCapture(list, 'data-open-staff-profile');
+  const card = (row) => `<button type="button" class="lb-podium-card rank-${row.rank}${row.id === mineId ? ' is-me' : ''}" data-open-staff-profile="${escapeHtml(row.id)}"><span class="lb-medal">${medals[row.rank - 1]}</span><img src="${escapeHtml(row.avatar)}" alt=""><b>${escapeHtml(row.name)}</b><small>${escapeHtml(row.role)}</small><strong>${rollMarkup(rollKey(row), row.value)}</strong><em>${metric.unit}</em></button>`;
   const top = rows.slice(0, 3);
   // ترتيب العرض: الثاني - الأول - الثالث عشان الأول يبقى في النص
   const display = top.length === 3 ? [top[1], top[0], top[2]] : top;
   podium.innerHTML = display.map(card).join('');
   const rest = rows.slice(3);
-  list.innerHTML = rest.map((row) => `<button type="button" class="lb-row${row.id === mineId ? ' is-me' : ''}" data-open-staff-profile="${escapeHtml(row.id)}"><span class="lb-rank">#${row.rank}</span><img src="${escapeHtml(row.avatar)}" alt=""><div class="lb-name"><b>${escapeHtml(row.name)}${row.id === mineId ? ' <i>(أنت)</i>' : ''}</b><small>${escapeHtml(row.role)}</small></div><div class="lb-value"><strong>${num(row.value)}</strong><small>${metric.unit}</small></div></button>`).join('');
+  list.innerHTML = rest.map((row) => `<button type="button" class="lb-row${row.id === mineId ? ' is-me' : ''}" data-open-staff-profile="${escapeHtml(row.id)}"><span class="lb-rank">#${row.rank}</span><img src="${escapeHtml(row.avatar)}" alt=""><div class="lb-name"><b>${escapeHtml(row.name)}${row.id === mineId ? ' <i>(أنت)</i>' : ''}</b><small>${escapeHtml(row.role)}</small></div><div class="lb-value"><strong>${rollMarkup(rollKey(row), row.value)}</strong><small>${metric.unit}</small></div></button>`).join('');
   [...$$('[data-open-staff-profile]', podium), ...$$('[data-open-staff-profile]', list)].forEach((button) => button.addEventListener('click', () => openStaffProfile(button.dataset.openStaffProfile)));
+  rollPlay(podium);
+  rollPlay(list);
+  flipPlay(list, 'data-open-staff-profile', beforeFlip);
 }
 
 async function loadAudit(reset = true) {
@@ -1841,21 +1915,24 @@ function renderDailyMessageStats() {
   const dateNode = $('#daily-message-date');
   const listNode = $('#daily-message-stats');
   if (!totalNode || !dateNode || !listNode) return;
-  totalNode.textContent = (Number(data.dailyTotal) || 0).toLocaleString('en-US');
+  rollSet(totalNode, Number(data.dailyTotal) || 0);
   dateNode.textContent = data.dailyDate ? data.dailyDate.split('-').reverse().join('/') : '—';
   if (!members.length) {
     listNode.innerHTML = '<div class="task-empty">لم يتم تحميل أعضاء الاستاف بعد، أو لا توجد رسائل اليوم.</div>';
     return;
   }
+  const beforeFlip = flipCapture(listNode, 'data-open-staff-profile');
   listNode.innerHTML = members.map((member, index) => `
     <button type="button" class="daily-message-row daily-message-row-clickable" data-open-staff-profile="${escapeHtml(member.id)}">
       <span class="daily-message-rank">${index + 1}</span>
       <img class="daily-message-avatar" src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt="">
       <div class="daily-message-member"><b>${escapeHtml(member.username || member.handle || member.id)}</b><small>${escapeHtml(member.handle ? `@${member.handle}` : `ID: ${member.id}`)}</small></div>
-      <span class="daily-message-count">${Number(member.count || 0).toLocaleString('en-US')} <small>رسالة</small></span>
+      <span class="daily-message-count">${rollMarkup(`daily:${member.id}`, Number(member.count || 0))} <small>رسالة</small></span>
     </button>
   `).join('');
   $$('.daily-message-row-clickable').forEach((button) => button.addEventListener('click', () => openStaffProfile(button.dataset.openStaffProfile)));
+  rollPlay(listNode);
+  flipPlay(listNode, 'data-open-staff-profile', beforeFlip);
 }
 
 function startChatPolling() {
@@ -2015,6 +2092,229 @@ const NOTIF_TARGETS = {
   'staff-request': { page: 'overview', selector: '#manager-staff-request-section', reload: () => loadStaffRequests() },
 };
 const BASE_TITLE = document.title;
+// ───────── تقييم الإداريين ─────────
+const RATING_META = {
+  1: { label: 'سيئ', emoji: '😡', color: '#ef4444' },
+  2: { label: 'ضعيف', emoji: '🙁', color: '#f97316' },
+  3: { label: 'مقبول', emoji: '😐', color: '#eab308' },
+  4: { label: 'جيد', emoji: '🙂', color: '#22c55e' },
+  5: { label: 'ممتاز', emoji: '🤩', color: '#06b6d4' },
+};
+function ratingAggregates() {
+  const map = new Map();
+  for (const item of state.ratings.items) { // الأحدث الأول
+    let agg = map.get(item.targetId);
+    if (!agg) { agg = { count: 0, sum: 0, dist: [0, 0, 0, 0, 0], items: [], latest: null }; map.set(item.targetId, agg); }
+    agg.count += 1;
+    agg.sum += item.rating;
+    agg.dist[item.rating - 1] += 1;
+    agg.items.push(item);
+    if (!agg.latest) agg.latest = item;
+  }
+  for (const agg of map.values()) {
+    agg.avg = agg.sum / agg.count;
+    agg.delta = agg.count > 1 ? agg.avg - ((agg.sum - agg.latest.rating) / (agg.count - 1)) : 0;
+    agg.level = Math.min(5, Math.max(1, Math.round(agg.avg)));
+  }
+  return map;
+}
+function ratingMembers() {
+  const seen = new Set();
+  return flattenRoster().filter((member) => (seen.has(String(member.id)) ? false : seen.add(String(member.id))));
+}
+function findRatingMember(id) { return ratingMembers().find((member) => String(member.id) === String(id)) || null; }
+function ratingStatsOf(id) { return (state.staffStats || []).find((row) => String(row.userId) === String(id)) || {}; }
+async function loadRatings(silent = false) {
+  if (!state.user?.canManage) return;
+  try {
+    const result = await api('/api/staff-ratings');
+    state.ratings.items = Array.isArray(result.ratings) ? result.ratings : [];
+    state.ratings.loaded = true;
+    renderRatings();
+    if (!$('#rating-modal')?.classList.contains('hidden')) renderRatingModalBody();
+  } catch (error) {
+    if (!silent) { const grid = $('#rt-grid'); if (grid) grid.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`; }
+  }
+}
+function renderRatings() {
+  const grid = $('#rt-grid');
+  const kpis = $('#rt-kpis');
+  if (!grid || !kpis) return;
+  if (!state.ratings.loaded && !state.ratings.items.length) { grid.innerHTML = '<div class="loading-state">جاري تحميل التقييمات...</div>'; kpis.innerHTML = ''; return; }
+  const aggs = ratingAggregates();
+  const scoped = ratingMembers().filter((member) => state.ratings.scope === 'all' || member.isAdmin);
+  const rated = scoped.filter((member) => aggs.has(String(member.id)));
+  const overall = rated.length ? rated.reduce((sum, member) => sum + aggs.get(String(member.id)).avg, 0) / rated.length : 0;
+  const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const lastWeek = state.ratings.items.filter((item) => new Date(item.createdAt).getTime() >= weekAgo).length;
+  const kpi = (index, label, key, value, note, digits, accent) => `<article class="rt-kpi${accent ? ' accent' : ''}" style="--i:${index}"><small>${label}</small><strong>${rollMarkup(`rt:kpi:${key}`, value, digits)}</strong><em>${note}</em></article>`;
+  kpis.innerHTML = [
+    kpi(0, 'المتوسط العام', 'avg', overall, 'من 5 — متوسط متوسطات الإداريين', 2, true),
+    kpi(1, 'تم تقييمهم', 'rated', rated.length, `من ${scoped.length} في القائمة`, 0),
+    kpi(2, 'بدون تقييم', 'unrated', scoped.length - rated.length, 'لسه محتاجين تقييم', 0),
+    kpi(3, 'تقييمات آخر 7 أيام', 'week', lastWeek, `إجمالي ${state.ratings.items.length.toLocaleString('en-US')} تقييم`, 0),
+  ].join('');
+  rollPlay(kpis);
+
+  const query = state.ratings.search.trim().toLowerCase();
+  let list = scoped.filter((member) => !query || [member.username, member.handle, member.id, member.roleName].some((v) => String(v || '').toLowerCase().includes(query)));
+  const avgOf = (m) => aggs.get(String(m.id))?.avg ?? -1;
+  const lastOf = (m) => new Date(aggs.get(String(m.id))?.latest?.createdAt || 0).getTime();
+  const byName = (a, b) => String(a.username).localeCompare(String(b.username), 'ar');
+  const sorters = {
+    'avg-desc': (a, b) => avgOf(b) - avgOf(a) || byName(a, b),
+    'avg-asc': (a, b) => (avgOf(a) < 0 ? 1 : avgOf(b) < 0 ? -1 : avgOf(a) - avgOf(b)) || byName(a, b),
+    recent: (a, b) => lastOf(b) - lastOf(a) || byName(a, b),
+    unrated: (a, b) => (avgOf(a) < 0 ? 0 : 1) - (avgOf(b) < 0 ? 0 : 1) || byName(a, b),
+    name: byName,
+  };
+  list = list.sort(sorters[state.ratings.sort] || sorters['avg-desc']);
+  if (!list.length) { grid.innerHTML = '<div class="task-empty">مفيش أعضاء مطابقين. جرّب تغيّر الفلتر أو البحث.</div>'; return; }
+
+  const mineId = String(state.user?.id || '');
+  const beforeFlip = flipCapture(grid, 'data-rt-card');
+  grid.innerHTML = list.map((member, index) => {
+    const id = String(member.id);
+    const agg = aggs.get(id);
+    const stats = ratingStatsOf(id);
+    const meta = agg ? RATING_META[agg.level] : null;
+    const level = agg ? agg.level : 0;
+    let trend = '<span class="rt-trend flat">أول تقييم</span>';
+    if (!agg) trend = '<span class="rt-trend flat">غير مقيَّم</span>';
+    else if (agg.count > 1) trend = Math.abs(agg.delta) < 0.005 ? '<span class="rt-trend flat">ثابت</span>' : `<span class="rt-trend ${agg.delta > 0 ? 'up' : 'down'}"><b>${agg.delta > 0 ? '▲' : '▼'}</b>${Math.abs(agg.delta).toFixed(2)}</span>`;
+    const dist = agg ? [5, 4, 3, 2, 1].map((n) => `<div class="rt-dist-row"><span>${RATING_META[n].label}</span><i><span style="--c:${RATING_META[n].color};width:${Math.round((agg.dist[n - 1] / agg.count) * 100)}%"></span></i><b>${agg.dist[n - 1]}</b></div>`).join('') : '';
+    const noted = agg?.items.find((item) => item.note && item.note.trim());
+    const noteHtml = noted ? `<p class="rt-lastnote">“${escapeHtml(noted.note)}”<small>— ${escapeHtml(noted.raterName || 'مسؤول')} · ${escapeHtml(formatDate(noted.createdAt, { day: 'numeric', month: 'short' }))}</small></p>` : '<p class="rt-lastnote">مفيش ملاحظات لسه.</p>';
+    const isMe = id === mineId;
+    return `<article class="rt-card lvl-${level}" data-rt-card="${escapeHtml(id)}" style="--i:${Math.min(index, 12)}">
+      <div class="rt-card-top"><img src="${escapeHtml(member.avatarUrl || avatarFallback(id))}" alt=""><div class="rt-who"><b>${escapeHtml(member.username)}${isMe ? ' <i>(أنت)</i>' : ''}</b><small>${escapeHtml(member.roleName || 'عضو الاستاف')}</small></div><span class="rt-badge">${meta ? `${meta.emoji} ${meta.label}` : '— بدون تقييم'}</span></div>
+      <div class="rt-score"><div class="rt-score-num"><strong>${agg ? rollMarkup(`rt:${id}:avg`, agg.avg, 2) : '—'}</strong><span>/ 5</span></div><span class="rt-stars" aria-hidden="true"><i style="width:${agg ? Math.round((agg.avg / 5) * 100) : 0}%">★★★★★</i>★★★★★</span>${trend}</div>
+      ${agg ? `<div class="rt-dist">${dist}</div>` : ''}
+      <div class="rt-metrics"><span><b>${rollMarkup(`rt:${id}:d`, Number(stats.dailyMessages || 0))}</b><small>رسائل اليوم</small></span><span><b>${rollMarkup(`rt:${id}:t`, Number(stats.totalMessages || 0))}</b><small>إجمالي الرسائل</small></span><span><b>${rollMarkup(`rt:${id}:p`, Number(stats.totalPoints || 0))}</b><small>نقاط</small></span><span><b>${rollMarkup(`rt:${id}:a`, Number(stats.approvedSubmissions || 0))}</b><small>تسليمات مقبولة</small></span></div>
+      ${noteHtml}
+      <div class="rt-actions"><button type="button" class="primary-button" data-rt-rate="${escapeHtml(id)}"${isMe ? ' disabled title="مينفعش تقيّم نفسك"' : ''}>${isMe ? 'ده حسابك' : '✪ قيّم الآن'}</button><button type="button" class="secondary-button" data-rt-history="${escapeHtml(id)}">السجل (${agg ? agg.count : 0})</button></div>
+    </article>`;
+  }).join('');
+  rollPlay(grid);
+  flipPlay(grid, 'data-rt-card', beforeFlip);
+}
+function renderRatingModalBody() {
+  const id = state.ratings.targetId;
+  if (!id) return;
+  const aggs = ratingAggregates();
+  const agg = aggs.get(String(id));
+  const stats = ratingStatsOf(id);
+  const statsNode = $('#rt-modal-stats');
+  if (statsNode) {
+    statsNode.innerHTML = `<span><b>${agg ? rollMarkup(`rtm:${id}:avg`, agg.avg, 2) : '—'}</b><small>المتوسط / 5</small></span><span><b>${rollMarkup(`rtm:${id}:cnt`, agg ? agg.count : 0)}</b><small>عدد التقييمات</small></span><span><b>${rollMarkup(`rtm:${id}:d`, Number(stats.dailyMessages || 0))}</b><small>رسائل اليوم</small></span><span><b>${rollMarkup(`rtm:${id}:t`, Number(stats.totalMessages || 0))}</b><small>إجمالي الرسائل</small></span>`;
+    rollPlay(statsNode);
+  }
+  const items = agg ? agg.items : [];
+  $('#rt-history-count').textContent = String(items.length);
+  const history = $('#rt-history');
+  history.innerHTML = items.length ? items.slice(0, 40).map((item, index) => {
+    const meta = RATING_META[item.rating];
+    return `<article class="rt-hist-row${item.id === state.ratings.justAddedId ? ' new' : ''}" style="--i:${Math.min(index, 8)}"><span class="rt-emoji">${meta.emoji}</span><div><b style="color:${meta.color}">${meta.label} · ${item.rating}/5</b><small>بواسطة ${escapeHtml(item.raterName || 'مسؤول')} · ${escapeHtml(formatDate(item.createdAt, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}</small>${item.note ? `<p>${escapeHtml(item.note)}</p>` : ''}</div></article>`;
+  }).join('') : '<div class="task-empty">مفيش تقييمات سابقة للعضو ده.</div>';
+}
+function updateRatingSubmitState() {
+  const button = $('#rt-submit');
+  if (!button || button.dataset.oldText) return;
+  const isSelf = String(state.ratings.targetId) === String(state.user?.id);
+  const selected = state.ratings.selected;
+  $$('#rt-options .rt-opt').forEach((option) => {
+    const active = Number(option.dataset.rtOpt) === selected;
+    option.classList.toggle('active', active);
+    option.setAttribute('aria-checked', String(active));
+  });
+  $('#rt-self-warning')?.classList.toggle('hidden', !isSelf);
+  button.disabled = isSelf || !selected;
+  button.textContent = isSelf ? 'مينفعش تقيّم نفسك' : selected ? `إرسال تقييم «${RATING_META[selected].label}» ✓` : 'اختار تقييم الأول';
+}
+function openRatingModal(id, { history = false } = {}) {
+  const member = findRatingMember(id);
+  if (!member) return showToast('العضو ده مش موجود في القائمة.', 'error');
+  state.ratings.targetId = String(id);
+  state.ratings.selected = 0;
+  state.ratings.justAddedId = null;
+  rollReset('rtm:');
+  $('#rt-modal-avatar').src = member.avatarUrl || avatarFallback(id);
+  $('#rt-modal-title').textContent = member.username;
+  $('#rt-modal-role').textContent = member.roleName || 'عضو الاستاف';
+  $('#rt-options').innerHTML = [1, 2, 3, 4, 5].map((n) => `<button type="button" class="rt-opt" role="radio" aria-checked="false" data-rt-opt="${n}"><span class="rt-emoji">${RATING_META[n].emoji}</span><b>${RATING_META[n].label}</b></button>`).join('');
+  $('#rt-note').value = '';
+  $('#rt-note-count').textContent = '0 / 600';
+  renderRatingModalBody();
+  updateRatingSubmitState();
+  $('#rating-modal').classList.remove('hidden');
+  document.body.classList.add('appearance-modal-open');
+  if (history) $('#rt-history')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function closeRatingModal() {
+  $('#rating-modal')?.classList.add('hidden');
+  document.body.classList.remove('appearance-modal-open');
+}
+async function submitRating(event) {
+  event.preventDefault();
+  const id = state.ratings.targetId;
+  const rating = state.ratings.selected;
+  if (!id || !rating) return;
+  const member = findRatingMember(id);
+  const button = $('#rt-submit');
+  setButtonLoading(button, true, 'جاري الإرسال...');
+  try {
+    const result = await api('/api/staff-ratings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetId: id, targetName: member?.username || '', rating, note: $('#rt-note').value.trim() }),
+    });
+    state.ratings.items.unshift(result.rating);
+    state.ratings.justAddedId = result.rating.id;
+    state.ratings.selected = 0;
+    $('#rt-note').value = '';
+    $('#rt-note-count').textContent = '0 / 600';
+    showToast(result.message || 'تم حفظ التقييم.', result.discordPosted ? 'success' : 'info');
+    renderRatings();
+    renderRatingModalBody();
+  } catch (error) {
+    showToast(error.message || 'تعذر حفظ التقييم.', 'error');
+  } finally {
+    setButtonLoading(button, false);
+    updateRatingSubmitState();
+  }
+}
+function wireRatings() {
+  const root = $('#page-staff-ratings');
+  if (!root || root.dataset.wired === '1') return;
+  root.dataset.wired = '1';
+  $('#rt-refresh')?.addEventListener('click', () => loadRatings());
+  $$('#rt-scope-tabs [data-rt-scope]').forEach((button) => button.addEventListener('click', () => {
+    state.ratings.scope = button.dataset.rtScope;
+    $$('#rt-scope-tabs [data-rt-scope]').forEach((item) => item.classList.toggle('active', item === button));
+    renderRatings();
+  }));
+  $('#rt-search')?.addEventListener('input', (event) => { state.ratings.search = event.target.value; renderRatings(); });
+  $('#rt-sort')?.addEventListener('change', (event) => { state.ratings.sort = event.target.value; renderRatings(); });
+  $('#rt-grid')?.addEventListener('click', (event) => {
+    const rate = event.target.closest('[data-rt-rate]');
+    if (rate && !rate.disabled) return openRatingModal(rate.dataset.rtRate);
+    const hist = event.target.closest('[data-rt-history]');
+    if (hist) openRatingModal(hist.dataset.rtHistory, { history: true });
+  });
+  $$('[data-rating-close]').forEach((button) => button.addEventListener('click', closeRatingModal));
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !$('#rating-modal')?.classList.contains('hidden')) closeRatingModal(); });
+  $('#rt-options')?.addEventListener('click', (event) => {
+    const option = event.target.closest('[data-rt-opt]');
+    if (!option) return;
+    state.ratings.selected = Number(option.dataset.rtOpt);
+    updateRatingSubmitState();
+  });
+  $('#rt-note')?.addEventListener('input', (event) => { $('#rt-note-count').textContent = `${event.target.value.length} / 600`; });
+  $('#rt-form')?.addEventListener('submit', submitRating);
+  // تحديث هادئ: لو مسؤول تاني قيّم، الأرقام هنا تتحرك لوحدها.
+  setInterval(() => { if (!document.hidden && $('.page.active-page')?.id === 'page-staff-ratings') loadRatings(true); }, 45000);
+}
+
 function wireNotifications() {
   const button = $('#notif-btn');
   const panel = $('#notif-panel');
