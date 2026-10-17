@@ -24,8 +24,9 @@ const state = {
   lbMetric: 'points',
   audit: { entries: [], nextBefore: null, hasMore: false, loading: false },
   activeStaffProfileId: null,
+  profileVoiceTime: {},
   cyberTrendPeriod: '24h',
-  monitor: { health: null, summary: null, roster: null, staffStats: [], presence: null, taskStats: null, audit: [], reviewAudit: [], leaveRequests: [], staffRequests: [], loadErrors: [], updatedAt: null, memberLimit: 100 },
+  monitor: { health: null, summary: null, roster: null, staffStats: [], presence: null, voiceTime: null, voiceTimeFetchedAt: null, taskStats: null, audit: [], reviewAudit: [], leaveRequests: [], staffRequests: [], loadErrors: [], updatedAt: null, memberLimit: 100 },
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -309,6 +310,17 @@ async function initialize() {
       const activePage = $('.page.active-page')?.id;
       if (!document.hidden && state.user?.canManage && ['page-admin-monitor', 'page-overview'].includes(activePage)) loadAdminMonitoring({ silent: true });
     }, 120000);
+    setInterval(() => {
+      const activePage = $('.page.active-page')?.id;
+      if (!document.hidden && state.user?.canManage && ['page-admin-monitor', 'page-overview'].includes(activePage)) void refreshVoiceTime({ silent: true });
+    }, 15000);
+    setInterval(updateVoiceDurationCounters, 1000);
+    setInterval(() => {
+      if (document.hidden || !state.user) return;
+      const activePage = $('.page.active-page')?.id;
+      if (activePage === 'page-staff-profile' && state.activeStaffProfileId) void fetchProfileVoiceTime(state.activeStaffProfileId);
+      else if (activePage === 'page-personal') void fetchProfileVoiceTime(state.user.id);
+    }, 15000);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) loadNotifications(); });
   } catch (error) {
     showFatal(error.message || 'حصل خطأ أثناء تحميل الموقع.');
@@ -1154,7 +1166,10 @@ async function loadStaffProfile(userId, providedMember = null) {
   const member = providedMember || findStaffProfileMember(userId);
   if (!member) return;
   try {
-    const response = await api(`/api/staff-stats/${encodeURIComponent(userId)}`);
+    const [response] = await Promise.all([
+      api(`/api/staff-stats/${encodeURIComponent(userId)}`),
+      fetchProfileVoiceTime(userId),
+    ]);
     if (String(state.activeStaffProfileId) !== String(userId)) return;
     renderStaffProfile(member, response);
   } catch (error) {
@@ -1185,18 +1200,18 @@ async function loadAdminMonitoring(options = {}) {
   if (!state.user?.canManage) return;
   const button = $('#monitor-refresh');
   if (button && !options.auditOnly) setButtonLoading(button, true, 'جاري التحديث...');
-  const boxIds = ['monitor-kpis', 'monitor-services', 'monitor-presence-stats', 'monitor-members-body', 'monitor-task-stats', 'monitor-pending-requests', 'monitor-audit-events', 'monitor-review-events'];
+  const boxIds = ['monitor-kpis', 'monitor-services', 'monitor-presence-stats', 'monitor-voice-time-list', 'monitor-members-body', 'monitor-task-stats', 'monitor-pending-requests', 'monitor-audit-events', 'monitor-review-events'];
   if (!options.auditOnly && !state.monitor.updatedAt) boxIds.forEach((id) => {
     const node = $(`#${id}`); if (!node) return;
     node.innerHTML = node.tagName === 'TBODY'
-      ? '<tr><td colspan="10" class="loading-state">جاري تحميل بيانات المراقبة...</td></tr>'
+      ? '<tr><td colspan="11" class="loading-state">جاري تحميل بيانات المراقبة...</td></tr>'
       : '<div class="loading-state">جاري تحميل بيانات المراقبة...</div>';
   });
   const jobs = options.auditOnly
     ? { audit: () => api('/api/audit-log'), reviewAudit: () => api('/api/submission-audit') }
     : {
         health: () => api('/api/health'), summary: () => api('/api/admin-monitoring'), roster: () => api('/api/roster'),
-        stats: () => api('/api/staff-stats'), presence: () => api('/api/discord-presence'), taskStats: () => api('/api/task-stats'),
+        stats: () => api('/api/staff-stats'), presence: () => api('/api/discord-presence'), voiceTime: () => api('/api/voice-time'), taskStats: () => api('/api/task-stats'),
         audit: () => api('/api/audit-log'), reviewAudit: () => api('/api/submission-audit'),
         leaveRequests: () => api('/api/leave-requests'), staffRequests: () => api('/api/staff-requests'),
       };
@@ -1218,6 +1233,7 @@ async function loadAdminMonitoring(options = {}) {
         return;
       }
       const data = result.value;
+      if (key === 'voiceTime') state.monitor.voiceTimeFetchedAt = Date.now();
       if (key === 'stats') state.monitor.staffStats = Array.isArray(data.stats) ? data.stats : [];
       else if (key === 'audit') state.monitor.audit = Array.isArray(data.entries) ? data.entries : [];
       else if (key === 'reviewAudit') state.monitor.reviewAudit = Array.isArray(data.entries) ? data.entries : [];
@@ -1430,6 +1446,7 @@ function renderAdminMonitoring(failures = []) {
   if (activityBox) activityBox.innerHTML = `<div class="monitor-subheading"><b>أعلى نشاط رسائل اليوم</b><small>من روم الإحصاء المحدد في إعدادات البوت</small></div>${monitor.loadErrors.some((item) => item.startsWith('stats:')) ? '<div class="task-empty">بيانات الرسائل غير متاحة؛ تعذر تحميل إحصائيات الاستاف.</div>' : topActive.length ? topActive.map(({ member, stats }, index) => `<div class="monitor-activity-row"><span class="monitor-activity-rank">${index + 1}</span><img src="${escapeHtml(member.avatarUrl || avatarFallback(member.id))}" alt=""><div class="monitor-activity-main"><b>${escapeHtml(member.username)}</b><div class="monitor-activity-track"><span style="width:${Math.max(2, Number(stats.dailyMessages || 0) / maxMessages * 100)}%"></span></div></div><strong>${monitorFormatNumber(stats.dailyMessages)}</strong></div>`).join('') : '<div class="task-empty">لا توجد رسائل مسجلة لليوم حتى الآن.</div>'}`;
   const memberCount = $('#monitor-member-count'); if (memberCount) memberCount.textContent = monitorFormatNumber(members.length) + ' عضو';
   renderMonitorMembers(true);
+  renderMonitorVoiceTimeList();
   const taskStats = $('#monitor-task-stats');
   if (taskStats) taskStats.innerHTML = [
     ['كل التسليمات', totalStats.total ?? metrics.totalSubmissions ?? '—'], ['مقبولة', totalStats.approved ?? metrics.approvedSubmissions ?? '—'], ['قيد المراجعة', totalStats.pending ?? metrics.pendingSubmissions ?? '—'], ['مرفوضة', totalStats.rejected ?? metrics.rejectedSubmissions ?? '—'], ['المهمات النشطة', metrics.activeTasks ?? '—'], ['الإجباري النشط', metrics.requiredActiveTasks ?? '—'], ['تنتهي خلال 24 ساعة', metrics.dueWithin24Hours ?? '—'], ['قرارات آخر 24 ساعة', metrics.reviewDecisions24h ?? '—'],
@@ -1476,6 +1493,113 @@ function renderAdminMonitoring(failures = []) {
   const updated = $('#monitor-last-updated');
   if (updated) updated.textContent = `آخر تحديث: ${formatDate(monitor.updatedAt || new Date(), { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Africa/Cairo' })} بتوقيت القاهرة`;
 }
+function formatVoiceDuration(durationMs) {
+  const totalSeconds = Math.max(0, Math.floor((Number(durationMs) || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+function updateVoiceDurationCounters() {
+  const now = Date.now();
+  $$('.voice-time-clock[data-voice-base-ms]').forEach((node) => {
+    const base = Math.max(0, Number(node.dataset.voiceBaseMs) || 0);
+    const fetchedAt = Number(node.dataset.voiceFetchedAt) || now;
+    const isLive = node.dataset.voiceLive === 'true';
+    node.textContent = formatVoiceDuration(base + (isLive ? Math.max(0, now - fetchedAt) : 0));
+  });
+}
+async function fetchProfileVoiceTime(userId) {
+  const id = String(userId || '');
+  if (!id || !state.user?.id) return null;
+  if (!state.user.canManage && id !== String(state.user.id)) return null;
+  state.profileVoiceTime = state.profileVoiceTime || {};
+  const current = state.profileVoiceTime[id];
+  if (current?.requestInFlight) return current;
+  state.profileVoiceTime[id] = { ...(current || {}), requestInFlight: true };
+  try {
+    const data = await api(`/api/voice-time/${encodeURIComponent(id)}`);
+    state.profileVoiceTime[id] = { ...data, fetchedAt: Date.now(), requestInFlight: false };
+  } catch (error) {
+    state.profileVoiceTime[id] = { available: false, member: null, error: error?.message || 'voice-time-unavailable', fetchedAt: Date.now(), requestInFlight: false };
+  }
+  updateProfileVoiceTimeDisplay(id);
+  return state.profileVoiceTime[id];
+}
+function updateProfileVoiceTimeDisplay(userId) {
+  const id = String(userId || '');
+  const record = state.profileVoiceTime?.[id];
+  if (!record) return;
+  const sections = $$('[data-profile-voice-time-for]').filter((node) => String(node.dataset.profileVoiceTimeFor) === id);
+  if (!sections.length) return;
+  const available = Boolean(record.available && record.member);
+  const member = record.member || {};
+  const inVoice = available && Boolean(member.inVoice);
+  sections.forEach((section) => {
+    const clock = $('[data-profile-voice-clock]', section);
+    const status = $('[data-profile-voice-status]', section);
+    const currentState = $('[data-profile-voice-state]', section);
+    if (clock) {
+      if (available) {
+        clock.dataset.voiceBaseMs = String(Math.max(0, Number(member.durationMs) || 0));
+        clock.dataset.voiceFetchedAt = String(Number(record.fetchedAt) || Date.now());
+        clock.dataset.voiceLive = inVoice ? 'true' : 'false';
+        clock.textContent = formatVoiceDuration(member.durationMs);
+      } else {
+        delete clock.dataset.voiceBaseMs;
+        delete clock.dataset.voiceFetchedAt;
+        delete clock.dataset.voiceLive;
+        clock.textContent = '—';
+      }
+    }
+    if (status) status.textContent = !available ? 'بيانات الفويس غير متاحة مؤقتًا' : inVoice ? 'العضو في فويس دلوقتي' : 'العضو مش في فويس حاليًا';
+    if (currentState) currentState.textContent = !available ? 'غير متاح' : inVoice ? 'في مكالمة' : 'مش في مكالمة';
+  });
+}
+function renderMonitorVoiceTimeList() {
+  const root = $('#monitor-voice-time-list');
+  if (!root) return;
+  const data = state.monitor.voiceTime;
+  if (!data) {
+    root.innerHTML = '<div class="task-empty">عداد الفويس لم يستلم بيانات. تأكد من نشر واجهة v69 وتشغيل البوت المحدث.</div>';
+    return;
+  }
+  if (!data.available) {
+    const reason = data.reason === 'stale-heartbeat'
+      ? 'البوت مش بيبعت نبضات حديثة. شغّل bot-worker وتأكد إنه بيستخدم نفس DATABASE_URL.'
+      : 'لسه مفيش نبضة من متتبع الفويس. انشر وشغّل bot-worker المحدث أولًا.';
+    root.innerHTML = `<div class="task-empty">${escapeHtml(reason)}</div>`;
+    return;
+  }
+  const rows = (data.members || []).filter((item) => Number(item.durationMs) > 0 || item.inVoice).slice(0, 15);
+  const day = data.dailyDate ? `بتوقيت القاهرة · ${escapeHtml(data.dailyDate)}` : 'بتوقيت القاهرة';
+  const lastSeen = data.lastSeenAt ? `آخر نبضة منذ ${monitorAgo(data.lastSeenAt)}` : 'Live';
+  const heading = `<div class="monitor-subheading"><b>أعلى وقت فويس اليوم</b><small>${day} · ${escapeHtml(lastSeen)}</small></div>`;
+  if (!rows.length) {
+    root.innerHTML = `${heading}<div class="task-empty">لسه مفيش وقت فويس مسجل النهارده.</div>`;
+    return;
+  }
+  const fetchedAt = Number(state.monitor.voiceTimeFetchedAt) || Date.now();
+  root.innerHTML = heading + rows.map((item, index) => `<div class="monitor-activity-row voice-time-rank-row"><span class="monitor-activity-rank">${String(index + 1).padStart(2, '0')}</span><div class="monitor-activity-main"><b>${escapeHtml(item.username || item.userId)}</b><small>${item.inVoice ? '🟢 موجود في فويس الآن' : 'أنهى المكالمة'}</small></div><strong class="voice-time-clock" data-voice-base-ms="${Math.max(0, Number(item.durationMs) || 0)}" data-voice-fetched-at="${fetchedAt}" data-voice-live="${item.inVoice ? 'true' : 'false'}">${formatVoiceDuration(item.durationMs)}</strong></div>`).join('');
+  updateVoiceDurationCounters();
+}
+let voiceTimeRefreshInFlight = false;
+async function refreshVoiceTime(options = {}) {
+  if (!state.user?.canManage || voiceTimeRefreshInFlight) return;
+  voiceTimeRefreshInFlight = true;
+  try {
+    const data = await api('/api/voice-time');
+    state.monitor.voiceTime = data;
+    state.monitor.voiceTimeFetchedAt = Date.now();
+    renderMonitorVoiceTimeList();
+    renderMonitorMembers(false);
+  } catch (error) {
+    if (!options.silent) showToast(error.message || 'تعذر تحميل عداد الفويس.', 'error');
+  } finally {
+    voiceTimeRefreshInFlight = false;
+  }
+}
+
 function renderMonitorMembers(resetLimit = false) {
   const body = $('#monitor-members-body');
   if (!body) return;
@@ -1485,6 +1609,8 @@ function renderMonitorMembers(resetLimit = false) {
   const members = (roster.groups || []).flatMap((group) => (group.members || []).map((member) => ({ ...member, sourceRoleName: member.roleName || group.name })));
   const statsById = new Map((monitor.staffStats || []).map((item) => [String(item.userId), item]));
   const siteById = new Map((monitor.summary?.siteActivity || []).map((item) => [String(item.userId), item]));
+  const voiceById = new Map((monitor.voiceTime?.members || []).map((item) => [String(item.userId), item]));
+  const voiceAvailable = Boolean(monitor.voiceTime?.available);
   const discordReady = Boolean(monitor.presence?.available);
   const statuses = discordReady ? (monitor.presence?.statuses || {}) : {};
   const query = ($('#monitor-member-search')?.value || '').trim().toLocaleLowerCase('ar');
@@ -1515,7 +1641,7 @@ function renderMonitorMembers(resetLimit = false) {
     return true;
   });
   const shown = filtered.slice(0, state.monitor.memberLimit || 100);
-  if (!shown.length) body.innerHTML = '<tr><td colspan="10" class="loading-state">مفيش أعضاء مطابقين للفلاتر.</td></tr>';
+  if (!shown.length) body.innerHTML = '<tr><td colspan="11" class="loading-state">مفيش أعضاء مطابقين للفلاتر.</td></tr>';
   else body.innerHTML = shown.map((member) => {
     const id = String(member.id); const stats = statsById.get(id) || {}; const site = siteById.get(id);
     const status = statuses[id] || 'unknown'; const siteOnline = Boolean(site && Date.now() - new Date(site.lastSeen).getTime() < 150000);
@@ -1523,7 +1649,11 @@ function renderMonitorMembers(resetLimit = false) {
     const roleNames = (member.roles || []).map((role) => role.name).join(' · ');
     const submissions = `${monitorFormatNumber(stats.totalSubmissions || 0)}<small> ${monitorFormatNumber(stats.approvedSubmissions || 0)} مقبول · ${monitorFormatNumber(stats.pendingSubmissions || 0)} معلّق</small>`;
     const requests = `${monitorFormatNumber(stats.adminRequests || 0)}<small> إداري · ${monitorFormatNumber(stats.leaveRequests || 0)} إجازة</small>`;
-    return `<tr><td><div class="monitor-member-cell"><img src="${escapeHtml(member.avatarUrl || avatarFallback(id))}" alt=""><div><b>${escapeHtml(member.username || id)}${member.isAdmin ? '<span class="monitor-admin-chip">إدارة</span>' : ''}</b><small>${escapeHtml(id)}</small></div></div></td><td><b>${escapeHtml(member.roleName || '—')}</b><small class="monitor-role-list">${escapeHtml(roleNames || 'بدون رتب مرئية')}</small></td><td><span class="monitor-status-pill ${statusTone}"><i></i>${escapeHtml(monitorStatusLabel(status, discordReady))}</span></td><td><span class="monitor-status-pill ${siteOnline ? 'online' : 'offline'}"><i></i>${siteOnline ? 'نشط بالموقع' : 'غير نشط'}</span></td><td>${monitorFormatNumber(stats.dailyMessages || 0)}</td><td>${monitorFormatNumber(stats.totalMessages || 0)}</td><td>${submissions}</td><td>${monitorFormatNumber(stats.totalPoints || 0)}</td><td>${requests}</td><td>${escapeHtml(monitorAgo(site?.lastSeen || stats.lastSeen))}</td></tr>`;
+    const voice = voiceById.get(id) || { durationMs: 0, inVoice: false };
+    const voiceCell = voiceAvailable
+      ? `<span class="voice-time-clock" data-voice-base-ms="${Math.max(0, Number(voice.durationMs) || 0)}" data-voice-fetched-at="${Number(monitor.voiceTimeFetchedAt) || Date.now()}" data-voice-live="${voice.inVoice ? 'true' : 'false'}">${formatVoiceDuration(voice.durationMs)}</span>${voice.inVoice ? '<small class="voice-live-tag">في فويس دلوقتي</small>' : ''}`
+      : '<span class="voice-time-unavailable" title="تأكد إن bot-worker شغال ومتصّل بالداتابيز">—</span>';
+    return `<tr><td><div class="monitor-member-cell"><img src="${escapeHtml(member.avatarUrl || avatarFallback(id))}" alt=""><div><b>${escapeHtml(member.username || id)}${member.isAdmin ? '<span class="monitor-admin-chip">إدارة</span>' : ''}</b><small>${escapeHtml(id)}</small></div></div></td><td><b>${escapeHtml(member.roleName || '—')}</b><small class="monitor-role-list">${escapeHtml(roleNames || 'بدون رتب مرئية')}</small></td><td><span class="monitor-status-pill ${statusTone}"><i></i>${escapeHtml(monitorStatusLabel(status, discordReady))}</span></td><td><span class="monitor-status-pill ${siteOnline ? 'online' : 'offline'}"><i></i>${siteOnline ? 'نشط بالموقع' : 'غير نشط'}</span></td><td class="voice-time-cell">${voiceCell}</td><td>${monitorFormatNumber(stats.dailyMessages || 0)}</td><td>${monitorFormatNumber(stats.totalMessages || 0)}</td><td>${submissions}</td><td>${monitorFormatNumber(stats.totalPoints || 0)}</td><td>${requests}</td><td>${escapeHtml(monitorAgo(site?.lastSeen || stats.lastSeen))}</td></tr>`;
   }).join('');
   const shownLabel = $('#monitor-members-shown'); if (shownLabel) shownLabel.textContent = `عرض ${monitorFormatNumber(shown.length)} من ${monitorFormatNumber(filtered.length)} عضو مطابق`;
   const more = $('#monitor-members-more'); if (more) { more.classList.toggle('hidden', shown.length >= filtered.length); more.disabled = shown.length >= filtered.length; }
@@ -1636,7 +1766,10 @@ async function loadPersonal(force = false) {
   if (!me?.id || !box) return;
   if (force || !box.querySelector('.pf-hero')) box.innerHTML = '<div class="loading-state">جاري تحميل إحصائياتك...</div>';
   try {
-    const response = await api(`/api/staff-stats/${encodeURIComponent(me.id)}`);
+    const [response] = await Promise.all([
+      api(`/api/staff-stats/${encodeURIComponent(me.id)}`),
+      fetchProfileVoiceTime(me.id),
+    ]);
     if (!$('#page-personal')?.classList.contains('active-page')) return;
     const member = findStaffProfileMember(me.id) || { id: String(me.id), username: me.username || String(me.id), handle: me.handle || String(me.id), avatarUrl: me.avatarUrl || avatarFallback(me.id), roleName: 'عضو الاستاف', roles: [], isAdmin: Boolean(me.isAdmin) };
     renderStaffProfile(member, response, '#personal-content');
@@ -1675,6 +1808,13 @@ function renderStaffProfile(member, response = {}, target = '#staff-profile-cont
 
   const rankBadge = (icon, label, info) => (info?.rank ? `<span class="pf-rank"><b>${icon} #${info.rank}</b><small>${label} · من ${info.of}</small></span>` : `<span class="pf-rank muted-rank"><b>${icon} —</b><small>${label}</small></span>`);
   const kpi = (label, value, note = '', accent = false) => `<article class="pf-kpi${accent ? ' accent' : ''}"><small>${label}</small><strong>${typeof value === 'string' ? escapeHtml(value) : num(value)}</strong>${note ? `<span>${note}</span>` : ''}</article>`;
+  const profileVoiceRecord = state.profileVoiceTime[String(member.id)] || null;
+  const profileVoiceAvailable = Boolean(profileVoiceRecord?.available && profileVoiceRecord?.member);
+  const profileVoiceMember = profileVoiceRecord?.member || {};
+  const profileVoiceDuration = profileVoiceAvailable ? Math.max(0, Number(profileVoiceMember.durationMs) || 0) : 0;
+  const profileVoiceLive = profileVoiceAvailable && Boolean(profileVoiceMember.inVoice);
+  const profileVoiceStatus = !profileVoiceAvailable ? 'بيانات الفويس غير متاحة مؤقتًا' : profileVoiceLive ? 'العضو في فويس دلوقتي' : 'العضو مش في فويس حاليًا';
+  const profileVoiceSection = `<section class="staff-profile-section profile-voice-time-section" data-profile-voice-time-for="${escapeHtml(member.id)}"><div class="section-title-row"><div><span class="tiny-label">VOICE ACTIVITY / DAILY</span><h2>وقت الفويس اليوم</h2><p class="muted small-copy">إجمالي الوقت في جميع قنوات الصوت بسيرفر الإدارة · يتحدّث لايف</p></div><span class="page-heading-badge voice-time-live-badge"><span class="status-dot"></span> LIVE · HH:MM:SS</span></div><div class="pf-kpis profile-voice-time-grid"><article class="pf-kpi accent profile-voice-time-card"><small>إجمالي وقت الفويس اليوم</small><strong><span class="voice-time-clock" data-profile-voice-clock="1" ${profileVoiceAvailable ? `data-voice-base-ms="${profileVoiceDuration}" data-voice-fetched-at="${Number(profileVoiceRecord.fetchedAt) || Date.now()}" data-voice-live="${profileVoiceLive ? 'true' : 'false'}"` : ''}>${profileVoiceAvailable ? formatVoiceDuration(profileVoiceDuration) : '—'}</span></strong><span data-profile-voice-status>${profileVoiceStatus}</span></article><article class="pf-kpi profile-voice-state-card"><small>حالة الفويس الحالية</small><strong data-profile-voice-state>${!profileVoiceAvailable ? 'غير متاح' : profileVoiceLive ? 'في مكالمة' : 'مش في مكالمة'}</strong><span>${profileVoiceAvailable && profileVoiceRecord.dailyDate ? `التاريخ: ${escapeHtml(profileVoiceRecord.dailyDate)} بتوقيت القاهرة` : 'يتطلب اتصال البوت وقاعدة البيانات'}</span></article></div></section>`;
 
   const maxDay = Math.max(1, ...(mp.activity || []).map((item) => item.count));
   const activityBars = (mp.activity || []).map((item) => {
@@ -1713,6 +1853,8 @@ function renderStaffProfile(member, response = {}, target = '#staff-profile-cont
         <div><small>أعلى رتبة</small><b>${escapeHtml(member.roleName || 'عضو الاستاف')}</b></div>
       </div>
     </div>
+
+    ${profileVoiceSection}
 
     <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">MESSAGES</span><h2>الرسائل</h2></div><small class="muted">رسائل الروم المحسوبة فقط · التاريخ ${escapeHtml(state.dailyMessageStats.dailyDate || 'اليوم')}</small></div>
       <div class="pf-kpis">

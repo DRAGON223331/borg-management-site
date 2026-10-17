@@ -319,6 +319,10 @@
           </div>
           <div id="monitor-alerts" class="monitor-alerts" aria-live="polite"></div>
           <div id="monitor-kpis" class="monitor-kpis"><div class="loading-state">جاري جمع بيانات المراقبة...</div></div>
+          <section class="monitor-section monitor-voice-time-section" id="monitor-voice-time-section">
+            <div class="section-title-row"><div><span class="tiny-label">VOICE ACTIVITY / DAILY</span><h2>عداد الفويس اليوم — مباشر</h2><p class="muted small-copy">وقت كل عضو في جميع قنوات الصوت بسيرفر الإدارة، بصيغة ساعات:دقائق:ثواني. يتحدث كل ثانية، والبيانات تتحدث من البوت كل 15 ثانية.</p></div><span class="page-heading-badge voice-time-live-badge"><span class="status-dot"></span> LIVE · HH:MM:SS</span></div>
+            <div id="monitor-voice-time-list" class="monitor-top-active"><div class="loading-state">جاري تحميل عداد الفويس...</div></div>
+          </section>
           <section class="monitor-section">
             <div class="section-title-row"><div><span class="tiny-label">SYSTEM HEALTH</span><h2>صحة الخدمات والاتصال</h2><p class="muted small-copy">حالة الخدمات مبنية على آخر فحص فعلي، مش على شكل الواجهة فقط.</p></div></div>
             <div id="monitor-services" class="monitor-services"><div class="loading-state">جاري فحص الخدمات...</div></div>
@@ -328,10 +332,7 @@
             <div id="monitor-presence-stats" class="monitor-presence-stats"><div class="loading-state">جاري تجميع الحالات...</div></div>
             <div id="monitor-top-active" class="monitor-top-active"><div class="loading-state">جاري تحميل النشاط...</div></div>
           </section>
-          <section class="monitor-section">
-            <div class="section-title-row"><div><span class="tiny-label">VOICE ACTIVITY / DAILY</span><h2>وقت الفويس اليوم — مباشر</h2><p class="muted small-copy">الوقت متجمع من كل قنوات الصوت في سيرفر الإدارة، ويتعرض بالساعات والدقايق والثواني. العدّاد بيتحرك كل ثانية.</p></div><span class="page-heading-badge"><span class="status-dot"></span> HH:MM:SS · Live</span></div>
-            <div id="monitor-voice-time-list" class="monitor-top-active"><div class="loading-state">جاري تحميل وقت الفويس...</div></div>
-          </section>
+
           <section class="monitor-section">
             <div class="section-title-row"><div><span class="tiny-label">STAFF DIRECTORY / MAIN SERVER ROLES</span><h2>تفاصيل كل عضو</h2><p class="muted small-copy">الرتبة المعروضة من السيرفر الأساسي، وحالة Discord منفصلة عن كون العضو فاتح الموقع.</p></div><span id="monitor-member-count" class="count-pill">—</span></div>
             <div class="monitor-table-tools"><input id="monitor-member-search" type="search" placeholder="ابحث بالاسم أو Discord ID أو الرتبة..." aria-label="بحث في أعضاء المراقبة"><select id="monitor-member-filter" aria-label="فلترة الأعضاء"><option value="all">كل الأعضاء</option><option value="admins">الإدارة فقط</option><option value="discord-online">متصلون على Discord</option><option value="discord-offline-active">Offline/مخفي مع نشاط حديث</option><option value="site-online">نشطون على الموقع</option><option value="not-main">مش في السيرفر الأساسي</option><option value="no-role">بدون رتبة أساسية</option></select><select id="monitor-role-filter" aria-label="فلترة حسب الرتبة الأساسية"><option value="">كل الرتب الأساسية</option></select><button id="monitor-member-search-clear" type="button" class="text-button">مسح الفلاتر</button></div>

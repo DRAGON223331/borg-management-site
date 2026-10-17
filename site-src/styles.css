@@ -1680,3 +1680,10 @@ html[data-motion="calm"] .rt-line, html[data-motion="calm"] .rt-line-avg, html[d
 .voice-live-tag { color:#4ade80 !important; direction:rtl !important; text-align:right !important; font-size:8px !important; }
 .voice-time-unavailable { color:var(--muted); }
 .voice-time-rank-row > strong { min-width:78px; font-size:11px; }
+
+/* Live daily voice counter inside each staff member's profile */
+.profile-voice-time-section { border: 1px solid color-mix(in srgb, var(--accent-pale) 24%, var(--border)); border-radius: 18px; padding: 16px; background: rgba(var(--neon-a-rgb),.035); }
+.profile-voice-time-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+.profile-voice-time-card strong { font: 800 clamp(25px,3vw,36px)/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; direction: ltr; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+.profile-voice-state-card strong { font-size: 21px; }
+@media (max-width: 620px) { .profile-voice-time-section { padding: 12px; } .profile-voice-time-grid { grid-template-columns: 1fr; } .profile-voice-time-card strong { font-size: 28px; } }

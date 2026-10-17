@@ -2658,6 +2658,59 @@ async function handleApi(parts, req, res) {
     const dailyStats = room === 'staff' ? await getDailyStaffMessageStats(sql) : {};
     return sendJson(res, 200, { messages: rows.map(mapMessage), deletionCursor: Number(cursorRows[0]?.cursor) || 0, ...dailyStats });
   }
+  if (route === 'voice-time' && parts.length === 2 && req.method === 'GET') {
+    if (!user) return sendError(res, 401, 'سجّل الدخول الأول.');
+    const targetUserId = String(parts[1] || '');
+    if (!/^\d{15,22}$/.test(targetUserId)) return sendError(res, 400, 'Discord ID غير صالح.');
+    if (!canManage(user) && String(user.id) !== targetUserId) {
+      return sendError(res, 403, 'تقدر تشوف وقت الفويس الخاص بحسابك فقط.');
+    }
+    if (rateLimited(req, res, user, 'voice-time-member-get', 30)) return;
+    await ensureSchema();
+    const sql = await getSql();
+    await ensureVoiceTimeApiSchema(sql);
+    const [metaRows, rows, dayRows] = await Promise.all([
+      sql`SELECT last_seen AS "lastSeen" FROM discord_voice_time_meta WHERE guild_id = ${STAFF_GUILD_ID} LIMIT 1`,
+      sql`WITH bounds AS (
+        SELECT
+          date_trunc('day', NOW() AT TIME ZONE 'Africa/Cairo') AT TIME ZONE 'Africa/Cairo' AS day_start,
+          (date_trunc('day', NOW() AT TIME ZONE 'Africa/Cairo') + INTERVAL '1 day') AT TIME ZONE 'Africa/Cairo' AS day_end
+      )
+      SELECT s.user_id AS "userId",
+        (ARRAY_AGG(s.username ORDER BY s.joined_at DESC))[1] AS username,
+        SUM(GREATEST(0, EXTRACT(EPOCH FROM (
+          LEAST(COALESCE(s.ended_at, NOW()), bounds.day_end, NOW()) - GREATEST(s.joined_at, bounds.day_start)
+        )) * 1000))::bigint AS "durationMs",
+        BOOL_OR(s.ended_at IS NULL) AS "inVoice",
+        MAX(s.channel_id) FILTER (WHERE s.ended_at IS NULL) AS "channelId"
+      FROM discord_voice_sessions s CROSS JOIN bounds
+      WHERE s.guild_id = ${STAFF_GUILD_ID}
+        AND s.user_id = ${targetUserId}
+        AND s.joined_at < bounds.day_end
+        AND COALESCE(s.ended_at, NOW()) > bounds.day_start
+      GROUP BY s.user_id`,
+      sql`SELECT to_char((NOW() AT TIME ZONE 'Africa/Cairo')::date, 'YYYY-MM-DD') AS day`,
+    ]);
+    const lastSeen = metaRows[0]?.lastSeen ? new Date(metaRows[0].lastSeen).getTime() : 0;
+    const ageSeconds = lastSeen && Number.isFinite(lastSeen) ? Math.max(0, Math.floor((Date.now() - lastSeen) / 1000)) : null;
+    const available = Boolean(lastSeen && Number.isFinite(lastSeen) && ageSeconds <= 180);
+    const row = rows[0] || {};
+    return sendJson(res, 200, {
+      available,
+      reason: available ? null : (lastSeen ? 'stale-heartbeat' : 'no-heartbeat'),
+      lastSeenAt: lastSeen && Number.isFinite(lastSeen) ? new Date(lastSeen).toISOString() : null,
+      ageSeconds,
+      dailyDate: dayRows[0]?.day || null,
+      generatedAt: new Date().toISOString(),
+      member: {
+        userId: targetUserId,
+        username: String(row.username || targetUserId),
+        durationMs: Math.max(0, Number(row.durationMs) || 0),
+        inVoice: Boolean(row.inVoice),
+        channelId: row.channelId ? String(row.channelId) : null,
+      },
+    });
+  }
   if (route === 'voice-time' && parts.length === 1 && req.method === 'GET') {
     if (!user) return sendError(res, 401, 'سجّل الدخول الأول.');
     if (!canManage(user)) return sendError(res, 403, 'إحصائيات وقت الفويس متاحة لمسؤولي الإدارة فقط.');
