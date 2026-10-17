@@ -8,7 +8,9 @@ const { buildSubmissionNotifications, mergeSubmissionDecisionEmbed } = require('
 const { loadSubmissionEvidence, appendEvidenceLinks } = require('../lib/submission-evidence.js');
 const { sendMissingTasksReport } = require('../lib/missing-tasks-report.js');
 const { reconcileDeletedTaskMessages, deactivateTasksForDeletedMessage } = require('../lib/task-message-sync.js');
-const { isWebsiteNotificationMessage } = require('../lib/website-dm-notifications.js');
+const { isWebsiteNotificationMessage, isStaffChatNotificationMessage, formatClearNotificationsSummary } = require('../lib/website-dm-notifications.js');
+const CLEAR_STAFF_CHAT_COMMANDS = ['clear-staff-chat-notifications', 'مسح-تنبيهات-شات-الاستاف'];
+const CLEAR_ALL_NOTIFICATION_COMMANDS = ['clear-site-notifications', 'مسح-تنبيهات-الموقع', 'clear-bot-dms', 'مسح-رسائل-الخاص'];
 
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DB_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || process.env.DATABASE_URL_UNPOOLED || process.env.POSTGRES_PRISMA_URL;
@@ -356,19 +358,21 @@ async function runTaskMessageSync({ reportToLog = true } = {}) {
 }
 
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (interaction.isChatInputCommand?.() && ['clear-site-notifications', 'مسح-تنبيهات-الموقع', 'clear-bot-dms', 'مسح-رسائل-الخاص'].includes(String(interaction.commandName || ''))) {
+  if (interaction.isChatInputCommand?.() && [...CLEAR_ALL_NOTIFICATION_COMMANDS, ...CLEAR_STAFF_CHAT_COMMANDS].includes(String(interaction.commandName || ''))) {
+    const staffChatOnly = CLEAR_STAFF_CHAT_COMMANDS.includes(String(interaction.commandName || ''));
+    const matchesNotification = staffChatOnly ? isStaffChatNotificationMessage : isWebsiteNotificationMessage;
     try {
       if (!(await isReviewManagerAnywhere(interaction))) {
-        return interaction.reply({ content: 'أمر مسح تنبيهات الموقع متاح لمسؤولي الإدارة فقط.', ephemeral: true });
+        return interaction.reply({ content: staffChatOnly ? 'أمر مسح تنبيهات شات الاستاف متاح لمسؤولي الإدارة فقط.' : 'أمر مسح تنبيهات الموقع متاح لمسؤولي الإدارة فقط.', ephemeral: true });
       }
       const confirmOption = interaction.options?.data?.find((option) => ['confirm', 'تأكيد'].includes(option.name));
       if (confirmOption?.value !== true) {
-        return interaction.reply({ content: 'لم يتم حذف أي رسالة. شغّل الأمر مرة أخرى مع تأكيد حذف تنبيهات الموقع فقط.', ephemeral: true });
+        return interaction.reply({ content: staffChatOnly ? 'لم يتم حذف أي رسالة. شغّل الأمر مرة أخرى مع تأكيد حذف تنبيهات شات الاستاف فقط.' : 'لم يتم حذف أي رسالة. شغّل الأمر مرة أخرى مع تأكيد حذف تنبيهات الموقع فقط.', ephemeral: true });
       }
       await interaction.deferReply({ ephemeral: true });
       const stats = { recipients: 0, channelsScanned: 0, messagesDeleted: 0, messageErrors: 0, recipientErrors: 0, pagesScanned: 0 };
       try {
-        const knownRecipients = await sql`
+        const knownRecipients = staffChatOnly ? [] : await sql`
           SELECT DISTINCT user_id FROM (
             SELECT user_id FROM submissions WHERE user_id IS NOT NULL AND user_id <> ''
             UNION SELECT user_id FROM leave_requests WHERE user_id IS NOT NULL AND user_id <> ''
@@ -397,7 +401,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               stats.pagesScanned += 1;
               const pageItems = [...page.values()];
               for (const message of pageItems) {
-                if (String(message.author?.id || '') !== botId || !isWebsiteNotificationMessage(message)) continue;
+                if (String(message.author?.id || '') !== botId || !matchesNotification(message)) continue;
                 try {
                   await message.delete();
                   stats.messagesDeleted += 1;
@@ -415,7 +419,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             console.warn(`[clear bot DMs] recipient ${userId}:`, clean(error?.message || error, 160));
           }
         }
-        return interaction.editReply(`✅ انتهى حذف تنبيهات الموقع من الخاص.\nالمستخدمون المحتمل وصول تنبيهات إليهم: **${stats.recipients}**\nمحادثات الخاص التي تم فحصها: **${stats.channelsScanned}**\nتنبيهات الموقع المحذوفة: **${stats.messagesDeleted}**\nأخطاء حذف التنبيهات: **${stats.messageErrors}**\nمحادثات تعذر الوصول إليها: **${stats.recipientErrors}**\nتم تجاهل رسائل البوت الأخرى ولم يتم حذفها.`);
+        return interaction.editReply(formatClearNotificationsSummary(stats, staffChatOnly));
       } catch (error) {
         console.error('[clear bot DMs command]', error.stack || error.message || error);
         return interaction.editReply(`تعذر إكمال مسح رسائل الخاص: ${clean(error?.message || error, 160)}`);

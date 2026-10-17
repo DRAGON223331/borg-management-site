@@ -19,7 +19,7 @@ const { buildSubmissionNotifications, mergeSubmissionDecisionEmbed } = require('
 const { loadSubmissionEvidence, appendEvidenceLinks } = require('../lib/submission-evidence.js');
 const { sendMissingTasksReport } = require('../lib/missing-tasks-report.js');
 const { reconcileDeletedTaskMessages } = require('../lib/task-message-sync.js');
-const { isWebsiteNotificationMessage } = require('../lib/website-dm-notifications.js');
+const { isWebsiteNotificationMessage, isStaffChatNotificationMessage, formatClearNotificationsSummary } = require('../lib/website-dm-notifications.js');
 
 function send(res, payload, status = 200) {
   res.statusCode = status;
@@ -301,13 +301,16 @@ async function discordApiWithRetry(route, options = {}, maxAttempts = 8) {
   }
 }
 
-async function handleClearBotDmsCommand(interaction, res) {
+async function handleClearBotDmsCommand(interaction, res, scope = 'all') {
+  // scope 'staff-chat': delete only the staff-chat alert DMs. scope 'all': every known website alert (original behaviour).
+  const staffChatOnly = scope === 'staff-chat';
+  const matchesNotification = staffChatOnly ? isStaffChatNotificationMessage : isWebsiteNotificationMessage;
   if (!(await isCsvAuthorized(interaction))) {
-    return send(res, { type: 4, data: { content: 'أمر مسح تنبيهات الموقع متاح لمسؤولي الإدارة فقط.', flags: 64 } });
+    return send(res, { type: 4, data: { content: staffChatOnly ? 'أمر مسح تنبيهات شات الاستاف متاح لمسؤولي الإدارة فقط.' : 'أمر مسح تنبيهات الموقع متاح لمسؤولي الإدارة فقط.', flags: 64 } });
   }
   const confirmed = interaction.data?.options?.find((option) => ['confirm', 'تأكيد'].includes(option.name))?.value === true;
   if (!confirmed) {
-    return send(res, { type: 4, data: { content: 'لم يتم حذف أي رسالة. شغّل الأمر مرة أخرى مع تأكيد حذف تنبيهات الموقع فقط.', flags: 64 } });
+    return send(res, { type: 4, data: { content: staffChatOnly ? 'لم يتم حذف أي رسالة. شغّل الأمر مرة أخرى مع تأكيد حذف تنبيهات شات الاستاف فقط.' : 'لم يتم حذف أي رسالة. شغّل الأمر مرة أخرى مع تأكيد حذف تنبيهات الموقع فقط.', flags: 64 } });
   }
 
   // Acknowledge immediately; the scan can take time when many messages exist.
@@ -328,16 +331,18 @@ async function handleClearBotDmsCommand(interaction, res) {
       const recipientIds = new Set();
       // Search only users who may have received website alerts, plus configured site-alert recipients.
       // Actual deletion is restricted further below to known website-notification signatures.
-      const knownRecipients = await sql`
-        SELECT DISTINCT user_id FROM (
-          SELECT user_id FROM submissions WHERE user_id IS NOT NULL AND user_id <> ''
-          UNION SELECT user_id FROM leave_requests WHERE user_id IS NOT NULL AND user_id <> ''
-          UNION SELECT user_id FROM staff_requests WHERE user_id IS NOT NULL AND user_id <> ''
-          UNION SELECT user_id FROM staff_points WHERE user_id IS NOT NULL AND user_id <> ''
-          UNION SELECT user_id FROM site_presence WHERE last_seen > NOW() - INTERVAL '90 days'
-        ) AS website_notification_recipients
-      `;
-      for (const row of knownRecipients) if (/^\d{15,22}$/.test(String(row.user_id || ''))) recipientIds.add(String(row.user_id));
+      if (!staffChatOnly) {
+        const knownRecipients = await sql`
+          SELECT DISTINCT user_id FROM (
+            SELECT user_id FROM submissions WHERE user_id IS NOT NULL AND user_id <> ''
+            UNION SELECT user_id FROM leave_requests WHERE user_id IS NOT NULL AND user_id <> ''
+            UNION SELECT user_id FROM staff_requests WHERE user_id IS NOT NULL AND user_id <> ''
+            UNION SELECT user_id FROM staff_points WHERE user_id IS NOT NULL AND user_id <> ''
+            UNION SELECT user_id FROM site_presence WHERE last_seen > NOW() - INTERVAL '90 days'
+          ) AS website_notification_recipients
+        `;
+        for (const row of knownRecipients) if (/^\d{15,22}$/.test(String(row.user_id || ''))) recipientIds.add(String(row.user_id));
+      }
       for (const id of (process.env.MANAGER_IDS || '').split(',').map((value) => value.trim())) {
         if (/^\d{15,22}$/.test(id)) recipientIds.add(id);
       }
@@ -361,7 +366,7 @@ async function handleClearBotDmsCommand(interaction, res) {
             if (!Array.isArray(page) || page.length === 0) break;
             stats.pagesScanned += 1;
             for (const message of page) {
-              if (String(message?.author?.id || '') !== String(bot.id) || !isWebsiteNotificationMessage(message)) continue;
+              if (String(message?.author?.id || '') !== String(bot.id) || !matchesNotification(message)) continue;
               try {
                 await discordApiWithRetry(`/channels/${dm.id}/messages/${message.id}`, { method: 'DELETE' });
                 stats.messagesDeleted += 1;
@@ -380,7 +385,7 @@ async function handleClearBotDmsCommand(interaction, res) {
           console.warn(`[clear bot DMs] recipient ${userId}:`, cleanText(error?.message || error, 160));
         }
       }
-      const content = `✅ انتهى حذف تنبيهات الموقع من الخاص.\nالمستخدمون المحتمل وصول تنبيهات إليهم: **${stats.recipients}**\nمحادثات الخاص التي تم فحصها: **${stats.channelsScanned}**\nتنبيهات الموقع المحذوفة: **${stats.messagesDeleted}**\nأخطاء حذف التنبيهات: **${stats.messageErrors}**\nمحادثات تعذر الوصول إليها: **${stats.recipientErrors}**\nتم تجاهل رسائل البوت الأخرى ولم يتم حذفها.`;
+      const content = formatClearNotificationsSummary(stats, staffChatOnly);
       await updateReply(content);
     } catch (error) {
       console.error('[clear bot DMs command]', cleanText(error?.message || error, 240));
@@ -394,6 +399,7 @@ async function handleClearBotDmsCommand(interaction, res) {
 async function handleCommand(interaction, res) {
   const name = String(interaction.data?.name || '');
   if (name === 'csv') return handleCsvCommand(interaction, res);
+  if (['clear-staff-chat-notifications', 'مسح-تنبيهات-شات-الاستاف'].includes(name)) return handleClearBotDmsCommand(interaction, res, 'staff-chat');
   if (['clear-site-notifications', 'مسح-تنبيهات-الموقع', 'clear-bot-dms', 'مسح-رسائل-الخاص'].includes(name)) return handleClearBotDmsCommand(interaction, res);
   if (name === 'sync-tasks' || name === 'مزامنة-المهمات') return handleTaskSyncCommand(interaction, res);
   if (name === 'task-report' || name === 'تقرير-المهمات') return handleTaskReportCommand(interaction, res);

@@ -528,6 +528,18 @@ const SLASH_COMMANDS = [
     }],
   },
   {
+    name: 'clear-staff-chat-notifications', type: 1, dm_permission: false,
+    description: 'Delete staff chat notification messages from users’ DMs only',
+    description_localizations: { ar: 'حذف تنبيهات شات الاستاف فقط من الخاص دون بقية تنبيهات الموقع' },
+    name_localizations: { ar: 'مسح-تنبيهات-شات-الاستاف' },
+    options: [{
+      type: 5, name: 'confirm', required: true,
+      description: 'Confirm deleting staff chat notifications only',
+      description_localizations: { ar: 'أكّد حذف تنبيهات شات الاستاف فقط' },
+      name_localizations: { ar: 'تأكيد' },
+    }],
+  },
+  {
     name: 'csv', type: 1, dm_permission: false,
     description: 'Export staff data as a CSV file (managers only)',
     description_localizations: { ar: 'تصدير بيانات الاستاف كملف CSV (للمسؤولين فقط)' },

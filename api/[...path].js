@@ -530,6 +530,18 @@ const SLASH_COMMANDS = [
       name_localizations: { ar: 'تأكيد' },
     }],
   },
+  {
+    name: 'clear-staff-chat-notifications', type: 1, dm_permission: false,
+    description: 'Delete staff chat notification messages from users’ DMs only',
+    description_localizations: { ar: 'حذف تنبيهات شات الاستاف فقط من الخاص دون بقية تنبيهات الموقع' },
+    name_localizations: { ar: 'مسح-تنبيهات-شات-الاستاف' },
+    options: [{
+      type: 5, name: 'confirm', required: true,
+      description: 'Confirm deleting staff chat notifications only',
+      description_localizations: { ar: 'أكّد حذف تنبيهات شات الاستاف فقط' },
+      name_localizations: { ar: 'تأكيد' },
+    }],
+  },
   { name: 'sync-tasks', type: 1, dm_permission: false, description: 'Remove website tasks whose Discord source messages were deleted', description_localizations: { ar: 'مزامنة المهمات وحذف المهمات التي حُذفت رسائلها من ديسكورد' }, name_localizations: { ar: 'مزامنة-المهمات' } },
   {
     name: 'csv', type: 1, dm_permission: false,
