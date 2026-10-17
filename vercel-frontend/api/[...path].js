@@ -682,6 +682,7 @@ async function discordApi(route, options = {}) {
     const message = payload?.message || `Discord API returned HTTP ${response.status}`;
     const error = new Error(cleanText(message, 240));
     error.status = response.status;
+    error.discordCode = Number(payload?.code || 0);
     throw error;
   }
   return payload;
@@ -693,8 +694,10 @@ function isSiteOwner(userOrId) {
   return SITE_OWNER_IDS.has(id);
 }
 
-// فحص عضوية سيرفر الإدارة بشكل مستقل عن صلاحيات الأدمن أو صلاحية الدخول الممنوحة يدويًا.
-// الكاش قصير جدًا، وأخطاء Discord لا تستخدم عضوية قديمة كبديل.
+// العضوية مستقلة عن صلاحيات الأدمن أو صلاحية الدخول الممنوحة يدويًا.
+// ختم التحقق الموقّع يخفّف طلبات Discord أثناء تحميل الصفحة، ثم يعاد التحقق كل 10 ثوانٍ.
+// لا نمسح الجلسة عند أخطاء الشبكة/Rate Limit؛ المسح يكون فقط عند تأكيد أن العضو غير موجود.
+const STAFF_MEMBERSHIP_RECHECK_MS = 10_000;
 const staffGuildMembershipCache = new Map();
 async function isCurrentStaffGuildMember(userId) {
   const id = String(userId || '');
@@ -708,7 +711,8 @@ async function isCurrentStaffGuildMember(userId) {
   entry.inflight = discordApi(`/guilds/${STAFF_GUILD_ID}/members/${id}`)
     .then(() => true)
     .catch((error) => {
-      if (Number(error?.status) === 404) return false;
+      // Discord code 10007 = Unknown Member. Do not treat Unknown Guild or other 404s as a kick.
+      if (Number(error?.discordCode) === 10007 || /unknown member/i.test(String(error?.message || ''))) return false;
       throw error;
     });
   staffGuildMembershipCache.set(id, entry);
@@ -730,13 +734,16 @@ async function isCurrentStaffGuildMember(userId) {
 
 async function requireStaffGuildMemberAccess(user, res) {
   if (!user) return true;
+  const lastVerifiedAt = Number(user.staffGuildVerifiedAt || 0);
+  if (lastVerifiedAt > 0 && Date.now() - lastVerifiedAt < STAFF_MEMBERSHIP_RECHECK_MS) return true;
+
   let isMember = false;
   try {
     isMember = await isCurrentStaffGuildMember(user.id);
   } catch (error) {
     console.warn('[staff guild membership check]', cleanText(error?.message || error, 160));
-    res.setHeader('Set-Cookie', clearCookie(COOKIE_NAME));
-    sendError(res, 401, 'تعذر التأكد من عضويتك في سيرفر الإدارة، فتم إنهاء الجلسة لحماية الموقع. جرّب تسجيل الدخول مرة أخرى، ولو استمرت المشكلة راجع إعدادات البوت.');
+    // Keep the signed-in session intact for temporary Discord failures; deny this API request, not the account.
+    sendError(res, 503, 'تعذر التحقق من عضوية سيرفر الإدارة مؤقتًا بسبب Discord أو ضغط الطلبات. لم يتم تسجيل خروجك؛ جرّب تحديث الصفحة بعد لحظات.');
     return false;
   }
   if (!isMember) {
@@ -744,6 +751,9 @@ async function requireStaffGuildMemberAccess(user, res) {
     sendError(res, 401, 'حسابك مش موجود حاليًا في سيرفر الإدارة، وبالتالي تم سحب صلاحية دخول الموقع. لازم تكون عضوًا في السيرفر لتسجيل الدخول.');
     return false;
   }
+
+  user.staffGuildVerifiedAt = Date.now();
+  res.setHeader('Set-Cookie', createSessionCookie(user));
   return true;
 }
 async function getSiteManagerAction(userId) {
@@ -1217,7 +1227,9 @@ async function handleAuth(parts, req, res) {
       const deniedByOwner = !isOwner && accessAction === 'deny';
       const isManager = !isOwner && !deniedByOwner && accessAction === 'grant';
       const isAdmin = !deniedByOwner && (isOwner || Boolean(mainGuild?.owner) || hasDiscordAdministrator);
-      const isStaffGuildMember = Boolean(staffMemberData);
+      // Discord OAuth guild list is the user's own live membership proof at sign-in;
+      // the bot lookup is an additional confirmation when available.
+      const isStaffGuildMember = Boolean(staffGuild || staffMemberData);
       if (!isStaffGuildMember) {
         res.setHeader('Set-Cookie', clearCookie(OAUTH_COOKIE));
         return sendText(res, 403, `تسجيل الدخول للموقع متاح لأعضاء سيرفر الإدارة فقط. حسابك مش موجود في سيرفر الإدارة (${STAFF_GUILD_ID})؛ ادخل السيرفر ثم جرّب تاني.`);
@@ -1233,6 +1245,7 @@ async function handleAuth(parts, req, res) {
         isManager,
         canManage: Boolean(isOwner || isManager || isAdmin),
         isStaffGuildMember,
+        staffGuildVerifiedAt: Date.now(),
       };
       res.setHeader('Set-Cookie', [createSessionCookie(user), clearCookie(OAUTH_COOKIE)]);
       res.statusCode = 302;
@@ -1484,7 +1497,8 @@ async function handleApi(parts, req, res) {
   }
   if (route === 'me' && req.method === 'GET') {
     if (!user) return sendJson(res, 200, { authenticated: false });
-    return sendJson(res, 200, { authenticated: true, user: { ...user, canManage: canManage(user) } });
+    const { staffGuildVerifiedAt, ...publicUser } = user;
+    return sendJson(res, 200, { authenticated: true, user: { ...publicUser, canManage: canManage(user) } });
   }
   if (route === 'cron' && parts[1] === 'leave-sync' && req.method === 'GET') {
     const secret = process.env.CRON_SECRET || '';
