@@ -701,7 +701,9 @@ async function discordApi(route, options = {}) {
   }
   if (!response.ok) {
     const message = payload?.message || `Discord API returned HTTP ${response.status}`;
-    throw new Error(cleanText(message, 240));
+    const error = new Error(cleanText(message, 240));
+    error.status = response.status;
+    throw error;
   }
   return payload;
 }
@@ -710,6 +712,60 @@ async function discordApi(route, options = {}) {
 function isSiteOwner(userOrId) {
   const id = typeof userOrId === 'string' ? userOrId : String(userOrId?.id || '');
   return SITE_OWNER_IDS.has(id);
+}
+
+// فحص عضوية سيرفر الإدارة بشكل مستقل عن صلاحيات الأدمن أو صلاحية الدخول الممنوحة يدويًا.
+// الكاش قصير جدًا، وأخطاء Discord لا تستخدم عضوية قديمة كبديل.
+const staffGuildMembershipCache = new Map();
+async function isCurrentStaffGuildMember(userId) {
+  const id = String(userId || '');
+  if (!/^\d{15,22}$/.test(id)) return false;
+  const now = Date.now();
+  const existing = staffGuildMembershipCache.get(id);
+  if (existing && typeof existing.value === 'boolean' && existing.expiresAt > now) return existing.value;
+  if (existing?.inflight) return existing.inflight;
+
+  const entry = { inflight: null };
+  entry.inflight = discordApi(`/guilds/${STAFF_GUILD_ID}/members/${id}`)
+    .then(() => true)
+    .catch((error) => {
+      if (Number(error?.status) === 404) return false;
+      throw error;
+    });
+  staffGuildMembershipCache.set(id, entry);
+  try {
+    const isMember = await entry.inflight;
+    staffGuildMembershipCache.set(id, { value: isMember, expiresAt: Date.now() + (isMember ? 5000 : 2000) });
+    if (staffGuildMembershipCache.size > 4000) {
+      const currentTime = Date.now();
+      for (const [key, value] of staffGuildMembershipCache) {
+        if (value.expiresAt && value.expiresAt <= currentTime) staffGuildMembershipCache.delete(key);
+      }
+    }
+    return isMember;
+  } catch (error) {
+    if (staffGuildMembershipCache.get(id) === entry) staffGuildMembershipCache.delete(id);
+    throw error;
+  }
+}
+
+async function requireStaffGuildMemberAccess(user, res) {
+  if (!user) return true;
+  let isMember = false;
+  try {
+    isMember = await isCurrentStaffGuildMember(user.id);
+  } catch (error) {
+    console.warn('[staff guild membership check]', cleanText(error?.message || error, 160));
+    res.setHeader('Set-Cookie', clearCookie(COOKIE_NAME));
+    sendError(res, 401, 'تعذر التأكد من عضويتك في سيرفر الإدارة، فتم إنهاء الجلسة لحماية الموقع. جرّب تسجيل الدخول مرة أخرى، ولو استمرت المشكلة راجع إعدادات البوت.');
+    return false;
+  }
+  if (!isMember) {
+    res.setHeader('Set-Cookie', clearCookie(COOKIE_NAME));
+    sendError(res, 401, 'حسابك مش موجود حاليًا في سيرفر الإدارة، وبالتالي تم سحب صلاحية دخول الموقع. لازم تكون عضوًا في السيرفر لتسجيل الدخول.');
+    return false;
+  }
+  return true;
 }
 async function getSiteManagerAction(userId) {
   const id = String(userId || '');
@@ -1185,9 +1241,10 @@ async function handleAuth(parts, req, res) {
       const deniedByOwner = !isOwner && accessAction === 'deny';
       const isManager = !isOwner && !deniedByOwner && accessAction === 'grant';
       const isAdmin = !deniedByOwner && (isOwner || Boolean(mainGuild?.owner) || hasDiscordAdministrator);
-      if (!staffGuild && !isAdmin && !isManager) {
+      const isStaffGuildMember = Boolean(staffMemberData);
+      if (!isStaffGuildMember) {
         res.setHeader('Set-Cookie', clearCookie(OAUTH_COOKIE));
-        return sendText(res, 403, `الحساب ده مش عضو في سيرفر الاستاف، ومش معاه صلاحية Administrator أو صلاحية مضافة من مالك الموقع. ادخل سيرفر الاستاف (${STAFF_GUILD_ID}) ثم جرّب تاني.`);
+        return sendText(res, 403, `تسجيل الدخول للموقع متاح لأعضاء سيرفر الإدارة فقط. حسابك مش موجود في سيرفر الإدارة (${STAFF_GUILD_ID})؛ ادخل السيرفر ثم جرّب تاني.`);
       }
       const user = {
         id: discordUser.id,
@@ -1199,7 +1256,7 @@ async function handleAuth(parts, req, res) {
         isAdmin,
         isManager,
         canManage: Boolean(isOwner || isManager || isAdmin),
-        isStaffGuildMember: Boolean(staffGuild),
+        isStaffGuildMember,
       };
       res.setHeader('Set-Cookie', [createSessionCookie(user), clearCookie(OAUTH_COOKIE)]);
       res.statusCode = 302;
@@ -1428,6 +1485,7 @@ async function updateDiscordSubmissionReview(sub, status, reviewer, reason = '',
 async function handleApi(parts, req, res) {
   const route = parts[0] || '';
   let user = getSessionUser(req);
+  if (user && !(await requireStaffGuildMemberAccess(user, res))) return;
   if (user) user = await refreshSessionPrivileges(user);
   if (user && !isSiteOwner(user) && await getSiteUserBlock(user.id)) {
     res.setHeader('Set-Cookie', clearCookie(COOKIE_NAME));
@@ -2652,7 +2710,12 @@ module.exports = async function handler(req, res) {
     if (parts[0] === 'auth') return await handleAuth(parts, req, res);
     if (parts[0] === 'api') return await handleApi(parts.slice(1), req, res);
     // Rewrites may route /api/... directly, so normally the first component is the endpoint.
-    if (parts[0] === 'uploads' && parts[1] === 'token') return await handleUploadToken(req, res);
+    if (parts[0] === 'uploads' && parts[1] === 'token') {
+      const uploadUser = getSessionUser(req);
+      if (!uploadUser) return sendError(res, 401, 'سجل دخولك بديسكورد أولًا.');
+      if (!(await requireStaffGuildMemberAccess(uploadUser, res))) return;
+      return await handleUploadToken(req, res);
+    }
     if (parts[0] === 'evidence') return await sendPrivateEvidence(req, res);
     return await handleApi(parts, req, res);
   } catch (error) {
