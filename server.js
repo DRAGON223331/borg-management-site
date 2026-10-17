@@ -206,6 +206,22 @@ db.exec(`
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_site_manager_access_action ON site_manager_access(action, updated_at DESC);
+  CREATE TABLE IF NOT EXISTS site_user_blocks (
+    user_id TEXT PRIMARY KEY,
+    username TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    blocked_by TEXT NOT NULL,
+    blocked_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_site_user_blocks_blocked_at ON site_user_blocks(blocked_at DESC);
+  CREATE TABLE IF NOT EXISTS chat_message_deletions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room TEXT NOT NULL CHECK(room IN ('staff','management')),
+    message_id INTEGER NOT NULL,
+    deleted_by TEXT NOT NULL,
+    deleted_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_chat_message_deletions_room_id ON chat_message_deletions(room, id);
 `);
 db.exec(`
   CREATE TABLE IF NOT EXISTS submission_review_audit (
@@ -390,6 +406,9 @@ async function getSiteManagerAction(userId) {
   const row = db.prepare('SELECT action FROM site_manager_access WHERE user_id = ?').get(String(userId || ''));
   return row?.action || null;
 }
+function getSiteUserBlock(userId) {
+  return db.prepare('SELECT user_id AS userId, username, reason, blocked_by AS blockedBy, blocked_at AS blockedAt FROM site_user_blocks WHERE user_id = ?').get(String(userId || '')) || null;
+}
 async function refreshSessionManagerAccess(sessionUser) {
   if (!sessionUser) return null;
   const userId = String(sessionUser.id || '');
@@ -444,6 +463,10 @@ async function isMainServerManager(userId) {
 async function requireAuth(req, res, next) {
   if (!req.session || !req.session.user) return res.status(401).json({ error: 'سجل دخولك بديسكورد أولًا.' });
   await refreshRequestSessionUser(req);
+  if (!isSiteOwner(req.session.user) && getSiteUserBlock(req.session.user.id)) {
+    req.session.destroy(() => {});
+    return res.status(401).json({ error: 'تم منع هذا الحساب من استخدام الموقع بواسطة الإدارة.' });
+  }
   next();
 }
 function requireManager(req, res, next) {
@@ -981,6 +1004,9 @@ app.get('/auth/callback', authLimiter, async (req, res) => {
     ]);
     const accessAction = getSiteManagerAction(discordUser.id);
     const action = await accessAction;
+    if (!isOwner && getSiteUserBlock(discordUser.id)) {
+      return res.status(403).send('تم منع هذا الحساب من استخدام الموقع بواسطة الإدارة. لو تعتقد أن ده بالخطأ، تواصل مع مالك الموقع.');
+    }
     const deniedByOwner = !isOwner && action === 'deny';
     const isManager = !isOwner && !deniedByOwner && action === 'grant';
     const isAdmin = !deniedByOwner && (isOwner || Boolean(mainGuild?.owner) || hasAdministratorPermission(mainGuild) || Boolean(mainMemberForRoles && (String(mainMemberForRoles.guild?.ownerId || '') === String(discordUser.id) || mainMemberForRoles.permissions.has(PermissionsBitField.Flags.Administrator))));
@@ -1020,6 +1046,10 @@ app.post('/auth/logout', requireAuth, (req, res) => {
 app.get('/api/health', (req, res) => res.json({ ok: true, botReady, botLastError: botReady ? '' : botLastError, databaseReady: Boolean(db), storageReady: fs.existsSync(UPLOAD_DIR) }));
 app.get('/api/me', async (req, res) => {
   if (!req.session.user) return res.json({ authenticated: false });
+  if (!isSiteOwner(req.session.user) && getSiteUserBlock(req.session.user.id)) {
+    req.session.destroy(() => {});
+    return res.status(401).json({ authenticated: false, error: 'تم منع هذا الحساب من استخدام الموقع بواسطة الإدارة.' });
+  }
   await refreshRequestSessionUser(req);
   res.set('Cache-Control', 'no-store');
   res.json({ authenticated: true, user: { ...req.session.user, avatarUrl: profileAvatar(req.session.user), canManage: canManage(req.session.user) } });
@@ -1051,8 +1081,16 @@ app.get('/api/site-managers', requireAuth, async (req, res) => {
         updatedBy: override?.updated_by || null, updatedAt: override?.updated_at || null,
       };
     }).filter(Boolean).sort((a, b) => Number(b.isOwner) - Number(a.isOwner) || Number(b.isSiteManager) - Number(a.isSiteManager) || a.username.localeCompare(b.username, 'ar'));
+    const blockedUsers = db.prepare('SELECT user_id AS id, username, reason, blocked_by AS blockedBy, blocked_at AS blockedAt FROM site_user_blocks ORDER BY blocked_at DESC').all().map((row) => {
+      const member = members.get(String(row.id));
+      return {
+        id: String(row.id), username: member?.displayName || member?.user?.globalName || member?.user?.username || row.username || String(row.id),
+        avatarUrl: member?.displayAvatarURL({ extension: 'png', size: 64 }) || (member?.user ? avatarUrl(member.user) : avatarFallback(row.id)),
+        reason: row.reason || '', blockedBy: row.blockedBy, blockedAt: row.blockedAt,
+      };
+    });
     res.set('Cache-Control', 'no-store');
-    res.json({ owners: [...SITE_OWNER_IDS], managers });
+    res.json({ owners: [...SITE_OWNER_IDS], managers, blockedUsers });
   } catch (error) {
     console.error('[site managers list]', error.message);
     res.status(503).json({ error: `تعذر تحميل المسؤولين: ${cleanText(error.message, 180)}` });
@@ -1064,7 +1102,27 @@ app.post('/api/site-managers', requireAuth, async (req, res) => {
   const action = cleanText(req.body?.action, 12);
   if (!/^\d{15,22}$/.test(targetId)) return res.status(400).json({ error: 'Discord ID غير صالح.' });
   if (SITE_OWNER_IDS.has(targetId)) return res.status(400).json({ error: 'لا يمكن إزالة أو تعديل مالكي الموقع الأساسيين.' });
-  if (!['grant', 'deny', 'auto'].includes(action)) return res.status(400).json({ error: 'الإجراء غير صالح.' });
+  if (!['grant', 'deny', 'auto', 'block', 'unblock'].includes(action)) return res.status(400).json({ error: 'الإجراء غير صالح.' });
+  if (action === 'block') {
+    let username = targetId;
+    try {
+      const guild = await client.guilds.fetch(MAIN_GUILD_ID);
+      const member = await guild.members.fetch(targetId);
+      username = cleanText(member.displayName || member.user.globalName || member.user.username || targetId, 100);
+    } catch {
+      const prior = db.prepare('SELECT username FROM site_presence WHERE user_id = ? UNION ALL SELECT username FROM chat_messages WHERE user_id = ? LIMIT 1').get(targetId, targetId);
+      username = cleanText(prior?.username || targetId, 100);
+    }
+    const reason = cleanText(req.body?.reason || '', 300);
+    db.prepare(`INSERT INTO site_user_blocks(user_id, username, reason, blocked_by, blocked_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, reason=excluded.reason, blocked_by=excluded.blocked_by, blocked_at=excluded.blocked_at`).run(targetId, username, reason, String(req.session.user.id), nowIso());
+    liveMainGuildAccessCache.delete(targetId);
+    return res.json({ ok: true, userId: targetId, action });
+  }
+  if (action === 'unblock') {
+    db.prepare('DELETE FROM site_user_blocks WHERE user_id = ?').run(targetId);
+    liveMainGuildAccessCache.delete(targetId);
+    return res.json({ ok: true, userId: targetId, action });
+  }
   let username = targetId;
   if (action === 'grant') {
     try {
@@ -1604,9 +1662,20 @@ app.get('/api/chat/:room', requireAuth, (req, res) => {
   const room = req.params.room;
   if (!['staff', 'management'].includes(room)) return res.status(404).json({ error: 'غرفة الشات مش موجودة.' });
   if (!canReadRoom(req.session.user, room)) return res.status(403).json({ error: 'الشات ده مخصص للمسؤولين.' });
+  const mapMessage = (row) => ({ id: Number(row.id), room: row.room, userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, content: row.content, createdAt: row.created_at });
+  const afterRaw = String(req.query.after || '');
+  const deletionAfterRaw = String(req.query.deletionsAfter || '0');
+  if (/^\d{1,18}$/.test(afterRaw)) {
+    const after = Number(afterRaw);
+    const deletionAfter = /^\d{1,18}$/.test(deletionAfterRaw) ? Number(deletionAfterRaw) : 0;
+    const fresh = db.prepare('SELECT * FROM chat_messages WHERE room = ? AND id > ? ORDER BY id ASC LIMIT 100').all(room, after);
+    const deletions = db.prepare('SELECT id, message_id AS messageId FROM chat_message_deletions WHERE room = ? AND id > ? ORDER BY id ASC LIMIT 100').all(room, deletionAfter);
+    return res.json({ messages: fresh.map(mapMessage), deletedMessageIds: deletions.map((row) => Number(row.messageId)), deletionCursor: deletions.length ? Number(deletions[deletions.length - 1].id) : deletionAfter, incremental: true });
+  }
   const rows = db.prepare('SELECT * FROM (SELECT * FROM chat_messages WHERE room = ? ORDER BY id DESC LIMIT 100) ORDER BY id ASC').all(room);
+  const cursorRow = db.prepare('SELECT COALESCE(MAX(id), 0) AS cursor FROM chat_message_deletions WHERE room = ?').get(room);
   const dailyStats = room === 'staff' ? getDailyStaffMessageStats() : {};
-  res.json({ messages: rows.map((row) => ({ id: row.id, room: row.room, userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, content: row.content, createdAt: row.created_at })), ...dailyStats });
+  res.json({ messages: rows.map(mapMessage), deletionCursor: Number(cursorRow?.cursor) || 0, ...dailyStats });
 });
 
 app.post('/api/chat/:room', requireAuth, (req, res) => {
@@ -1621,6 +1690,21 @@ app.post('/api/chat/:room', requireAuth, (req, res) => {
   const dailyStats = room === 'staff' ? getDailyStaffMessageStats() : {};
   io.to(`chat:${room}`).emit('chat:new', message);
   res.status(201).json({ message, ...dailyStats });
+});
+
+app.delete('/api/chat/:room/:messageId', requireAuth, (req, res) => {
+  const room = req.params.room;
+  const messageId = String(req.params.messageId || '');
+  if (!['staff', 'management'].includes(room)) return res.status(404).json({ error: 'غرفة الشات مش موجودة.' });
+  if (!/^\d{1,18}$/.test(messageId)) return res.status(400).json({ error: 'رقم الرسالة غير صالح.' });
+  if (!canReadRoom(req.session.user, room)) return res.status(403).json({ error: 'الشات ده مخصص للمسؤولين.' });
+  const target = db.prepare('SELECT id, user_id FROM chat_messages WHERE room = ? AND id = ?').get(room, Number(messageId));
+  if (!target) return res.status(404).json({ error: 'الرسالة غير موجودة أو تم حذفها بالفعل.' });
+  if (String(target.user_id) !== String(req.session.user.id) && !canManage(req.session.user)) return res.status(403).json({ error: 'تقدر تحذف رسائلك أنت فقط؛ حذف رسائل الآخرين للمسؤولين.' });
+  db.prepare('DELETE FROM chat_messages WHERE room = ? AND id = ?').run(room, Number(messageId));
+  const info = db.prepare('INSERT INTO chat_message_deletions(room, message_id, deleted_by, deleted_at) VALUES (?, ?, ?, ?)').run(room, Number(messageId), String(req.session.user.id), nowIso());
+  io.to(`chat:${room}`).emit('chat:deleted', { messageId: Number(messageId), room, deletionCursor: Number(info.lastInsertRowid) });
+  res.json({ ok: true, room, messageId: Number(messageId), deletionCursor: Number(info.lastInsertRowid) });
 });
 
 // Evidence stays behind authentication because it may contain internal staff material.

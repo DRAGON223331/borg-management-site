@@ -49,6 +49,10 @@
       "destination": "/api/r?p=tasks/:id"
     },
     {
+      "source": "/api/chat/:room/:messageId",
+      "destination": "/api/r?p=chat/:room/:messageId"
+    },
+    {
       "source": "/api/chat/:room",
       "destination": "/api/r?p=chat/:room"
     },

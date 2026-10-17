@@ -42,7 +42,7 @@ let lastMessageSyncAt = 0;
 let messageSyncPromise;
 
 // ───────── تخفيف الضغط: كاش في الذاكرة + حد للطلبات ─────────
-const SCHEMA_VERSION = 10; // v10 يضيف إدارة صلاحيات الموقع المحفوظة في قاعدة البيانات
+const SCHEMA_VERSION = 11; // v11 يضيف منع الوصول للموقع وسجل حذف رسائل الشات
 const PRESENCE_WINDOW_SECONDS = 150; // مدة اعتبار العضو "متصل" بعد آخر نبضة (النبضة كل 60 ثانية)
 const MESSAGE_SYNC_MIN_MS = Math.max(15, Number(process.env.MESSAGE_SYNC_MIN_SECONDS || 45)) * 1000;
 const memCache = new Map();
@@ -281,6 +281,22 @@ async function ensureSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_chat_room_id ON chat_messages(room, id DESC)`;
+    await sql`CREATE TABLE IF NOT EXISTS chat_message_deletions (
+      id BIGSERIAL PRIMARY KEY,
+      room TEXT NOT NULL CHECK (room IN ('staff', 'management')),
+      message_id BIGINT NOT NULL,
+      deleted_by TEXT NOT NULL,
+      deleted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_chat_message_deletions_room_id ON chat_message_deletions(room, id)`;
+    await sql`CREATE TABLE IF NOT EXISTS site_user_blocks (
+      user_id TEXT PRIMARY KEY,
+      username TEXT NOT NULL DEFAULT '',
+      reason TEXT NOT NULL DEFAULT '',
+      blocked_by TEXT NOT NULL,
+      blocked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_site_user_blocks_blocked_at ON site_user_blocks(blocked_at DESC)`;
     await sql`CREATE TABLE IF NOT EXISTS discord_message_log (
       message_id BIGINT PRIMARY KEY,
       channel_id TEXT NOT NULL,
@@ -648,6 +664,16 @@ async function getSiteManagerAction(userId) {
   const sql = await getSql();
   const rows = await sql`SELECT action FROM site_manager_access WHERE user_id = ${id}`;
   return rows[0]?.action || null;
+}
+async function getSiteUserBlock(userId) {
+  const id = String(userId || '');
+  if (!/^\d{15,22}$/.test(id)) return null;
+  return cached(`site-user-block:${id}`, 5000, async () => {
+    await ensureSchema();
+    const sql = await getSql();
+    const rows = await sql`SELECT user_id AS "userId", username, reason, blocked_by AS "blockedBy", blocked_at AS "blockedAt" FROM site_user_blocks WHERE user_id = ${id} LIMIT 1`;
+    return rows[0] || null;
+  });
 }
 async function getPrimaryGuildAdministratorStatus(userId) {
   const id = String(userId || '');
@@ -1097,6 +1123,11 @@ async function handleAuth(parts, req, res) {
           });
         } catch { /* fail closed below; ordinary staff login remains available */ }
       }
+      const siteBlock = await getSiteUserBlock(discordUser.id);
+      if (siteBlock && !isOwner) {
+        res.setHeader('Set-Cookie', clearCookie(OAUTH_COOKIE));
+        return sendText(res, 403, 'تم منع هذا الحساب من استخدام الموقع بواسطة الإدارة. لو تعتقد أن ده بالخطأ، تواصل مع مالك الموقع.');
+      }
       const deniedByOwner = !isOwner && accessAction === 'deny';
       const isManager = !isOwner && !deniedByOwner && accessAction === 'grant';
       const isAdmin = !deniedByOwner && (isOwner || Boolean(mainGuild?.owner) || hasDiscordAdministrator);
@@ -1344,6 +1375,10 @@ async function handleApi(parts, req, res) {
   const route = parts[0] || '';
   let user = getSessionUser(req);
   if (user) user = await refreshSessionPrivileges(user);
+  if (user && !isSiteOwner(user) && await getSiteUserBlock(user.id)) {
+    res.setHeader('Set-Cookie', clearCookie(COOKIE_NAME));
+    return sendError(res, 401, 'تم منع هذا الحساب من استخدام الموقع بواسطة الإدارة.');
+  }
   if (req.method !== 'GET' && !ensureSameOrigin(req, res)) return;
   if (route === 'health' && req.method === 'GET') {
     // فحص البوت مرة كل دقيقة بس مهما كان عدد المستخدمين (كان بيعمل طلب Discord مع كل نبضة من كل مستخدم).
@@ -1507,7 +1542,17 @@ async function handleApi(parts, req, res) {
           updatedAt: override?.updated_at || null,
         };
       }).filter(Boolean).sort((a, b) => Number(b.isOwner) - Number(a.isOwner) || Number(b.isSiteManager) - Number(a.isSiteManager) || a.username.localeCompare(b.username, 'ar'));
-      return sendJson(res, 200, { owners: [...SITE_OWNER_IDS], managers: entries });
+      const blockedRows = await sql`SELECT user_id AS "userId", username, reason, blocked_by AS "blockedBy", blocked_at AS "blockedAt" FROM site_user_blocks ORDER BY blocked_at DESC`;
+      const blockedUsers = blockedRows.map((row) => {
+        const id = String(row.userId);
+        const member = memberById.get(id);
+        const userRecord = member?.user || null;
+        let avatarUrl = null;
+        if (userRecord?.avatar) avatarUrl = `https://cdn.discordapp.com/avatars/${id}/${userRecord.avatar}.png?size=64`;
+        else { let index = 0; try { index = Number((BigInt(id) >> 22n) % 6n); } catch { index = 0; } avatarUrl = `https://cdn.discordapp.com/embed/avatars/${index}.png`; }
+        return { id, username: member ? (member.nick || userRecord?.global_name || userRecord?.username || id) : (row.username || id), avatarUrl, reason: row.reason || '', blockedBy: row.blockedBy, blockedAt: row.blockedAt };
+      });
+      return sendJson(res, 200, { owners: [...SITE_OWNER_IDS], managers: entries, blockedUsers });
     }
     if (req.method === 'POST') {
       if (rateLimited(req, res, user, 'site-managers-write', 20)) return;
@@ -1516,7 +1561,32 @@ async function handleApi(parts, req, res) {
       const action = cleanText(body.action, 12);
       if (!/^\d{15,22}$/.test(targetId)) return sendError(res, 400, 'Discord ID غير صالح.');
       if (SITE_OWNER_IDS.has(targetId)) return sendError(res, 400, 'لا يمكن إزالة أو تعديل مالكي الموقع الأساسيين.');
-      if (!['grant', 'deny', 'auto'].includes(action)) return sendError(res, 400, 'الإجراء غير صالح.');
+      if (!['grant', 'deny', 'auto', 'block', 'unblock'].includes(action)) return sendError(res, 400, 'الإجراء غير صالح.');
+      if (action === 'block') {
+        if (SITE_OWNER_IDS.has(targetId)) return sendError(res, 400, 'لا يمكن منع مالك أساسي من الموقع.');
+        let username = targetId;
+        try {
+          const targetMember = await discordApi(`/guilds/${MAIN_GUILD_ID}/members/${targetId}`);
+          username = cleanText(targetMember?.nick || targetMember?.user?.global_name || targetMember?.user?.username || targetId, 100);
+        } catch {
+          try {
+            const prior = await sql`SELECT username FROM site_presence WHERE user_id = ${targetId} UNION ALL SELECT username FROM chat_messages WHERE user_id = ${targetId} ORDER BY username LIMIT 1`;
+            username = cleanText(prior[0]?.username || targetId, 100);
+          } catch { username = targetId; }
+        }
+        const reason = cleanText(body.reason || '', 300);
+        await sql`INSERT INTO site_user_blocks(user_id, username, reason, blocked_by, blocked_at) VALUES (${targetId}, ${username}, ${reason}, ${String(user.id)}, NOW())
+          ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, reason = EXCLUDED.reason, blocked_by = EXCLUDED.blocked_by, blocked_at = NOW()`;
+        memCache.delete(`site-user-block:${targetId}`);
+        memCache.delete('site-manager-list');
+        return sendJson(res, 200, { ok: true, userId: targetId, action });
+      }
+      if (action === 'unblock') {
+        await sql`DELETE FROM site_user_blocks WHERE user_id = ${targetId}`;
+        memCache.delete(`site-user-block:${targetId}`);
+        memCache.delete('site-manager-list');
+        return sendJson(res, 200, { ok: true, userId: targetId, action });
+      }
       let username = targetId;
       if (action === 'grant') {
         try {
@@ -1538,6 +1608,7 @@ async function handleApi(parts, req, res) {
       }
       memCache.delete(`site-manager-override:${targetId}`);
       memCache.delete(`main-guild-member-authz:${targetId}`);
+      memCache.delete(`site-user-block:${targetId}`);
       memCache.delete('site-manager-list');
       memCache.delete('roster');
       return sendJson(res, 200, { ok: true, userId: targetId, action });
@@ -2315,6 +2386,23 @@ async function handleApi(parts, req, res) {
     ] });
     return sendJson(res, 200, { ok: true, status: 'approved', awarded: amount, dmSent: dm.ok, message: `تم اعتماد التسليم وإضافة ${formatPoints(amount)} نقطة.${dmNote(dm)}` });
   }
+  if (route === 'chat' && parts.length === 3 && req.method === 'DELETE') {
+    const room = parts[1];
+    const messageId = String(parts[2] || '');
+    if (!['staff', 'management'].includes(room)) return sendError(res, 404, 'غرفة الشات مش موجودة.');
+    if (!/^\d{1,18}$/.test(messageId)) return sendError(res, 400, 'رقم الرسالة غير صالح.');
+    if (!canReadRoom(user, room)) return sendError(res, 403, 'الشات ده مخصص للمسؤولين.');
+    if (rateLimited(req, res, user, 'chat-delete', 30)) return;
+    const targetRows = await sql`SELECT id, user_id FROM chat_messages WHERE room = ${room} AND id = ${messageId} LIMIT 1`;
+    const target = targetRows[0];
+    if (!target) return sendError(res, 404, 'الرسالة غير موجودة أو تم حذفها بالفعل.');
+    if (String(target.user_id) !== String(user.id) && !canManage(user)) return sendError(res, 403, 'تقدر تحذف رسائلك أنت فقط؛ حذف رسائل الآخرين للمسؤولين.');
+    const removed = await sql`DELETE FROM chat_messages WHERE room = ${room} AND id = ${messageId} RETURNING id`;
+    if (!removed.length) return sendError(res, 404, 'الرسالة غير موجودة أو تم حذفها بالفعل.');
+    const deletion = await sql`INSERT INTO chat_message_deletions(room, message_id, deleted_by, deleted_at) VALUES (${room}, ${messageId}::bigint, ${String(user.id)}, NOW()) RETURNING id`;
+    memCache.delete('daily-message-stats');
+    return sendJson(res, 200, { ok: true, room, messageId: Number(messageId), deletionCursor: Number(deletion[0]?.id) || 0 });
+  }
   if (route === 'chat' && parts.length === 2 && req.method === 'GET') {
     const room = parts[1];
     if (!['staff', 'management'].includes(room)) return sendError(res, 404, 'غرفة الشات مش موجودة.');
@@ -2324,14 +2412,22 @@ async function handleApi(parts, req, res) {
     const afterRaw = queryParam(req, 'after');
     const after = afterRaw !== null && /^\d{1,15}$/.test(afterRaw) ? Number(afterRaw) : null;
     const mapMessage = (row) => ({ id: Number(row.id), room: row.room, userId: row.user_id, username: row.username, avatarUrl: row.avatar_url, content: row.content, createdAt: row.created_at });
+    const deletionAfterRaw = queryParam(req, 'deletionsAfter');
+    const deletionAfter = deletionAfterRaw !== null && /^\d{1,18}$/.test(deletionAfterRaw) ? Number(deletionAfterRaw) : 0;
     if (after !== null) {
-      const fresh = await sql`SELECT * FROM chat_messages WHERE room = ${room} AND id > ${after} ORDER BY id ASC LIMIT 100`;
-      return sendJson(res, 200, { messages: fresh.map(mapMessage), incremental: true });
+      const [fresh, deletions] = await Promise.all([
+        sql`SELECT * FROM chat_messages WHERE room = ${room} AND id > ${after} ORDER BY id ASC LIMIT 100`,
+        sql`SELECT id, message_id FROM chat_message_deletions WHERE room = ${room} AND id > ${deletionAfter} ORDER BY id ASC LIMIT 100`,
+      ]);
+      return sendJson(res, 200, { messages: fresh.map(mapMessage), deletedMessageIds: deletions.map((row) => Number(row.message_id)), deletionCursor: deletions.length ? Number(deletions[deletions.length - 1].id) : deletionAfter, incremental: true });
     }
-    const rows = await sql`SELECT * FROM (SELECT * FROM chat_messages WHERE room = ${room} ORDER BY id DESC LIMIT 100) AS recent ORDER BY id ASC`;
+    const [rows, cursorRows] = await Promise.all([
+      sql`SELECT * FROM (SELECT * FROM chat_messages WHERE room = ${room} ORDER BY id DESC LIMIT 100) AS recent ORDER BY id ASC`,
+      sql`SELECT COALESCE(MAX(id), 0)::text AS cursor FROM chat_message_deletions WHERE room = ${room}`,
+    ]);
     if (room === 'staff') await syncChannelMessageCounts(sql, { budgetMs: 4000 });
     const dailyStats = room === 'staff' ? await getDailyStaffMessageStats(sql) : {};
-    return sendJson(res, 200, { messages: rows.map(mapMessage), ...dailyStats });
+    return sendJson(res, 200, { messages: rows.map(mapMessage), deletionCursor: Number(cursorRows[0]?.cursor) || 0, ...dailyStats });
   }
   if (route === 'discord-presence' && parts.length === 1 && req.method === 'GET') {
     if (!user) return sendError(res, 401, 'سجّل الدخول الأول.');

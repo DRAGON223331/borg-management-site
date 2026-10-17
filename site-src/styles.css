@@ -296,6 +296,16 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 .chat-message-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin: 0 0 6px; }
 .chat-message-meta b { font-size: 10px; color: #dce5f4; }
 .chat-message-meta time { color: #67768e; font-size: 8px; direction: ltr; }
+.chat-delete-button { width: 21px; height: 21px; margin-inline-start: 3px; border: 1px solid rgba(239,68,68,.32); border-radius: 5px; background: rgba(239,68,68,.08); color: #f87171; font-size: 16px; line-height: 1; cursor: pointer; opacity: .72; transition: opacity .15s ease, background .15s ease, border-color .15s ease; }
+.chat-delete-button:hover { opacity: 1; background: rgba(239,68,68,.18); border-color: rgba(239,68,68,.7); }
+.chat-delete-button:disabled { opacity: .35; cursor: wait; }
+.site-access-block-section { margin-top: 34px; padding-top: 26px; border-top: 1px solid var(--border); }
+.site-manager-add-form.site-user-block-form { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(220px, 1fr) auto; align-items: end; }
+.site-user-block-form > div { min-width: 0; }
+#site-user-block-reason { direction: rtl; text-align: right; }
+.site-blocked-user-card { border-color: rgba(239,68,68,.18); }
+.site-blocked-reason { display: block; margin-top: 6px; color: #e0a1a1; font-size: 11px; }
+@media (max-width: 700px) { .site-manager-add-form.site-user-block-form { grid-template-columns: 1fr; } .site-user-block-form .danger-button { width: 100%; } }
 .chat-message-bubble { border: 1px solid var(--border); background: #222127; border-radius: 3px 13px 13px 13px; padding: 10px 12px; font-size: 11px; color: #c6d1e2; line-height: 1.9; white-space: pre-wrap; overflow-wrap: anywhere; }
 .own-message .chat-message-bubble { border-radius: 13px 3px 13px 13px; background: rgba(119,99,233,.15); border-color: rgba(226,61,79,.17); }
 .own-message .chat-message-meta { justify-content: flex-end; }

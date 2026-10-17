@@ -13,6 +13,7 @@ const state = {
   chatMessages: { staff: [], management: [] },
   chatMessageIds: { staff: new Set(), management: new Set() },
   chatLoaded: { staff: false, management: false },
+  chatDeletionCursor: { staff: 0, management: 0 },
   onlineUserIds: new Set(),
   discordStatuses: {},
   discordPresenceAvailable: false,
@@ -324,6 +325,8 @@ function wireSiteManagerAccess() {
   const form = $('#site-manager-add-form');
   const list = $('#site-manager-list');
   const refresh = $('#site-manager-refresh');
+  const blockForm = $('#site-user-block-form');
+  const blockedList = $('#site-blocked-user-list');
   if (!form || form.dataset.wired === '1') return;
   form.dataset.wired = '1';
   form.addEventListener('submit', async (event) => {
@@ -344,6 +347,40 @@ function wireSiteManagerAccess() {
     finally { if (submit) submit.disabled = false; }
   });
   refresh?.addEventListener('click', () => loadSiteManagers(true));
+  blockForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!state.user?.isOwner) return;
+    const idInput = $('#site-user-block-id');
+    const reasonInput = $('#site-user-block-reason');
+    const userId = String(idInput?.value || '').trim();
+    const reason = String(reasonInput?.value || '').trim();
+    if (!/^\d{15,22}$/.test(userId)) return showToast('اكتب Discord ID صحيح من 15 إلى 22 رقمًا.', 'error');
+    if (!window.confirm('هل تريد منع هذا الحساب من تسجيل الدخول واستخدام الموقع؟ لن يتم طرده من Discord.')) return;
+    const submit = blockForm.querySelector('button[type="submit"]');
+    if (submit) submit.disabled = true;
+    try {
+      await api('/api/site-managers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'block', userId, reason }) });
+      if (idInput) idInput.value = '';
+      if (reasonInput) reasonInput.value = '';
+      showToast('تم منع الحساب من استخدام الموقع.', 'success');
+      await loadSiteManagers(true);
+    } catch (error) { showToast(error.message || 'تعذر منع الحساب من الموقع.', 'error'); }
+    finally { if (submit) submit.disabled = false; }
+  });
+  blockedList?.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-site-block-action="unblock"]');
+    if (!button || !state.user?.isOwner) return;
+    const userId = button.dataset.userId;
+    if (!/^\d{15,22}$/.test(String(userId || ''))) return;
+    if (!window.confirm('هل تريد السماح لهذا الحساب باستخدام الموقع مرة أخرى؟')) return;
+    button.disabled = true;
+    try {
+      await api('/api/site-managers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'unblock', userId }) });
+      showToast('تم رفع المنع عن الحساب.', 'success');
+      await loadSiteManagers(true);
+    } catch (error) { showToast(error.message || 'تعذر رفع المنع.', 'error'); }
+    finally { button.disabled = false; }
+  });
   list?.addEventListener('click', async (event) => {
     const button = event.target.closest('[data-site-access-action]');
     if (!button || !state.user?.isOwner) return;
@@ -365,28 +402,35 @@ function wireSiteManagerAccess() {
 
 async function loadSiteManagers(force = false) {
   const list = $('#site-manager-list');
+  const blockedList = $('#site-blocked-user-list');
   if (!list || !state.user?.isOwner) return;
   list.innerHTML = '<div class="loading-state">جاري التحقق من Administrator والاستثناءات المحفوظة...</div>';
+  if (blockedList) blockedList.innerHTML = '<div class="loading-state">جاري تحميل قائمة الممنوعين...</div>';
   try {
     const result = await api('/api/site-managers' + (force ? '?refresh=1' : ''));
     const managers = Array.isArray(result.managers) ? result.managers : [];
+    const blockedUsers = Array.isArray(result.blockedUsers) ? result.blockedUsers : [];
     if (!managers.length) {
       list.innerHTML = '<div class="task-empty">لا توجد صلاحيات إدارة مسجلة غير المالكين الثابتين.</div>';
-      return;
+    } else {
+      list.innerHTML = managers.map((item) => {
+        const isOwner = Boolean(item.isOwner);
+        const denied = item.action === 'deny';
+        const autoAdmin = Boolean(item.hasAdministrator);
+        const status = isOwner ? '<span class="site-manager-tag active">مالك ثابت</span>' : denied ? '<span class="site-manager-tag denied">ممنوع من الإدارة</span>' : item.action === 'grant' ? '<span class="site-manager-tag active">مضاف من المالك</span>' : '<span class="site-manager-tag active">Administrator في Discord</span>';
+        const source = !isOwner && autoAdmin ? '<span class="site-manager-tag">Administrator فعلي</span>' : '';
+        let actionButton = '';
+        if (!isOwner && denied) actionButton = '<button type="button" class="secondary-button compact" data-site-access-action="auto" data-user-id="' + escapeHtml(item.id) + '">إرجاع تلقائي</button>';
+        else if (!isOwner) actionButton = '<button type="button" class="danger-button" data-site-access-action="deny" data-user-id="' + escapeHtml(item.id) + '">سحب الصلاحية</button>';
+        return '<article class="site-manager-card"><img src="' + escapeHtml(item.avatarUrl || avatarFallback(item.id)) + '" alt=""><div class="site-manager-card-main"><b>' + escapeHtml(item.username || item.id) + '</b><small>' + escapeHtml(item.id) + '</small><div class="site-manager-card-tags">' + status + source + '</div></div>' + actionButton + '</article>';
+      }).join('');
     }
-    list.innerHTML = managers.map((item) => {
-      const isOwner = Boolean(item.isOwner);
-      const denied = item.action === 'deny';
-      const autoAdmin = Boolean(item.hasAdministrator);
-      const status = isOwner ? '<span class="site-manager-tag active">مالك ثابت</span>' : denied ? '<span class="site-manager-tag denied">ممنوع من الموقع</span>' : item.action === 'grant' ? '<span class="site-manager-tag active">مضاف من المالك</span>' : '<span class="site-manager-tag active">Administrator في Discord</span>';
-      const source = !isOwner && autoAdmin ? '<span class="site-manager-tag">Administrator فعلي</span>' : '';
-      let actionButton = '';
-      if (!isOwner && denied) actionButton = '<button type="button" class="secondary-button compact" data-site-access-action="auto" data-user-id="' + escapeHtml(item.id) + '">إرجاع تلقائي</button>';
-      else if (!isOwner) actionButton = '<button type="button" class="danger-button" data-site-access-action="deny" data-user-id="' + escapeHtml(item.id) + '">سحب الصلاحية</button>';
-      return '<article class="site-manager-card"><img src="' + escapeHtml(item.avatarUrl || avatarFallback(item.id)) + '" alt=""><div class="site-manager-card-main"><b>' + escapeHtml(item.username || item.id) + '</b><small>' + escapeHtml(item.id) + '</small><div class="site-manager-card-tags">' + status + source + '</div></div>' + actionButton + '</article>';
-    }).join('');
+    if (blockedList) {
+      blockedList.innerHTML = blockedUsers.length ? blockedUsers.map((item) => '<article class="site-manager-card site-blocked-user-card"><img src="' + escapeHtml(item.avatarUrl || avatarFallback(item.id)) + '" alt=""><div class="site-manager-card-main"><b>' + escapeHtml(item.username || item.id) + '</b><small>' + escapeHtml(item.id) + '</small><div class="site-manager-card-tags"><span class="site-manager-tag denied">ممنوع من الموقع</span></div>' + (item.reason ? '<small class="site-blocked-reason">السبب: ' + escapeHtml(item.reason) + '</small>' : '') + '</div><button type="button" class="secondary-button compact" data-site-block-action="unblock" data-user-id="' + escapeHtml(item.id) + '">رفع المنع</button></article>').join('') : '<div class="task-empty">لا يوجد أي حساب ممنوع من الموقع حاليًا.</div>';
+    }
   } catch (error) {
     list.innerHTML = '<div class="task-empty">' + escapeHtml(error.message || 'تعذر تحميل قائمة المسؤولين.') + '</div>';
+    if (blockedList) blockedList.innerHTML = '<div class="task-empty">' + escapeHtml(error.message || 'تعذر تحميل قائمة الممنوعين.') + '</div>';
   }
 }
 
@@ -1761,22 +1805,34 @@ function startChatPolling() {
     try {
       // نطلب الرسائل الأحدث من آخر رسالة معروفة فقط (بدل آخر 100 رسالة كل مرة).
       const lastId = state.chatMessages[room].reduce((max, message) => Math.max(max, Number(message.id) || 0), 0);
-      const result = await api(`/api/chat/${room}?after=${lastId}`);
+      const deletionCursor = Number(state.chatDeletionCursor[room]) || 0;
+      const result = await api(`/api/chat/${room}?after=${lastId}&deletionsAfter=${deletionCursor}`);
       if (room === 'staff' && !result.incremental) updateDailyMessageStats(result);
-      let added = false;
+      let changed = false;
+      if (Number(result.deletionCursor) > deletionCursor) state.chatDeletionCursor[room] = Number(result.deletionCursor);
+      for (const deletedId of (result.deletedMessageIds || [])) {
+        const id = Number(deletedId);
+        if (state.chatMessageIds[room].has(id)) {
+          state.chatMessageIds[room].delete(id);
+          state.chatMessages[room] = state.chatMessages[room].filter((message) => Number(message.id) !== id);
+          changed = true;
+        }
+      }
       for (const message of (result.messages || [])) {
         if (!state.chatMessageIds[room].has(message.id)) {
           addChatMessage(room, message, false);
-          added = true;
+          changed = true;
         }
       }
-      if (added) renderChat(room);
+      if (changed) renderChat(room);
     } catch { /* Keep the current chat visible during brief network errors. */ }
   }, 6000);
 }
 function wireChats() {
   $('#staff-chat-form').addEventListener('submit', (event) => sendChat(event, 'staff'));
   $('#management-chat-form').addEventListener('submit', (event) => sendChat(event, 'management'));
+  $('#staff-chat-feed').addEventListener('click', (event) => handleChatDeleteClick(event, 'staff'));
+  $('#management-chat-feed').addEventListener('click', (event) => handleChatDeleteClick(event, 'management'));
   for (const [room, inputId] of [['staff', '#staff-chat-input'], ['management', '#management-chat-input']]) {
     $(inputId).addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $(inputId).form.requestSubmit(); }
@@ -1790,12 +1846,34 @@ async function loadChat(room) {
     if (room === 'staff') updateDailyMessageStats(result);
     state.chatMessages[room] = [];
     state.chatMessageIds[room] = new Set();
+    state.chatDeletionCursor[room] = Number(result.deletionCursor) || 0;
     (result.messages || []).forEach((message) => addChatMessage(room, message, false));
     state.chatLoaded[room] = true;
     renderChat(room);
   } catch (error) {
     const feed = room === 'staff' ? $('#staff-chat-feed') : $('#management-chat-feed');
     feed.innerHTML = `<div class="chat-system-empty">${escapeHtml(error.message)}</div>`;
+  }
+}
+async function handleChatDeleteClick(event, room) {
+  const button = event.target.closest('[data-delete-chat-message]');
+  if (!button) return;
+  const messageId = String(button.dataset.deleteChatMessage || '');
+  if (!/^\d{1,18}$/.test(messageId)) return;
+  const message = state.chatMessages[room].find((item) => String(item.id) === messageId);
+  if (!message) return;
+  if (!(state.user?.canManage || message.userId === state.user?.id)) return showToast('ما عندكش صلاحية حذف الرسالة دي.', 'error');
+  if (!window.confirm('هل تريد حذف الرسالة من شات ' + (room === 'staff' ? 'الاستاف' : 'المسؤولين') + '؟')) return;
+  button.disabled = true;
+  try {
+    await api(`/api/chat/${room}/${messageId}`, { method: 'DELETE' });
+    state.chatMessageIds[room].delete(message.id);
+    state.chatMessages[room] = state.chatMessages[room].filter((item) => String(item.id) !== messageId);
+    renderChat(room);
+    showToast('تم حذف الرسالة.', 'success');
+  } catch (error) {
+    showToast(error.message || 'تعذر حذف الرسالة.', 'error');
+    button.disabled = false;
   }
 }
 function addChatMessage(room, message, render = true) {
@@ -1820,7 +1898,7 @@ function renderChat(room) {
   feed.innerHTML = messages.map((message) => `
     <article class="chat-message ${message.userId === state.user.id ? 'own-message' : ''}">
       <img class="chat-message-avatar" src="${escapeHtml(message.avatarUrl || avatarFallback(message.userId))}" alt="">
-      <div class="chat-message-content"><div class="chat-message-meta"><b>${escapeHtml(message.username)}</b><time>${formatTime(message.createdAt)}</time></div><div class="chat-message-bubble">${escapeHtml(message.content)}</div></div>
+      <div class="chat-message-content"><div class="chat-message-meta"><b>${escapeHtml(message.username)}</b><time>${formatTime(message.createdAt)}</time>${(state.user?.canManage || message.userId === state.user?.id) ? `<button type="button" class="chat-delete-button" data-delete-chat-message="${escapeHtml(message.id)}" title="حذف الرسالة" aria-label="حذف الرسالة">×</button>` : ''}</div><div class="chat-message-bubble">${escapeHtml(message.content)}</div></div>
     </article>
   `).join('');
   if (atBottom) feed.scrollTop = feed.scrollHeight;

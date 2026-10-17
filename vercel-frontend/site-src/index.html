@@ -355,6 +355,15 @@
           </form>
           <div class="section-title-row site-manager-list-heading"><div><span class="tiny-label">ACCESS LIST</span><h2>المسؤولون وصلاحياتهم</h2><p class="muted small-copy">تشمل مسؤولي Administrator، والإضافات اليدوية، والحسابات التي منعها المالك.</p></div><button id="site-manager-refresh" type="button" class="secondary-button compact">تحديث ↻</button></div>
           <div id="site-manager-list" class="site-manager-list"><div class="loading-state">جاري فحص صلاحيات أعضاء السيرفر الأساسي...</div></div>
+          <section class="site-access-block-section">
+            <div class="section-title-row site-manager-list-heading"><div><span class="tiny-label">SITE ACCESS BLOCKLIST</span><h2>طرد عضو من الموقع</h2><p class="muted small-copy">المنع بيوقف تسجيل الدخول واستخدام الموقع فقط، ولا يطرد العضو من سيرفر Discord.</p></div></div>
+            <form id="site-user-block-form" class="site-manager-add-form site-user-block-form">
+              <div><label for="site-user-block-id">Discord ID للعضو</label><input id="site-user-block-id" type="text" inputmode="numeric" maxlength="22" placeholder="اكتب ID الشخص اللي عايز تمنعه" required pattern="[0-9]{15,22}"></div>
+              <div><label for="site-user-block-reason">سبب المنع (اختياري)</label><input id="site-user-block-reason" type="text" maxlength="300" placeholder="سبب مختصر للرجوع إليه"></div>
+              <button class="danger-button" type="submit">حظر من الموقع</button>
+            </form>
+            <div id="site-blocked-user-list" class="site-manager-list"><div class="loading-state">جاري تحميل قائمة الممنوعين...</div></div>
+          </section>
         </section>
 
         <section id="page-audit-log" class="page">
