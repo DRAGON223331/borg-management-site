@@ -491,6 +491,19 @@ app.use('/api', sameOrigin);
 function cleanText(value, max = 300) {
   return String(value ?? '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim().slice(0, max);
 }
+function containsChatLink(value) {
+  const text = String(value ?? '').normalize('NFKC')
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+    .replace(/\[\s*(?:dot|\.)\s*\]|\(\s*\.\s*\)|\{\s*\.\s*\}/gi, '.')
+    .replace(/\s+dot\s+/gi, '.');
+  const patterns = [
+    /(?:\b(?:https?|ftp|hxxps?)\s*:\s*\/\s*\/|\bwww\d?\s*\.)[^\s<>{}"'`]+/i,
+    /\b(?:discord\.gg|discord(?:app)?\.com\/invite|t\.me|telegram\.me|bit\.ly|tinyurl\.com|youtu\.be|forms\.gle)(?:\/\S*)?/i,
+    /(?<![@\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?::\d{2,5})?(?:[/?#][^\s<>{}"'`]*)?/i,
+    /(?<![\w@])(?:\d{1,3}\.){3}\d{1,3}(?::\d{2,5})?(?:\/[^\s]*)?/i,
+  ];
+  return patterns.some((pattern) => pattern.test(text));
+}
 function splitDiscordContent(value, maxLength = 1800) {
   const chunks = [];
   let current = '';
@@ -1684,6 +1697,7 @@ app.post('/api/chat/:room', requireAuth, (req, res) => {
   if (!canReadRoom(req.session.user, room)) return res.status(403).json({ error: 'الشات ده مخصص للمسؤولين.' });
   const content = cleanText(req.body.content, 1500);
   if (!content) return res.status(400).json({ error: 'اكتب رسالة قبل الإرسال.' });
+  if (room === 'staff' && containsChatLink(content)) return res.status(400).json({ error: 'ممنوع إرسال روابط في شات الاستاف. ابعت الرسالة من غير الرابط.' });
   const info = db.prepare('INSERT INTO chat_messages(room, user_id, username, avatar_url, content, created_at) VALUES (?, ?, ?, ?, ?, ?)')
     .run(room, req.session.user.id, req.session.user.username, profileAvatar(req.session.user), content, nowIso());
   const message = { id: Number(info.lastInsertRowid), room, userId: req.session.user.id, username: req.session.user.username, avatarUrl: profileAvatar(req.session.user), content, createdAt: nowIso() };

@@ -105,12 +105,12 @@ function setButtonLoading(button, loading, text = 'جاري التنفيذ...') 
   }
 }
 const APPEARANCE_KEY = 'borg-cyber-appearance-v1';
-const DEFAULT_APPEARANCE = { accent: 'cyan', motion: 'strong', scanlines: true };
+const DEFAULT_APPEARANCE = { accent: 'red', motion: 'strong', scanlines: true };
 function readAppearance() {
   try {
     const saved = JSON.parse(localStorage.getItem(APPEARANCE_KEY) || '{}');
     return {
-      accent: ['cyan', 'magenta', 'acid'].includes(saved.accent) ? saved.accent : DEFAULT_APPEARANCE.accent,
+      accent: ['red', 'crimson', 'ember'].includes(saved.accent) ? saved.accent : DEFAULT_APPEARANCE.accent,
       motion: ['strong', 'balanced', 'calm'].includes(saved.motion) ? saved.motion : DEFAULT_APPEARANCE.motion,
       scanlines: typeof saved.scanlines === 'boolean' ? saved.scanlines : DEFAULT_APPEARANCE.scanlines,
     };
@@ -1903,12 +1903,27 @@ function renderChat(room) {
   `).join('');
   if (atBottom) feed.scrollTop = feed.scrollHeight;
 }
+function containsChatLink(value) {
+  const text = String(value ?? '').normalize('NFKC')
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+    .replace(/\[\s*(?:dot|\.)\s*\]|\(\s*\.\s*\)|\{\s*\.\s*\}/gi, '.')
+    .replace(/\s+dot\s+/gi, '.');
+  const patterns = [
+    /(?:\b(?:https?|ftp|hxxps?)\s*:\s*\/\s*\/|\bwww\d?\s*\.)[^\s<>{}"'`]+/i,
+    /\b(?:discord\.gg|discord(?:app)?\.com\/invite|t\.me|telegram\.me|bit\.ly|tinyurl\.com|youtu\.be|forms\.gle)(?:\/\S*)?/i,
+    /(?<![@\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?::\d{2,5})?(?:[/?#][^\s<>{}"'`]*)?/i,
+    /(?<![\w@])(?:\d{1,3}\.){3}\d{1,3}(?::\d{2,5})?(?:\/[^\s]*)?/i,
+  ];
+  return patterns.some((pattern) => pattern.test(text));
+}
+
 async function sendChat(event, room) {
   event.preventDefault();
   if (room === 'management' && !state.user?.canManage) return showToast('الغرفة دي مخصصة للمسؤولين.', 'error');
   const input = room === 'staff' ? $('#staff-chat-input') : $('#management-chat-input');
   const content = input.value.trim();
   if (!content) return;
+  if (room === 'staff' && containsChatLink(content)) return showToast('ممنوع إرسال روابط في شات الاستاف.', 'error');
   const button = $('button[type="submit"]', event.currentTarget);
   button.disabled = true;
   try {

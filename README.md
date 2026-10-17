@@ -260,3 +260,11 @@ To improve compatibility with Vercel route resolution, the project includes dedi
 - لا يتطلب هذا التحديث تعديل Environment Variables أو قاعدة البيانات.
 
 سجل التغييرات v58: `CHANGELOG-v58-ar.txt`
+
+
+## تحديث v59
+
+- مانع روابط شات الاستاف: يتم رفض الروابط من الواجهة والخادم قبل حفظ الرسالة، بينما يظل شات المسؤولين دون تغيير.
+
+
+آخر تعديل: v60 — تم إرجاع الثيم للأحمر المتناسق مع صورة السيرفر. راجع CHANGELOG-v60-ar.txt.
