@@ -8,6 +8,7 @@ const { buildSubmissionNotifications, mergeSubmissionDecisionEmbed } = require('
 const { loadSubmissionEvidence, appendEvidenceLinks } = require('../lib/submission-evidence.js');
 const { sendMissingTasksReport } = require('../lib/missing-tasks-report.js');
 const { reconcileDeletedTaskMessages, deactivateTasksForDeletedMessage } = require('../lib/task-message-sync.js');
+const { isWebsiteNotificationMessage } = require('../lib/website-dm-notifications.js');
 
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DB_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING || process.env.DATABASE_URL_UNPOOLED || process.env.POSTGRES_PRISMA_URL;
@@ -334,7 +335,8 @@ async function processSubmissionReview(interaction, submissionId, status, reason
     const user = await client.users.fetch(String(sub.user_id));
     const dm = new EmbedBuilder().setTitle(status === 'approved' ? '✅ تم قبول تسليم المهمة' : '❌ تم رفض تسليم المهمة')
       .setDescription(status === 'approved' ? `تم قبول التسليم #${submissionId} وإضافة **+${fmt(amount)} نقطة**. رصيدك الحالي: **${fmt(totalAfter)}** نقطة.` : `تم رفض التسليم #${submissionId}.${reason ? `\nالسبب: ${clean(reason, 400)}` : ''}`)
-      .setColor(status === 'approved' ? 0x22c55e : 0xef4444);
+      .setColor(status === 'approved' ? 0x22c55e : 0xef4444)
+      .setFooter({ text: 'إدارة البرج • مراجعة التسليمات' });
     await user.send({ embeds: [dm] });
   } catch (error) { console.error('[review DM]', error.message); }
   return { status, amount, totalAfter, taskRows };
@@ -354,20 +356,31 @@ async function runTaskMessageSync({ reportToLog = true } = {}) {
 }
 
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (interaction.isChatInputCommand?.() && ['clear-bot-dms', 'مسح-رسائل-الخاص'].includes(String(interaction.commandName || ''))) {
+  if (interaction.isChatInputCommand?.() && ['clear-site-notifications', 'مسح-تنبيهات-الموقع', 'clear-bot-dms', 'مسح-رسائل-الخاص'].includes(String(interaction.commandName || ''))) {
     try {
       if (!(await isReviewManagerAnywhere(interaction))) {
-        return interaction.reply({ content: 'أمر مسح رسائل الخاص متاح لمسؤولي الإدارة فقط.', ephemeral: true });
+        return interaction.reply({ content: 'أمر مسح تنبيهات الموقع متاح لمسؤولي الإدارة فقط.', ephemeral: true });
       }
       const confirmOption = interaction.options?.data?.find((option) => ['confirm', 'تأكيد'].includes(option.name));
       if (confirmOption?.value !== true) {
-        return interaction.reply({ content: 'لم يتم حذف أي رسالة. شغّل الأمر مرة أخرى مع تأكيد الحذف.', ephemeral: true });
+        return interaction.reply({ content: 'لم يتم حذف أي رسالة. شغّل الأمر مرة أخرى مع تأكيد حذف تنبيهات الموقع فقط.', ephemeral: true });
       }
       await interaction.deferReply({ ephemeral: true });
       const stats = { recipients: 0, channelsScanned: 0, messagesDeleted: 0, messageErrors: 0, recipientErrors: 0, pagesScanned: 0 };
       try {
-        const submissions = await sql`SELECT DISTINCT user_id FROM submissions WHERE status IN ('approved','rejected') AND user_id IS NOT NULL AND user_id <> ''`;
-        const recipientIds = [...new Set(submissions.map((row) => String(row.user_id || '')).filter((id) => /^\d{15,22}$/.test(id)))];
+        const knownRecipients = await sql`
+          SELECT DISTINCT user_id FROM (
+            SELECT user_id FROM submissions WHERE user_id IS NOT NULL AND user_id <> ''
+            UNION SELECT user_id FROM leave_requests WHERE user_id IS NOT NULL AND user_id <> ''
+            UNION SELECT user_id FROM staff_requests WHERE user_id IS NOT NULL AND user_id <> ''
+            UNION SELECT user_id FROM staff_points WHERE user_id IS NOT NULL AND user_id <> ''
+            UNION SELECT user_id FROM site_presence WHERE last_seen > NOW() - INTERVAL '90 days'
+          ) AS website_notification_recipients
+        `;
+        const recipientSet = new Set(knownRecipients.map((row) => String(row.user_id || '')).filter((id) => /^\d{15,22}$/.test(id)));
+        for (const id of (process.env.MANAGER_IDS || '').split(',').map((value) => value.trim())) if (/^\d{15,22}$/.test(id)) recipientSet.add(id);
+        for (const id of SITE_OWNER_IDS) recipientSet.add(String(id));
+        const recipientIds = [...recipientSet];
         stats.recipients = recipientIds.length;
         const botId = String(client.user?.id || '');
         if (!botId) throw new Error('تعذر تحديد حساب البوت.');
@@ -384,7 +397,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               stats.pagesScanned += 1;
               const pageItems = [...page.values()];
               for (const message of pageItems) {
-                if (String(message.author?.id || '') !== botId) continue;
+                if (String(message.author?.id || '') !== botId || !isWebsiteNotificationMessage(message)) continue;
                 try {
                   await message.delete();
                   stats.messagesDeleted += 1;
@@ -402,7 +415,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             console.warn(`[clear bot DMs] recipient ${userId}:`, clean(error?.message || error, 160));
           }
         }
-        return interaction.editReply(`✅ انتهى فحص الخاص.\nالمستخدمون المعروفون الذين تمت مراجعتهم: **${stats.recipients}**\nمحادثات الخاص التي تم فحصها: **${stats.channelsScanned}**\nرسائل البوت التي تم حذفها: **${stats.messagesDeleted}**\nأخطاء حذف الرسائل: **${stats.messageErrors}**\nمحادثات تعذر الوصول إليها: **${stats.recipientErrors}**`);
+        return interaction.editReply(`✅ انتهى حذف تنبيهات الموقع من الخاص.\nالمستخدمون المحتمل وصول تنبيهات إليهم: **${stats.recipients}**\nمحادثات الخاص التي تم فحصها: **${stats.channelsScanned}**\nتنبيهات الموقع المحذوفة: **${stats.messagesDeleted}**\nأخطاء حذف التنبيهات: **${stats.messageErrors}**\nمحادثات تعذر الوصول إليها: **${stats.recipientErrors}**\nتم تجاهل رسائل البوت الأخرى ولم يتم حذفها.`);
       } catch (error) {
         console.error('[clear bot DMs command]', error.stack || error.message || error);
         return interaction.editReply(`تعذر إكمال مسح رسائل الخاص: ${clean(error?.message || error, 160)}`);

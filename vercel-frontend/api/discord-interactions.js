@@ -18,6 +18,7 @@ let primaryGuildAuthCache = { expiresAt: 0, ownerId: '', adminRoleIds: [] };
 const { buildSubmissionNotifications, mergeSubmissionDecisionEmbed } = require('../lib/submission-notifications.js');
 const { loadSubmissionEvidence, appendEvidenceLinks } = require('../lib/submission-evidence.js');
 const { sendMissingTasksReport } = require('../lib/missing-tasks-report.js');
+const { isWebsiteNotificationMessage } = require('../lib/website-dm-notifications.js');
 
 function send(res, payload, status = 200) {
   res.statusCode = status;
@@ -280,11 +281,11 @@ async function discordApiWithRetry(route, options = {}, maxAttempts = 8) {
 
 async function handleClearBotDmsCommand(interaction, res) {
   if (!(await isCsvAuthorized(interaction))) {
-    return send(res, { type: 4, data: { content: 'أمر مسح رسائل الخاص متاح لمسؤولي الإدارة فقط.', flags: 64 } });
+    return send(res, { type: 4, data: { content: 'أمر مسح تنبيهات الموقع متاح لمسؤولي الإدارة فقط.', flags: 64 } });
   }
   const confirmed = interaction.data?.options?.find((option) => ['confirm', 'تأكيد'].includes(option.name))?.value === true;
   if (!confirmed) {
-    return send(res, { type: 4, data: { content: 'لم يتم حذف أي رسالة. شغّل الأمر مرة أخرى مع تأكيد الحذف.', flags: 64 } });
+    return send(res, { type: 4, data: { content: 'لم يتم حذف أي رسالة. شغّل الأمر مرة أخرى مع تأكيد حذف تنبيهات الموقع فقط.', flags: 64 } });
   }
 
   // Acknowledge immediately; the scan can take time when many messages exist.
@@ -303,10 +304,22 @@ async function handleClearBotDmsCommand(interaction, res) {
     try {
       const sql = await getSql();
       const recipientIds = new Set();
-      // This project sends DM notices after a submission is approved or rejected.
-      // Restrict the scan to reviewed submissions so we do not open empty DMs for pending users.
-      const submissions = await sql`SELECT DISTINCT user_id FROM submissions WHERE status IN ('approved','rejected') AND user_id IS NOT NULL AND user_id <> ''`;
-      for (const row of submissions) if (/^\d{15,22}$/.test(String(row.user_id || ''))) recipientIds.add(String(row.user_id));
+      // Search only users who may have received website alerts, plus configured site-alert recipients.
+      // Actual deletion is restricted further below to known website-notification signatures.
+      const knownRecipients = await sql`
+        SELECT DISTINCT user_id FROM (
+          SELECT user_id FROM submissions WHERE user_id IS NOT NULL AND user_id <> ''
+          UNION SELECT user_id FROM leave_requests WHERE user_id IS NOT NULL AND user_id <> ''
+          UNION SELECT user_id FROM staff_requests WHERE user_id IS NOT NULL AND user_id <> ''
+          UNION SELECT user_id FROM staff_points WHERE user_id IS NOT NULL AND user_id <> ''
+          UNION SELECT user_id FROM site_presence WHERE last_seen > NOW() - INTERVAL '90 days'
+        ) AS website_notification_recipients
+      `;
+      for (const row of knownRecipients) if (/^\d{15,22}$/.test(String(row.user_id || ''))) recipientIds.add(String(row.user_id));
+      for (const id of (process.env.MANAGER_IDS || '').split(',').map((value) => value.trim())) {
+        if (/^\d{15,22}$/.test(id)) recipientIds.add(id);
+      }
+      for (const id of SITE_OWNER_IDS) recipientIds.add(String(id));
       const bot = await discordApiWithRetry('/users/@me');
       if (!bot?.id) throw new Error('تعذر تحديد حساب البوت من Discord.');
       stats.recipients = recipientIds.size;
@@ -326,7 +339,7 @@ async function handleClearBotDmsCommand(interaction, res) {
             if (!Array.isArray(page) || page.length === 0) break;
             stats.pagesScanned += 1;
             for (const message of page) {
-              if (String(message?.author?.id || '') !== String(bot.id)) continue;
+              if (String(message?.author?.id || '') !== String(bot.id) || !isWebsiteNotificationMessage(message)) continue;
               try {
                 await discordApiWithRetry(`/channels/${dm.id}/messages/${message.id}`, { method: 'DELETE' });
                 stats.messagesDeleted += 1;
@@ -345,7 +358,7 @@ async function handleClearBotDmsCommand(interaction, res) {
           console.warn(`[clear bot DMs] recipient ${userId}:`, cleanText(error?.message || error, 160));
         }
       }
-      const content = `✅ انتهى فحص الخاص.\nالمستخدمون المعروفون الذين تمت مراجعتهم: **${stats.recipients}**\nمحادثات الخاص التي تم فحصها: **${stats.channelsScanned}**\nرسائل البوت التي تم حذفها: **${stats.messagesDeleted}**\nأخطاء حذف الرسائل: **${stats.messageErrors}**\nمحادثات تعذر الوصول إليها: **${stats.recipientErrors}**`;
+      const content = `✅ انتهى حذف تنبيهات الموقع من الخاص.\nالمستخدمون المحتمل وصول تنبيهات إليهم: **${stats.recipients}**\nمحادثات الخاص التي تم فحصها: **${stats.channelsScanned}**\nتنبيهات الموقع المحذوفة: **${stats.messagesDeleted}**\nأخطاء حذف التنبيهات: **${stats.messageErrors}**\nمحادثات تعذر الوصول إليها: **${stats.recipientErrors}**\nتم تجاهل رسائل البوت الأخرى ولم يتم حذفها.`;
       await updateReply(content);
     } catch (error) {
       console.error('[clear bot DMs command]', cleanText(error?.message || error, 240));
@@ -359,7 +372,7 @@ async function handleClearBotDmsCommand(interaction, res) {
 async function handleCommand(interaction, res) {
   const name = String(interaction.data?.name || '');
   if (name === 'csv') return handleCsvCommand(interaction, res);
-  if (name === 'clear-bot-dms' || name === 'مسح-رسائل-الخاص') return handleClearBotDmsCommand(interaction, res);
+  if (['clear-site-notifications', 'مسح-تنبيهات-الموقع', 'clear-bot-dms', 'مسح-رسائل-الخاص'].includes(name)) return handleClearBotDmsCommand(interaction, res);
   if (name === 'task-report' || name === 'تقرير-المهمات') return handleTaskReportCommand(interaction, res);
   if (name !== 'نقاطي' && name !== 'mypoints') return send(res, { type: 4, data: { content: 'الأمر ده مش مدعوم.', flags: 64 } });
   const userId = String(interaction.member?.user?.id || interaction.user?.id || '');
