@@ -22,7 +22,7 @@ const state = {
   staffStats: [],
   notif: { items: [], unread: 0, maxId: null, open: false },
   lbMetric: 'points',
-  ratings: { items: [], loaded: false, scope: 'admins', sort: 'avg-desc', search: '', targetId: null, selected: 0, justAddedId: null },
+  ratings: { items: [], loaded: false, scope: 'admins', sort: 'avg-desc', search: '', targetId: null, selected: 0, justAddedId: null, detail: {} },
   audit: { entries: [], nextBefore: null, hasMore: false, loading: false },
   activeStaffProfileId: null,
   cyberTrendPeriod: '24h',
@@ -586,7 +586,7 @@ function openPage(page) {
   if (page === 'staff-profile') loadStaffProfile(state.activeStaffProfileId);
   if (page === 'personal') loadPersonal();
   if (page === 'leaderboard') { rollReset('lb:'); renderLeaderboard(); loadStaffStats(); }
-  if (page === 'staff-ratings') { rollReset('rt:'); renderRatings(); loadRatings(); }
+  if (page === 'staff-ratings') { rollReset('rt:'); const chartBox = $('#rt-charts'); if (chartBox) delete chartBox.dataset.sig; renderRatings(); loadRatings(); loadStaffStats(); }
   if (page === 'audit-log') loadAudit(true);
   if (page === 'admin-monitor') loadAdminMonitoring({ silent: true });
   if (page === 'site-managers' && state.user?.isOwner) loadSiteManagers();
@@ -2136,6 +2136,159 @@ async function loadRatings(silent = false) {
     if (!silent) { const grid = $('#rt-grid'); if (grid) grid.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`; }
   }
 }
+// ───────── رسوم بيانية (SVG بدون مكتبات) ─────────
+function svgLine({ pts, avg = null, w = 640, h = 230, area = false }) {
+  const L = 50, R = 16, T = 16, B = 30;
+  const iw = w - L - R;
+  const ih = h - T - B;
+  const n = pts.length;
+  const xAt = (i) => L + (n <= 1 ? iw / 2 : (iw * i) / (n - 1));
+  const yAt = (v) => T + ((5 - Math.min(5, Math.max(1, v))) / 4) * ih;
+  let grid = '';
+  for (let v = 1; v <= 5; v += 1) grid += `<line x1="${L}" x2="${w - R}" y1="${yAt(v).toFixed(1)}" y2="${yAt(v).toFixed(1)}" class="rt-grid-line"/><text x="${L - 8}" y="${(yAt(v) + 3).toFixed(1)}" text-anchor="end" class="rt-axis">${RATING_META[v].label}</text>`;
+  const valid = pts.map((p, i) => ({ ...p, i })).filter((p) => p.v != null);
+  const toPath = (list) => list.map((p, k) => `${k ? 'L' : 'M'}${xAt(p.i).toFixed(1)} ${yAt(p.v).toFixed(1)}`).join(' ');
+  const path = valid.length > 1 ? `<path d="${toPath(valid)}" pathLength="1" class="rt-line"/>` : '';
+  const areaPath = area && valid.length > 1 ? `<path d="${toPath(valid)} L${xAt(valid[valid.length - 1].i).toFixed(1)} ${(T + ih).toFixed(1)} L${xAt(valid[0].i).toFixed(1)} ${(T + ih).toFixed(1)} Z" class="rt-area"/>` : '';
+  const avgValid = avg ? avg.map((v, i) => ({ v, i })).filter((p) => p.v != null) : [];
+  const avgPath = avgValid.length > 1 ? `<path d="${toPath(avgValid)}" class="rt-line-avg"/>` : '';
+  const dots = valid.map((p, k) => `<circle cx="${xAt(p.i).toFixed(1)}" cy="${yAt(p.v).toFixed(1)}" r="5" fill="${p.color || '#ff655f'}" class="rt-dot" style="--k:${k}"><title>${escapeHtml(p.tip || '')}</title></circle>`).join('');
+  const idx = [...new Set(n <= 4 ? pts.map((_, i) => i) : [0, Math.round((n - 1) / 3), Math.round(((n - 1) * 2) / 3), n - 1])];
+  const xl = idx.map((i) => `<text x="${xAt(i).toFixed(1)}" y="${h - 8}" text-anchor="middle" class="rt-axis sm">${escapeHtml(pts[i].x || '')}</text>`).join('');
+  return `<svg class="rt-svg" viewBox="0 0 ${w} ${h}" role="img">${grid}${areaPath}${avgPath}${path}${dots}${xl}</svg>`;
+}
+function svgBars({ values, labels, colors = [], w = 640, h = 180, labelEvery = 1, color = 'var(--neon-a)' }) {
+  const L = 8, R = 8, T = 20, B = 24;
+  const iw = w - L - R;
+  const ih = h - T - B;
+  const n = values.length;
+  const max = Math.max(1, ...values);
+  const slot = iw / n;
+  const barW = Math.min(36, slot * 0.64);
+  const bars = values.map((v, i) => {
+    const bh = v > 0 ? Math.max(4, (v / max) * ih) : 2;
+    const x = L + slot * i + (slot - barW) / 2;
+    const y = T + ih - bh;
+    const fill = colors[i] || color;
+    const val = v > 0 ? `<text x="${(x + barW / 2).toFixed(1)}" y="${(y - 5).toFixed(1)}" class="rt-bar-val">${escapeHtml(rollFormat(v, rollDigits(v)))}</text>` : '';
+    const lab = i % labelEvery === 0 ? `<text x="${(x + barW / 2).toFixed(1)}" y="${h - 7}" text-anchor="middle" class="rt-axis sm">${escapeHtml(labels[i] ?? '')}</text>` : '';
+    return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${bh.toFixed(1)}" rx="5" fill="${fill}" opacity="${v > 0 ? 0.95 : 0.25}" class="rt-bar" style="--k:${i}"><title>${escapeHtml(`${labels[i] ?? ''}: ${rollFormat(v, rollDigits(v))}`)}</title></rect>${val}${lab}`;
+  }).join('');
+  return `<svg class="rt-svg" viewBox="0 0 ${w} ${h}" role="img"><line x1="${L}" x2="${w - R}" y1="${T + ih}" y2="${T + ih}" class="rt-grid-line"/>${bars}</svg>`;
+}
+function hBars(rows) {
+  const max = Math.max(1, ...rows.map((row) => row.value));
+  return `<div class="rt-hb">${rows.map((row, k) => `<div class="rt-hb-row"><span class="rt-hb-label" title="${escapeHtml(row.label)}">${escapeHtml(row.label)}</span><i><span style="--c:${row.color || 'var(--neon-a)'};--k:${k};width:${Math.max(row.value > 0 ? 3 : 0, Math.round((row.value / max) * 100))}%"></span></i><b>${escapeHtml(row.text ?? rollFormat(row.value, rollDigits(row.value)))}</b></div>`).join('')}</div>`;
+}
+const cairoDayKey = (date) => new Date(date).toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
+const shortDate = (date) => formatDate(date, { day: 'numeric', month: 'short' });
+
+// تطور تقييم إداري واحد (نقاط التقييمات + خط المتوسط التراكمي)
+function renderRatingTrend() {
+  const box = $('#rt-trend-chart');
+  if (!box) return;
+  const agg = ratingAggregates().get(String(state.ratings.targetId));
+  if (!agg) { box.innerHTML = '<div class="task-empty">مفيش تقييمات لسه عشان نرسم التطور. أول تقييم هيظهر هنا.</div>'; return; }
+  const full = [...agg.items].reverse(); // من الأقدم للأحدث
+  let sum = 0;
+  const running = full.map((item, i) => { sum += item.rating; return sum / (i + 1); });
+  const from = Math.max(0, full.length - 30);
+  const slice = full.slice(from);
+  const pts = slice.map((item) => ({ x: shortDate(item.createdAt), v: item.rating, color: RATING_META[item.rating].color, tip: `${RATING_META[item.rating].label} (${item.rating}/5) — ${item.raterName || 'مسؤول'} — ${shortDate(item.createdAt)}${item.note ? ` — ${item.note}` : ''}` }));
+  const half = Math.max(1, Math.floor(full.length / 2));
+  const early = full.slice(0, half).reduce((a, b) => a + b.rating, 0) / half;
+  const late = full.slice(-half).reduce((a, b) => a + b.rating, 0) / half;
+  const diff = full.length > 1 ? late - early : 0;
+  const ratings = full.map((item) => item.rating);
+  const chip = (label, value, cls = '') => `<div class="rt-chip"><small>${label}</small><b class="${cls}">${value}</b></div>`;
+  box.innerHTML = `<section class="rt-chart-card" style="animation:none"><h3>تطور التقييم <small>آخر ${slice.length} ${slice.length === 1 ? 'تقييم' : 'تقييمات'}</small></h3>${svgLine({ pts, avg: running.slice(from), area: true })}<div class="rt-legend"><span><i></i>كل تقييم</span><span><i class="avg"></i>المتوسط التراكمي</span></div>${full.length < 2 ? '<p class="muted small-copy">محتاج تقييمين على الأقل عشان يظهر خط التطور.</p>' : ''}<div class="rt-chips">${chip('المتوسط الحالي', `${agg.avg.toFixed(2)} / 5`)}${chip('آخر تقييم', `${RATING_META[full[full.length - 1].rating].emoji} ${RATING_META[full[full.length - 1].rating].label}`)}${chip('أعلى تقييم', RATING_META[Math.max(...ratings)].label)}${chip('أقل تقييم', RATING_META[Math.min(...ratings)].label)}${chip('الاتجاه العام', full.length < 2 ? '—' : Math.abs(diff) < 0.05 ? 'ثابت' : `${diff > 0 ? '▲ تحسّن' : '▼ تراجع'} ${Math.abs(diff).toFixed(2)}`, full.length < 2 || Math.abs(diff) < 0.05 ? '' : diff > 0 ? 'up' : 'down')}</div></section>`;
+}
+
+// الإحصائيات المفصلة (من /api/staff-stats/:id)
+async function loadRatingDetail(id) {
+  const holder = $('#rt-detail');
+  if (state.ratings.detail?.[id]) renderRatingDetail(); else if (holder) holder.innerHTML = '<div class="loading-state">جاري تحميل الإحصائيات...</div>';
+  try {
+    const response = await api(`/api/staff-stats/${encodeURIComponent(id)}`);
+    state.ratings.detail = { ...(state.ratings.detail || {}), [id]: response };
+    if (String(state.ratings.targetId) === String(id)) renderRatingDetail();
+  } catch (error) {
+    if (holder && !state.ratings.detail?.[id]) holder.innerHTML = `<div class="task-empty">${escapeHtml(error.message)}</div>`;
+  }
+}
+function renderRatingDetail() {
+  const id = String(state.ratings.targetId);
+  const holder = $('#rt-detail');
+  const response = state.ratings.detail?.[id];
+  if (!holder || !response) return;
+  const st = response.stats || {};
+  const mp = response.messageProfile || { activity: [], hours: [] };
+  const ranks = response.ranks || {};
+  const k = (key, v, d) => rollMarkup(`rtd:${id}:${key}`, v, d);
+  const kpi = (label, value, note = '') => `<div class="rt-dkpi"><small>${label}</small><strong>${value}</strong>${note ? `<em>${note}</em>` : ''}</div>`;
+  const total = Number(st.totalSubmissions) || 0;
+  const approved = Number(st.approvedSubmissions) || 0;
+  const rejected = Number(st.rejectedSubmissions) || 0;
+  const pending = Number(st.pendingSubmissions) || 0;
+  const pct = (n) => (total ? (n / total) * 100 : 0);
+  const rate = total ? Math.round((approved / total) * 100) : 0;
+  const rank = (info) => (info?.rank ? `#${info.rank}` : '—');
+  const rankNote = (info) => (info?.rank ? `من ${info.of}` : 'لسه مفيش ترتيب');
+  const online = state.onlineUserIds.has(id);
+  const busyDay = mp.busiestDay ? `${rollFormat(mp.busiestDay.count)} رسالة · ${shortDate(`${mp.busiestDay.date}T12:00:00Z`)}` : '—';
+  const dayLabels = (mp.activity || []).map((item) => formatDate(`${item.date}T12:00:00Z`, { day: 'numeric', month: 'numeric', timeZone: 'UTC' }));
+  const hourColors = (mp.hours || []).map((item) => (item.hour === mp.busiestHour ? 'var(--orange)' : 'var(--neon-a)'));
+  const sig = JSON.stringify([st, mp.activity, mp.hours, ranks]);
+  const html = `
+    <div class="rt-dgroup"><h4>💬 النشاط في الرسائل</h4><div class="rt-dkpis">
+      ${kpi('رسائل اليوم', k('today', mp.today || 0))}${kpi('آخر 7 أيام', k('week', mp.week || 0))}${kpi('آخر 30 يوم', k('month', mp.month || 0))}${kpi('إجمالي الرسائل', k('total', mp.total || 0))}${kpi('متوسط يومي', k('avg', mp.avgPerDay || 0, 1))}${kpi('أيام النشاط', k('days', mp.activeDays || 0))}${kpi('أنشط ساعة', mp.busiestHour == null ? '—' : escapeHtml(hourLabel(mp.busiestHour)))}${kpi('أنشط يوم', `<span style="font-size:12px">${escapeHtml(busyDay)}</span>`)}
+    </div></div>
+    <div class="rt-chart-card" style="animation:none;margin-bottom:12px"><h3>الرسائل في آخر 14 يوم <small>بتوقيت القاهرة</small></h3>${svgBars({ values: (mp.activity || []).map((i) => i.count), labels: dayLabels, labelEvery: 2 })}</div>
+    <div class="rt-chart-card" style="animation:none;margin-bottom:16px"><h3>توزيع النشاط على ساعات اليوم <small>الساعة الأنشط بالبرتقالي</small></h3>${svgBars({ values: (mp.hours || []).map((i) => i.count), labels: (mp.hours || []).map((i) => String(i.hour)), colors: hourColors, labelEvery: 3, h: 160 })}</div>
+    <div class="rt-dgroup"><h4>✅ التسليمات والنقاط</h4><div class="rt-dkpis">
+      ${kpi('إجمالي التسليمات', k('sub', total))}${kpi('مقبولة', k('ok', approved))}${kpi('مرفوضة', k('rej', rejected))}${kpi('معلقة', k('pen', pending))}${kpi('نسبة القبول', `${k('rate', rate)}%`)}${kpi('النقاط', k('pts', Number(st.totalPoints) || 0))}${kpi('ترتيب الرسائل', rank(ranks.messages), rankNote(ranks.messages))}${kpi('ترتيب النقاط', rank(ranks.points), rankNote(ranks.points))}
+    </div>
+    ${total ? `<div class="rt-stack" style="margin-top:11px"><span style="width:${pct(approved)}%;background:var(--green)"></span><span style="width:${pct(pending)}%;background:var(--orange)"></span><span style="width:${pct(rejected)}%;background:var(--red)"></span></div><div class="rt-stack-legend"><span><i style="background:var(--green)"></i>مقبولة ${approved}</span><span><i style="background:var(--orange)"></i>معلقة ${pending}</span><span><i style="background:var(--red)"></i>مرفوضة ${rejected}</span></div>` : ''}
+    </div>
+    <div class="rt-dgroup"><h4>🗂️ الإدارة والحضور</h4><div class="rt-dkpis">
+      ${kpi('طلبات الإجازة', k('leave', Number(st.leaveRequests) || 0))}${kpi('طلبات إدارية', k('req', Number(st.adminRequests) || 0))}${kpi('الحالة في الموقع', online ? '🟢 متصل' : '⚪ غير متصل')}${kpi('أول رسالة', mp.firstAt ? escapeHtml(shortDate(mp.firstAt)) : '—')}${kpi('آخر رسالة', mp.lastAt ? escapeHtml(shortDate(mp.lastAt)) : '—')}
+    </div></div>`;
+  if (holder.dataset.sig !== sig + id) { holder.dataset.sig = sig + id; holder.innerHTML = html; }
+  rollPlay(holder);
+}
+function setRatingTab(name) {
+  $$('#rt-tabs [data-rt-tab]').forEach((tab) => { const active = tab.dataset.rtTab === name; tab.classList.toggle('active', active); tab.setAttribute('aria-selected', String(active)); });
+  $$('#rating-modal [data-rt-pane]').forEach((pane) => pane.classList.toggle('hidden', pane.dataset.rtPane !== name));
+  if (name === 'trend') renderRatingTrend();
+  if (name === 'stats') { rollReset('rtd:'); const holder = $('#rt-detail'); if (holder) delete holder.dataset.sig; loadRatingDetail(String(state.ratings.targetId)); }
+}
+
+// لوحة رسوم عامة في صفحة التقييمات
+function renderRatingCharts(scoped, aggs) {
+  const box = $('#rt-charts');
+  if (!box) return;
+  const ids = new Set(scoped.map((member) => String(member.id)));
+  const items = state.ratings.items.filter((item) => ids.has(item.targetId));
+  const now = Date.now();
+  const weeks = Array.from({ length: 8 }, (_, i) => ({ k: 7 - i, sum: 0, n: 0 }));
+  for (const item of items) { const k = Math.floor((now - new Date(item.createdAt).getTime()) / (7 * 864e5)); const w = weeks.find((x) => x.k === k); if (w) { w.sum += item.rating; w.n += 1; } }
+  const weekPts = weeks.map((w) => ({ x: shortDate(now - w.k * 7 * 864e5), v: w.n ? w.sum / w.n : null, color: w.n ? RATING_META[Math.round(w.sum / w.n)].color : '#888', tip: w.n ? `متوسط ${(w.sum / w.n).toFixed(2)} من ${w.n} تقييم` : 'مفيش تقييمات' }));
+  const dist = [1, 2, 3, 4, 5].map((n) => items.filter((item) => item.rating === n).length);
+  const distTotal = dist.reduce((a, b) => a + b, 0);
+  const days = Array.from({ length: 14 }, (_, i) => cairoDayKey(now - (13 - i) * 864e5));
+  const perDay = days.map((day) => items.filter((item) => cairoDayKey(item.createdAt) === day).length);
+  const ranking = scoped.map((member) => ({ member, agg: aggs.get(String(member.id)) })).filter((row) => row.agg).sort((a, b) => b.agg.avg - a.agg.avg).slice(0, 10).map((row) => ({ label: row.member.username, value: row.agg.avg, color: RATING_META[row.agg.level].color, text: `${row.agg.avg.toFixed(2)} (${row.agg.count})` }));
+  const activity = scoped.map((member) => ({ member, st: ratingStatsOf(member.id) })).filter((row) => Number(row.st.totalMessages) > 0).sort((a, b) => Number(b.st.totalMessages) - Number(a.st.totalMessages)).slice(0, 10).map((row) => ({ label: row.member.username, value: Number(row.st.totalMessages) || 0, text: `${rollFormat(row.st.totalMessages)} · اليوم ${rollFormat(row.st.dailyMessages || 0)}` }));
+  const empty = '<div class="task-empty">مفيش بيانات كفاية لسه.</div>';
+  const html = `
+    <section class="rt-chart-card wide" style="--i:0"><h3>تطور المتوسط العام <small>متوسط أسبوعي — آخر 8 أسابيع</small></h3>${items.length ? svgLine({ pts: weekPts, area: true }) : empty}</section>
+    <section class="rt-chart-card" style="--i:1"><h3>توزيع التقييمات <small>${rollFormat(distTotal)} تقييم</small></h3>${distTotal ? hBars([5, 4, 3, 2, 1].map((n) => ({ label: `${RATING_META[n].emoji} ${RATING_META[n].label}`, value: dist[n - 1], color: RATING_META[n].color, text: `${dist[n - 1]} · ${Math.round((dist[n - 1] / distTotal) * 100)}%` }))) : empty}</section>
+    <section class="rt-chart-card" style="--i:2"><h3>التقييمات يوميًا <small>آخر 14 يوم</small></h3>${distTotal ? svgBars({ values: perDay, labels: days.map((day) => day.slice(8)), labelEvery: 2, h: 170 }) : empty}</section>
+    <section class="rt-chart-card" style="--i:3"><h3>ترتيب الإداريين بالتقييم <small>أعلى 10</small></h3>${ranking.length ? hBars(ranking) : empty}</section>
+    <section class="rt-chart-card" style="--i:4"><h3>الأكثر نشاطًا في الرسائل <small>إجمالي · أعلى 10</small></h3>${activity.length ? hBars(activity) : empty}</section>`;
+  if (box.dataset.sig !== html) { box.dataset.sig = html; box.innerHTML = html; }
+}
+
 function renderRatings() {
   const grid = $('#rt-grid');
   const kpis = $('#rt-kpis');
@@ -2155,6 +2308,7 @@ function renderRatings() {
     kpi(3, 'تقييمات آخر 7 أيام', 'week', lastWeek, `إجمالي ${state.ratings.items.length.toLocaleString('en-US')} تقييم`, 0),
   ].join('');
   rollPlay(kpis);
+  renderRatingCharts(scoped, aggs);
 
   const query = state.ratings.search.trim().toLowerCase();
   let list = scoped.filter((member) => !query || [member.username, member.handle, member.id, member.roleName].some((v) => String(v || '').toLowerCase().includes(query)));
@@ -2192,7 +2346,7 @@ function renderRatings() {
       ${agg ? `<div class="rt-dist">${dist}</div>` : ''}
       <div class="rt-metrics"><span><b>${rollMarkup(`rt:${id}:d`, Number(stats.dailyMessages || 0))}</b><small>رسائل اليوم</small></span><span><b>${rollMarkup(`rt:${id}:t`, Number(stats.totalMessages || 0))}</b><small>إجمالي الرسائل</small></span><span><b>${rollMarkup(`rt:${id}:p`, Number(stats.totalPoints || 0))}</b><small>نقاط</small></span><span><b>${rollMarkup(`rt:${id}:a`, Number(stats.approvedSubmissions || 0))}</b><small>تسليمات مقبولة</small></span></div>
       ${noteHtml}
-      <div class="rt-actions"><button type="button" class="primary-button" data-rt-rate="${escapeHtml(id)}"${isMe ? ' disabled title="مينفعش تقيّم نفسك"' : ''}>${isMe ? 'ده حسابك' : '✪ قيّم الآن'}</button><button type="button" class="secondary-button" data-rt-history="${escapeHtml(id)}">السجل (${agg ? agg.count : 0})</button></div>
+      <div class="rt-actions"><button type="button" class="primary-button" data-rt-rate="${escapeHtml(id)}"${isMe ? ' disabled title="مينفعش تقيّم نفسك"' : ''}>${isMe ? 'ده حسابك' : '✪ قيّم الآن'}</button><button type="button" class="secondary-button" data-rt-history="${escapeHtml(id)}">📈 التفاصيل (${agg ? agg.count : 0})</button></div>
     </article>`;
   }).join('');
   rollPlay(grid);
@@ -2217,6 +2371,7 @@ function renderRatingModalBody() {
     return `<article class="rt-hist-row${item.id === state.ratings.justAddedId ? ' new' : ''}" style="--i:${Math.min(index, 8)}"><span class="rt-emoji">${meta.emoji}</span><div><b style="color:${meta.color}">${meta.label} · ${item.rating}/5</b><small>بواسطة ${escapeHtml(item.raterName || 'مسؤول')} · ${escapeHtml(formatDate(item.createdAt, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }))}</small>${item.note ? `<p>${escapeHtml(item.note)}</p>` : ''}</div><button type="button" class="rt-hist-del" data-rt-del="${item.id}" title="مسح التقييم ده" aria-label="مسح التقييم">🗑</button></article>`;
   }).join('') : '<div class="task-empty">مفيش تقييمات سابقة للعضو ده.</div>';
   $('#rt-clear-all')?.classList.toggle('hidden', !items.length);
+  if (!$('[data-rt-pane="trend"]')?.classList.contains('hidden')) renderRatingTrend();
 }
 function updateRatingSubmitState() {
   const button = $('#rt-submit');
@@ -2249,7 +2404,8 @@ function openRatingModal(id, { history = false } = {}) {
   updateRatingSubmitState();
   $('#rating-modal').classList.remove('hidden');
   document.body.classList.add('appearance-modal-open');
-  if (history) $('#rt-history')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const holder = $('#rt-detail'); if (holder) delete holder.dataset.sig;
+  setRatingTab(history ? 'trend' : 'rate');
 }
 function closeRatingModal() {
   $('#rating-modal')?.classList.add('hidden');
@@ -2326,6 +2482,7 @@ function wireRatings() {
     updateRatingSubmitState();
   });
   $('#rt-note')?.addEventListener('input', (event) => { $('#rt-note-count').textContent = `${event.target.value.length} / 600`; });
+  $('#rt-tabs')?.addEventListener('click', (event) => { const tab = event.target.closest('[data-rt-tab]'); if (tab) setRatingTab(tab.dataset.rtTab); });
   $('#rt-form')?.addEventListener('submit', submitRating);
   $('#rt-history')?.addEventListener('click', (event) => {
     const button = event.target.closest('[data-rt-del]');

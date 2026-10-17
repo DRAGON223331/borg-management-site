@@ -364,6 +364,7 @@
             <div class="monitor-heading-actions"><span class="page-heading-badge"><span class="status-dot"></span> للمسؤولين فقط</span><button id="rt-refresh" type="button" class="secondary-button compact">تحديث ↻</button></div>
           </div>
           <div id="rt-kpis" class="rt-kpis"></div>
+          <div id="rt-charts" class="rt-charts"></div>
           <div class="rt-toolbar">
             <div class="filter-tabs" id="rt-scope-tabs">
               <button class="filter-tab active" data-rt-scope="admins" type="button">🛡️ الإداريين</button>
@@ -466,17 +467,29 @@
         <button id="rt-modal-close" class="icon-button" type="button" aria-label="إغلاق" data-rating-close>×</button>
       </header>
       <div id="rt-modal-stats" class="rt-modal-stats"></div>
-      <form id="rt-form" class="rt-form" autocomplete="off">
-        <div class="appearance-setting-heading"><b>اختار التقييم</b><small>RATING</small></div>
-        <div class="rt-options" id="rt-options" role="radiogroup" aria-label="التقييم"></div>
-        <label class="rt-note-label" for="rt-note">ملاحظة (اختياري)</label>
-        <textarea id="rt-note" maxlength="600" rows="3" placeholder="اكتب ملاحظتك على تفاعل الإداري وشغله..."></textarea>
-        <div class="rt-note-meta"><small id="rt-note-count">0 / 600</small><small class="muted">هتتبعت تلقائيًا لروم التقييمات في ديسكورد.</small></div>
-        <button id="rt-submit" class="primary-button" type="submit" disabled>اختار تقييم الأول</button>
-        <p id="rt-self-warning" class="rt-self-warning hidden">ده حسابك، مينفعش تقيّم نفسك.</p>
-      </form>
-      <div class="appearance-setting-heading rt-history-heading"><b>سجل التقييمات</b><span class="rt-history-tools"><small id="rt-history-count">0</small><button id="rt-clear-all" type="button" class="rt-danger-btn hidden">🗑️ مسح كل التقييمات</button></span></div>
-      <div id="rt-history" class="rt-history"></div>
+      <div class="rt-tabs" id="rt-tabs" role="tablist">
+        <button class="rt-tab active" type="button" role="tab" data-rt-tab="rate">✪ تقييم</button>
+        <button class="rt-tab" type="button" role="tab" data-rt-tab="trend">📈 التطور</button>
+        <button class="rt-tab" type="button" role="tab" data-rt-tab="stats">📊 إحصائيات مفصلة</button>
+        <button class="rt-tab" type="button" role="tab" data-rt-tab="history">🕘 السجل <span id="rt-history-count" class="rt-tab-count">0</span></button>
+      </div>
+      <div class="rt-pane" data-rt-pane="rate">
+        <form id="rt-form" class="rt-form" autocomplete="off">
+          <div class="appearance-setting-heading"><b>اختار التقييم</b><small>RATING</small></div>
+          <div class="rt-options" id="rt-options" role="radiogroup" aria-label="التقييم"></div>
+          <label class="rt-note-label" for="rt-note">ملاحظة (اختياري)</label>
+          <textarea id="rt-note" maxlength="600" rows="3" placeholder="اكتب ملاحظتك على تفاعل الإداري وشغله..."></textarea>
+          <div class="rt-note-meta"><small id="rt-note-count">0 / 600</small><small class="muted">هتتبعت تلقائيًا لروم التقييمات في ديسكورد.</small></div>
+          <button id="rt-submit" class="primary-button" type="submit" disabled>اختار تقييم الأول</button>
+          <p id="rt-self-warning" class="rt-self-warning hidden">ده حسابك، مينفعش تقيّم نفسك.</p>
+        </form>
+      </div>
+      <div class="rt-pane hidden" data-rt-pane="trend"><div id="rt-trend-chart"></div></div>
+      <div class="rt-pane hidden" data-rt-pane="stats"><div id="rt-detail"><div class="loading-state">جاري تحميل الإحصائيات...</div></div></div>
+      <div class="rt-pane hidden" data-rt-pane="history">
+        <div class="rt-history-heading rt-history-bar"><b>كل التقييمات</b><button id="rt-clear-all" type="button" class="rt-danger-btn hidden">🗑️ مسح كل التقييمات</button></div>
+        <div id="rt-history" class="rt-history"></div>
+      </div>
     </div>
   </section>
 
