@@ -270,9 +270,118 @@ async function handleTaskSyncCommand(interaction, res) {
   await work;
 }
 
+async function discordApiWithRetry(route, options = {}, maxAttempts = 8) {
+  if (!BOT_TOKEN) throw new Error('توكن البوت غير مضبوط.');
+  for (let attempt = 0; ; attempt += 1) {
+    const response = await fetch(`${DISCORD_API}${route}`, {
+      ...options,
+      headers: { Authorization: `Bot ${BOT_TOKEN}`, ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) },
+    });
+    let payload = null;
+    if (response.status !== 204) {
+      try { payload = await response.json(); } catch { payload = null; }
+    }
+    if (response.status === 429 && attempt < maxAttempts) {
+      const retryAfter = Number(payload?.retry_after ?? response.headers.get('retry-after') ?? 1);
+      await new Promise((resolve) => setTimeout(resolve, Math.max(250, retryAfter * 1000)));
+      continue;
+    }
+    if (response.status >= 500 && attempt < 4) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(8000, 500 * (2 ** attempt))));
+      continue;
+    }
+    if (!response.ok) {
+      const error = new Error(cleanText(payload?.message || `Discord API HTTP ${response.status}`, 180));
+      error.status = response.status;
+      error.discordCode = payload?.code;
+      throw error;
+    }
+    return payload;
+  }
+}
+
+async function handleClearBotDmsCommand(interaction, res) {
+  if (!(await isCsvAuthorized(interaction))) {
+    return send(res, { type: 4, data: { content: 'أمر مسح رسائل الخاص متاح لمسؤولي الإدارة فقط.', flags: 64 } });
+  }
+  const confirmed = interaction.data?.options?.find((option) => ['confirm', 'تأكيد'].includes(option.name))?.value === true;
+  if (!confirmed) {
+    return send(res, { type: 4, data: { content: 'لم يتم حذف أي رسالة. شغّل الأمر مرة أخرى مع تأكيد الحذف.', flags: 64 } });
+  }
+
+  // Acknowledge immediately; the scan can take time when many messages exist.
+  send(res, { type: 5, data: { flags: 64 } });
+  const followup = `${DISCORD_API}/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`;
+  const work = (async () => {
+    const stats = { recipients: 0, channelsScanned: 0, messagesDeleted: 0, messageErrors: 0, recipientErrors: 0, pagesScanned: 0 };
+    const updateReply = async (content) => {
+      const response = await fetch(followup, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content, allowed_mentions: { parse: [] } }),
+      });
+      if (!response.ok) throw new Error(`Discord interaction webhook HTTP ${response.status}`);
+    };
+    try {
+      const sql = await getSql();
+      const recipientIds = new Set();
+      // This project sends DM notices after a submission is approved or rejected.
+      // Restrict the scan to reviewed submissions so we do not open empty DMs for pending users.
+      const submissions = await sql`SELECT DISTINCT user_id FROM submissions WHERE status IN ('approved','rejected') AND user_id IS NOT NULL AND user_id <> ''`;
+      for (const row of submissions) if (/^\d{15,22}$/.test(String(row.user_id || ''))) recipientIds.add(String(row.user_id));
+      const bot = await discordApiWithRetry('/users/@me');
+      if (!bot?.id) throw new Error('تعذر تحديد حساب البوت من Discord.');
+      stats.recipients = recipientIds.size;
+
+      for (const userId of recipientIds) {
+        try {
+          // Reopen the existing DM (does not send a new message); then inspect its history oldest-first by cursor.
+          const dm = await discordApiWithRetry('/users/@me/channels', {
+            method: 'POST', body: JSON.stringify({ recipient_id: userId }),
+          });
+          if (!dm?.id) { stats.recipientErrors += 1; continue; }
+          stats.channelsScanned += 1;
+          let before = '';
+          while (true) {
+            const route = `/channels/${dm.id}/messages?limit=100${before ? `&before=${before}` : ''}`;
+            const page = await discordApiWithRetry(route);
+            if (!Array.isArray(page) || page.length === 0) break;
+            stats.pagesScanned += 1;
+            for (const message of page) {
+              if (String(message?.author?.id || '') !== String(bot.id)) continue;
+              try {
+                await discordApiWithRetry(`/channels/${dm.id}/messages/${message.id}`, { method: 'DELETE' });
+                stats.messagesDeleted += 1;
+              } catch (error) {
+                // A deleted message may disappear between reading the page and deleting it.
+                if (error.status === 404 || error.discordCode === 10008) continue;
+                stats.messageErrors += 1;
+              }
+            }
+            const oldestId = String(page[page.length - 1]?.id || '');
+            if (!oldestId || oldestId === before || page.length < 100) break;
+            before = oldestId;
+          }
+        } catch (error) {
+          stats.recipientErrors += 1;
+          console.warn(`[clear bot DMs] recipient ${userId}:`, cleanText(error?.message || error, 160));
+        }
+      }
+      const content = `✅ انتهى فحص الخاص.\nالمستخدمون المعروفون الذين تمت مراجعتهم: **${stats.recipients}**\nمحادثات الخاص التي تم فحصها: **${stats.channelsScanned}**\nرسائل البوت التي تم حذفها: **${stats.messagesDeleted}**\nأخطاء حذف الرسائل: **${stats.messageErrors}**\nمحادثات تعذر الوصول إليها: **${stats.recipientErrors}**`;
+      await updateReply(content);
+    } catch (error) {
+      console.error('[clear bot DMs command]', cleanText(error?.message || error, 240));
+      try { await updateReply(`تعذر إكمال مسح رسائل الخاص: ${cleanText(error?.message || error, 160)}`); } catch { /* interaction token may have expired */ }
+    }
+  })();
+  try { require('@vercel/functions').waitUntil(work); } catch { /* local fallback */ }
+  await work;
+}
+
 async function handleCommand(interaction, res) {
   const name = String(interaction.data?.name || '');
   if (name === 'csv') return handleCsvCommand(interaction, res);
+  if (name === 'clear-bot-dms' || name === 'مسح-رسائل-الخاص') return handleClearBotDmsCommand(interaction, res);
   if (name === 'sync-tasks' || name === 'مزامنة-المهمات') return handleTaskSyncCommand(interaction, res);
   if (name === 'task-report' || name === 'تقرير-المهمات') return handleTaskReportCommand(interaction, res);
   if (name !== 'نقاطي' && name !== 'mypoints') return send(res, { type: 4, data: { content: 'الأمر ده مش مدعوم.', flags: 64 } });

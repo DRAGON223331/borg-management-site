@@ -503,6 +503,18 @@ const SLASH_COMMANDS = [
   { name: 'mypoints', type: 1, description: 'Show how many points you have', description_localizations: { ar: 'اعرف عندك كام نقطة' } },
   { name: 'task-report', type: 1, dm_permission: false, description: 'Post staff members who have incomplete required tasks', description_localizations: { ar: 'إرسال قائمة الاستاف الذين لم يكملوا المهمات الإجبارية' }, name_localizations: { ar: 'تقرير-المهمات' } },
   {
+    name: 'clear-bot-dms', type: 1, dm_permission: false,
+    description: 'Delete messages sent by this bot in users’ DMs',
+    description_localizations: { ar: 'حذف رسائل البوت من الخاص عند الأعضاء' },
+    name_localizations: { ar: 'مسح-رسائل-الخاص' },
+    options: [{
+      type: 5, name: 'confirm', required: true,
+      description: 'Confirm that you want to delete the bot’s DM messages',
+      description_localizations: { ar: 'أكّد أنك تريد حذف رسائل البوت من الخاص نهائيًا' },
+      name_localizations: { ar: 'تأكيد' },
+    }],
+  },
+  {
     name: 'csv', type: 1, dm_permission: false,
     description: 'Export staff data as a CSV file (managers only)',
     description_localizations: { ar: 'تصدير بيانات الاستاف كملف CSV (للمسؤولين فقط)' },

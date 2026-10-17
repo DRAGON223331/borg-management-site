@@ -354,6 +354,67 @@ async function runTaskMessageSync({ reportToLog = true } = {}) {
 }
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (interaction.isChatInputCommand?.() && ['clear-bot-dms', 'مسح-رسائل-الخاص'].includes(String(interaction.commandName || ''))) {
+    try {
+      if (!(await isReviewManagerAnywhere(interaction))) {
+        return interaction.reply({ content: 'أمر مسح رسائل الخاص متاح لمسؤولي الإدارة فقط.', ephemeral: true });
+      }
+      const confirmOption = interaction.options?.data?.find((option) => ['confirm', 'تأكيد'].includes(option.name));
+      if (confirmOption?.value !== true) {
+        return interaction.reply({ content: 'لم يتم حذف أي رسالة. شغّل الأمر مرة أخرى مع تأكيد الحذف.', ephemeral: true });
+      }
+      await interaction.deferReply({ ephemeral: true });
+      const stats = { recipients: 0, channelsScanned: 0, messagesDeleted: 0, messageErrors: 0, recipientErrors: 0, pagesScanned: 0 };
+      try {
+        const submissions = await sql`SELECT DISTINCT user_id FROM submissions WHERE status IN ('approved','rejected') AND user_id IS NOT NULL AND user_id <> ''`;
+        const recipientIds = [...new Set(submissions.map((row) => String(row.user_id || '')).filter((id) => /^\d{15,22}$/.test(id)))];
+        stats.recipients = recipientIds.length;
+        const botId = String(client.user?.id || '');
+        if (!botId) throw new Error('تعذر تحديد حساب البوت.');
+
+        for (const userId of recipientIds) {
+          try {
+            const user = await client.users.fetch(userId);
+            const dm = await user.createDM();
+            stats.channelsScanned += 1;
+            let before;
+            while (true) {
+              const page = await dm.messages.fetch({ limit: 100, ...(before ? { before } : {}) });
+              if (!page.size) break;
+              stats.pagesScanned += 1;
+              const pageItems = [...page.values()];
+              for (const message of pageItems) {
+                if (String(message.author?.id || '') !== botId) continue;
+                try {
+                  await message.delete();
+                  stats.messagesDeleted += 1;
+                } catch (error) {
+                  if (Number(error?.code) === 10008 || Number(error?.status) === 404) continue;
+                  stats.messageErrors += 1;
+                }
+              }
+              const oldestId = String(pageItems[pageItems.length - 1]?.id || '');
+              if (!oldestId || oldestId === before || page.size < 100) break;
+              before = oldestId;
+            }
+          } catch (error) {
+            stats.recipientErrors += 1;
+            console.warn(`[clear bot DMs] recipient ${userId}:`, clean(error?.message || error, 160));
+          }
+        }
+        return interaction.editReply(`✅ انتهى فحص الخاص.\nالمستخدمون المعروفون الذين تمت مراجعتهم: **${stats.recipients}**\nمحادثات الخاص التي تم فحصها: **${stats.channelsScanned}**\nرسائل البوت التي تم حذفها: **${stats.messagesDeleted}**\nأخطاء حذف الرسائل: **${stats.messageErrors}**\nمحادثات تعذر الوصول إليها: **${stats.recipientErrors}**`);
+      } catch (error) {
+        console.error('[clear bot DMs command]', error.stack || error.message || error);
+        return interaction.editReply(`تعذر إكمال مسح رسائل الخاص: ${clean(error?.message || error, 160)}`);
+      }
+    } catch (error) {
+      console.error('[clear bot DMs command interaction]', error.stack || error.message || error);
+      try {
+        if (interaction.deferred || interaction.replied) return interaction.followUp({ content: `تعذر تنفيذ الأمر: ${clean(error?.message || error, 160)}`, ephemeral: true });
+        return interaction.reply({ content: `تعذر تنفيذ الأمر: ${clean(error?.message || error, 160)}`, ephemeral: true });
+      } catch { return; }
+    }
+  }
   if (interaction.isChatInputCommand?.() && ['sync-tasks', 'مزامنة-المهمات'].includes(String(interaction.commandName || ''))) {
     try {
       if (!(await isReviewManagerAnywhere(interaction))) return interaction.reply({ content: 'أمر مزامنة المهمات متاح لمسؤولي الإدارة فقط.', ephemeral: true });
