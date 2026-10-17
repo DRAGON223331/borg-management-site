@@ -4,6 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#b42336">
+  <script>
+    /* Apply the saved theme before first paint to avoid a colour flash. */
+    (function () {
+      try {
+        var a = JSON.parse(localStorage.getItem('borg-cyber-appearance-v1') || '{}');
+        var r = document.documentElement;
+        var presets = ['red','crimson','ember','blue','cyan','violet','emerald','gold','pink'];
+        if (a.accent === 'custom' && a.customVars && typeof a.customVars === 'object') {
+          r.dataset.accent = 'custom';
+          for (var k in a.customVars) { if (/^--[a-z0-9-]+$/.test(k)) r.style.setProperty(k, String(a.customVars[k])); }
+        } else if (presets.indexOf(a.accent) > -1) { r.dataset.accent = a.accent; }
+      } catch (e) {}
+    })();
+  </script>
   <meta name="description" content="مركز إدارة البرج لمتابعة مهمات الاستاف، وتسليم الأدلة، والتواصل بين أعضاء الاستاف والإدارة.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://borg-management-site.vercel.app/">
@@ -423,10 +437,17 @@
     <button class="appearance-backdrop" type="button" data-appearance-close aria-label="إغلاق إعدادات المظهر"></button>
     <div class="appearance-panel">
       <header class="appearance-header"><div><span class="tiny-label">PERSONAL INTERFACE</span><h2 id="appearance-title">تخصيص واجهة القيادة</h2><p>احفظ اللون والتأثيرات اللي تناسبك على نفس الجهاز.</p></div><button id="appearance-close" class="icon-button" type="button" aria-label="إغلاق">×</button></header>
-      <section class="appearance-setting"><div class="appearance-setting-heading"><b>لون النيون</b><small>ACCENT PROFILE</small></div><div class="appearance-choices">
-        <button type="button" class="appearance-choice" data-accent-choice="red" aria-pressed="false"><i class="swatch swatch-red"></i><span><b>Borg Red</b><small>أحمر صورة السيرفر</small></span></button>
+      <section class="appearance-setting"><div class="appearance-setting-heading"><b>ثيم الموقع</b><small>THEME</small></div><div class="appearance-choices">
+        <button type="button" class="appearance-choice" data-accent-choice="red" aria-pressed="false"><i class="swatch swatch-red"></i><span><b>Borg Red<em class="appearance-default-badge">الافتراضي</em></b><small>أحمر على أسود</small></span></button>
         <button type="button" class="appearance-choice" data-accent-choice="crimson" aria-pressed="false"><i class="swatch swatch-crimson"></i><span><b>Crimson</b><small>قرمزي داكن</small></span></button>
         <button type="button" class="appearance-choice" data-accent-choice="ember" aria-pressed="false"><i class="swatch swatch-ember"></i><span><b>Ember Red</b><small>أحمر ناري</small></span></button>
+        <button type="button" class="appearance-choice" data-accent-choice="blue" aria-pressed="false"><i class="swatch swatch-blue"></i><span><b>Royal Blue</b><small>أزرق ملكي</small></span></button>
+        <button type="button" class="appearance-choice" data-accent-choice="cyan" aria-pressed="false"><i class="swatch swatch-cyan"></i><span><b>Cyber Cyan</b><small>سماوي نيون</small></span></button>
+        <button type="button" class="appearance-choice" data-accent-choice="violet" aria-pressed="false"><i class="swatch swatch-violet"></i><span><b>Violet</b><small>بنفسجي</small></span></button>
+        <button type="button" class="appearance-choice" data-accent-choice="emerald" aria-pressed="false"><i class="swatch swatch-emerald"></i><span><b>Emerald</b><small>أخضر زمردي</small></span></button>
+        <button type="button" class="appearance-choice" data-accent-choice="gold" aria-pressed="false"><i class="swatch swatch-gold"></i><span><b>Gold</b><small>ذهبي</small></span></button>
+        <button type="button" class="appearance-choice" data-accent-choice="pink" aria-pressed="false"><i class="swatch swatch-pink"></i><span><b>Rose Pink</b><small>وردي</small></span></button>
+        <div class="appearance-choice appearance-custom" data-accent-choice="custom" role="button" tabindex="0" aria-pressed="false"><input id="appearance-custom-color" class="swatch swatch-custom" type="color" value="#dd2f2e" aria-label="اختيار لون مخصص"><span><b>لون مخصص</b><small>اختار أي لون وهيتظبط معاه الخلفية والأزرار تلقائيًا</small></span></div>
       </div></section>
       <section class="appearance-setting"><div class="appearance-setting-heading"><b>قوة الأنيميشن</b><small>MOTION ENGINE</small></div><div class="appearance-motion-options">
         <button type="button" data-motion-choice="strong" aria-pressed="false"><b>قوي</b><small>طاقة وتأثيرات لافتة</small></button>

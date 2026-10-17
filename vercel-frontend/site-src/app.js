@@ -105,12 +105,59 @@ function setButtonLoading(button, loading, text = 'جاري التنفيذ...') 
   }
 }
 const APPEARANCE_KEY = 'borg-cyber-appearance-v1';
-const DEFAULT_APPEARANCE = { accent: 'red', motion: 'strong', scanlines: true };
+const ACCENT_PRESETS = ['red', 'crimson', 'ember', 'blue', 'cyan', 'violet', 'emerald', 'gold', 'pink'];
+const DEFAULT_CUSTOM_COLOR = '#dd2f2e';
+const DEFAULT_APPEARANCE = { accent: 'red', custom: DEFAULT_CUSTOM_COLOR, motion: 'strong', scanlines: true };
+const CUSTOM_THEME_KEYS = ['--neon-a', '--neon-a-rgb', '--neon-b', '--neon-b-rgb', '--neon-c', '--neon-c-rgb', '--neon-lime', '--purple', '--purple-bright', '--blue', '--bg-deep', '--bg-deep-2', '--tint-rgb', '--bg', '--surface', '--surface-2', '--surface-3', '--text', '--muted', '--muted-2', '--accent-text', '--accent-pale', '--accent-btn-1', '--accent-btn-2'];
+function isHexColor(value) { return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value); }
+function hexToHsl(hex) {
+  const r = parseInt(hex.slice(1, 3), 16) / 255, g = parseInt(hex.slice(3, 5), 16) / 255, b = parseInt(hex.slice(5, 7), 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2, d = max - min;
+  let h = 0, s = 0;
+  if (d) {
+    s = d / (1 - Math.abs(2 * l - 1));
+    if (max === r) h = ((g - b) / d) % 6; else if (max === g) h = (b - r) / d + 2; else h = (r - g) / d + 4;
+    h = (h * 60 + 360) % 360;
+  }
+  return { h, s, l };
+}
+function hslToRgb(h, s, l) {
+  const c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = l - c / 2;
+  const [r, g, b] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  return [r, g, b].map((v) => Math.round((v + m) * 255));
+}
+function hslColor(h, s, l) {
+  const rgb = hslToRgb(h, Math.min(1, Math.max(0, s)), Math.min(1, Math.max(0, l)));
+  return { rgb: rgb.join(','), hex: `#${rgb.map((v) => v.toString(16).padStart(2, '0')).join('')}` };
+}
+function buildCustomThemeVars(hex) {
+  const base = hexToHsl(hex);
+  const gray = base.s < 0.08;
+  const h = base.h;
+  const s = gray ? base.s : Math.max(base.s, 0.55);
+  const l = Math.min(Math.max(base.l, 0.42), 0.62);
+  const bgSat = gray ? 0.04 : 0.32;
+  const a = hslColor(h, s, l), b = hslColor(h, s, Math.min(0.8, l + 0.16)), c = hslColor(h, s, 0.27);
+  const text = hslColor(h, s, 0.76), pale = hslColor(h, gray ? s : 0.9, 0.87);
+  const btn1 = hslColor(h, s, Math.max(0.36, l - 0.05)), btn2 = hslColor(h, s, Math.max(0.24, l - 0.2));
+  const bgDeep = hslColor(h, bgSat, 0.032), bgDeep2 = hslColor(h, bgSat, 0.05), tint = hslColor(h, bgSat + 0.06, 0.06);
+  const surface = hslColor(h, bgSat - 0.04, 0.07), surface2 = hslColor(h, bgSat - 0.06, 0.095), surface3 = hslColor(h, bgSat - 0.08, 0.135);
+  return {
+    '--neon-a': a.hex, '--neon-a-rgb': a.rgb, '--neon-b': b.hex, '--neon-b-rgb': b.rgb, '--neon-c': c.hex, '--neon-c-rgb': c.rgb, '--neon-lime': text.hex,
+    '--purple': a.hex, '--purple-bright': b.hex, '--blue': b.hex,
+    '--bg-deep': bgDeep.hex, '--bg-deep-2': bgDeep2.hex, '--tint-rgb': tint.rgb, '--bg': bgDeep.hex,
+    '--surface': surface.hex, '--surface-2': surface2.hex, '--surface-3': surface3.hex,
+    '--text': hslColor(h, gray ? 0 : 0.4, 0.96).hex, '--muted': hslColor(h, gray ? 0 : 0.12, 0.7).hex, '--muted-2': hslColor(h, gray ? 0 : 0.1, 0.55).hex,
+    '--accent-text': text.hex, '--accent-pale': pale.hex, '--accent-btn-1': btn1.hex, '--accent-btn-2': btn2.hex,
+  };
+}
 function readAppearance() {
   try {
     const saved = JSON.parse(localStorage.getItem(APPEARANCE_KEY) || '{}');
+    const custom = isHexColor(saved.custom) ? saved.custom.toLowerCase() : DEFAULT_APPEARANCE.custom;
     return {
-      accent: ['red', 'crimson', 'ember'].includes(saved.accent) ? saved.accent : DEFAULT_APPEARANCE.accent,
+      accent: ACCENT_PRESETS.includes(saved.accent) || saved.accent === 'custom' ? saved.accent : DEFAULT_APPEARANCE.accent,
+      custom,
       motion: ['strong', 'balanced', 'calm'].includes(saved.motion) ? saved.motion : DEFAULT_APPEARANCE.motion,
       scanlines: typeof saved.scanlines === 'boolean' ? saved.scanlines : DEFAULT_APPEARANCE.scanlines,
     };
@@ -121,13 +168,24 @@ function applyAppearance(appearance = readAppearance()) {
   root.dataset.accent = appearance.accent;
   root.dataset.motion = appearance.motion;
   root.dataset.scanlines = String(appearance.scanlines);
+  if (appearance.accent === 'custom') {
+    const vars = buildCustomThemeVars(appearance.custom);
+    CUSTOM_THEME_KEYS.forEach((key) => root.style.setProperty(key, vars[key]));
+  } else {
+    CUSTOM_THEME_KEYS.forEach((key) => root.style.removeProperty(key));
+  }
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
+  if (themeMeta) { const color = getComputedStyle(root).getPropertyValue('--accent-btn-2').trim(); if (color) themeMeta.setAttribute('content', color); }
+  const customInput = $('#appearance-custom-color'); if (customInput) customInput.value = appearance.custom;
   $$('[data-accent-choice]').forEach((button) => { const active = button.dataset.accentChoice === appearance.accent; button.classList.toggle('selected', active); button.setAttribute('aria-pressed', String(active)); });
   $$('[data-motion-choice]').forEach((button) => { const active = button.dataset.motionChoice === appearance.motion; button.classList.toggle('selected', active); button.setAttribute('aria-pressed', String(active)); });
   const scanlines = $('#appearance-scanlines'); if (scanlines) scanlines.checked = appearance.scanlines;
 }
 function saveAppearance(patch) {
   const next = { ...readAppearance(), ...patch };
-  try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(next)); } catch { /* Privacy mode may disable persistent storage; keep the current session styling. */ }
+  const toStore = { ...next };
+  if (next.accent === 'custom') toStore.customVars = buildCustomThemeVars(next.custom); // lets index.html paint the saved theme before app.js loads
+  try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(toStore)); } catch { /* Privacy mode may disable persistent storage; keep the current session styling. */ }
   applyAppearance(next);
 }
 function wireAppearanceControls() {
@@ -141,7 +199,15 @@ function wireAppearanceControls() {
   closeButton?.addEventListener('click', close);
   modal.querySelectorAll('[data-appearance-close]').forEach((button) => button.addEventListener('click', close));
   document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !modal.classList.contains('hidden')) close(); });
-  $$('[data-accent-choice]').forEach((button) => button.addEventListener('click', () => saveAppearance({ accent: button.dataset.accentChoice })));
+  $$('[data-accent-choice]').forEach((button) => {
+    button.addEventListener('click', () => saveAppearance({ accent: button.dataset.accentChoice }));
+    button.addEventListener('keydown', (event) => { if (button.tagName !== 'BUTTON' && (event.key === 'Enter' || event.key === ' ') && event.target === button) { event.preventDefault(); saveAppearance({ accent: button.dataset.accentChoice }); } });
+  });
+  const customColor = $('#appearance-custom-color');
+  if (customColor) {
+    customColor.addEventListener('input', () => { if (isHexColor(customColor.value)) saveAppearance({ accent: 'custom', custom: customColor.value.toLowerCase() }); });
+    customColor.addEventListener('keydown', (event) => event.stopPropagation());
+  }
   $$('[data-motion-choice]').forEach((button) => button.addEventListener('click', () => saveAppearance({ motion: button.dataset.motionChoice })));
   $('#appearance-scanlines')?.addEventListener('change', (event) => saveAppearance({ scanlines: event.currentTarget.checked }));
   $('#appearance-reset')?.addEventListener('click', () => { try { localStorage.removeItem(APPEARANCE_KEY); } catch {} applyAppearance({ ...DEFAULT_APPEARANCE }); showToast('تمت إعادة ضبط إعدادات المظهر.', 'success'); });
