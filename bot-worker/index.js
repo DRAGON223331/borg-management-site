@@ -37,6 +37,7 @@ const client = new Client({
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildPresences,
+    GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
   ],
@@ -83,6 +84,91 @@ async function ensureDiscordPresenceSchema() {
   }
   return presenceSchemaPromise;
 }
+let voiceTimeSchemaPromise;
+async function ensureVoiceTimeSchema() {
+  if (!voiceTimeSchemaPromise) {
+    voiceTimeSchemaPromise = (async () => {
+      await sql`CREATE TABLE IF NOT EXISTS discord_voice_sessions (
+        id BIGSERIAL PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        username TEXT NOT NULL DEFAULT '',
+        channel_id TEXT NOT NULL,
+        joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        ended_at TIMESTAMPTZ,
+        CHECK (ended_at IS NULL OR ended_at >= joined_at)
+      )`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_discord_voice_sessions_day ON discord_voice_sessions(guild_id, joined_at DESC, user_id)`;
+      await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_discord_voice_sessions_one_open ON discord_voice_sessions(guild_id, user_id) WHERE ended_at IS NULL`;
+      await sql`CREATE TABLE IF NOT EXISTS discord_voice_time_meta (
+        guild_id TEXT PRIMARY KEY,
+        last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+    })().catch((error) => { voiceTimeSchemaPromise = null; throw error; });
+  }
+  return voiceTimeSchemaPromise;
+}
+async function recordVoiceTimeHeartbeat() {
+  await ensureVoiceTimeSchema();
+  await sql`INSERT INTO discord_voice_time_meta(guild_id, last_seen) VALUES (${STAFF_GUILD_ID}, NOW())
+    ON CONFLICT (guild_id) DO UPDATE SET last_seen = NOW()`;
+}
+async function startVoiceTimeTracking() {
+  await ensureVoiceTimeSchema();
+  // Close any session left open by a prior worker process at its last known heartbeat,
+  // never counting an unknown outage as if the member had stayed in voice the whole time.
+  const previous = await sql`SELECT last_seen AS "lastSeen" FROM discord_voice_time_meta WHERE guild_id = ${STAFF_GUILD_ID} LIMIT 1`;
+  const stopAt = previous[0]?.lastSeen ? new Date(previous[0].lastSeen).toISOString() : new Date().toISOString();
+  await sql`UPDATE discord_voice_sessions
+    SET ended_at = GREATEST(joined_at, LEAST(NOW(), ${stopAt}::timestamptz))
+    WHERE guild_id = ${STAFF_GUILD_ID} AND ended_at IS NULL`;
+
+  const guild = await client.guilds.fetch(STAFF_GUILD_ID);
+  let activeCount = 0;
+  for (const channel of guild.channels.cache.values()) {
+    if (!channel.isVoiceBased?.() || !channel.members) continue;
+    for (const member of channel.members.values()) {
+      if (!member?.user || member.user.bot) continue;
+      const userId = String(member.id);
+      const username = String(member.user.globalName || member.user.username || userId).slice(0, 100);
+      await sql`INSERT INTO discord_voice_sessions(guild_id, user_id, username, channel_id, joined_at)
+        VALUES (${STAFF_GUILD_ID}, ${userId}, ${username}, ${String(channel.id)}, NOW())
+        ON CONFLICT (guild_id, user_id) WHERE ended_at IS NULL
+        DO UPDATE SET username = EXCLUDED.username, channel_id = EXCLUDED.channel_id, joined_at = EXCLUDED.joined_at`;
+      activeCount += 1;
+    }
+  }
+  await recordVoiceTimeHeartbeat();
+  console.log(`[voice-time] startup reconciliation complete; currently in voice=${activeCount}`);
+}
+async function recordVoiceStateDuration(oldState, newState) {
+  const guildId = String(newState.guild?.id || oldState.guild?.id || '');
+  if (guildId !== STAFF_GUILD_ID) return;
+  const userId = String(newState.id || oldState.id || '');
+  if (!userId) return;
+  const member = newState.member || oldState.member || newState.guild?.members?.cache?.get(userId);
+  if (member?.user?.bot) return;
+  const oldChannelId = oldState.channelId ? String(oldState.channelId) : null;
+  const newChannelId = newState.channelId ? String(newState.channelId) : null;
+  if (oldChannelId === newChannelId) return;
+  const username = String(member?.user?.globalName || member?.user?.username || userId).slice(0, 100);
+  try {
+    await ensureVoiceTimeSchema();
+    if (oldChannelId) {
+      await sql`UPDATE discord_voice_sessions SET ended_at = GREATEST(joined_at, NOW())
+        WHERE guild_id = ${STAFF_GUILD_ID} AND user_id = ${userId} AND ended_at IS NULL`;
+    }
+    if (newChannelId) {
+      await sql`INSERT INTO discord_voice_sessions(guild_id, user_id, username, channel_id, joined_at)
+        VALUES (${STAFF_GUILD_ID}, ${userId}, ${username}, ${newChannelId}, NOW())
+        ON CONFLICT (guild_id, user_id) WHERE ended_at IS NULL
+        DO UPDATE SET username = EXCLUDED.username, channel_id = EXCLUDED.channel_id, joined_at = EXCLUDED.joined_at`;
+    }
+  } catch (error) {
+    console.error('[voice-time] failed to record voice state:', error.stack || error.message || error);
+  }
+}
+
 async function syncStaffPresenceSnapshot() {
   await ensureDiscordPresenceSchema();
   // Timestamp at snapshot start so an in-flight PresenceUpdate always wins over this snapshot.
@@ -220,9 +306,13 @@ client.on(Events.VoiceStateUpdate, (oldState, newState) => {
   if (!member?.user) return;
   void recordOfflinePresenceActivity({ guild: newState.guild, member, user: member.user, type: 'voice' });
 });
+client.on(Events.VoiceStateUpdate, (oldState, newState) => { void recordVoiceStateDuration(oldState, newState); });
 client.on(Events.GuildMemberRemove, async (member) => {
   if (String(member.guild?.id || '') !== STAFF_GUILD_ID) return;
   try {
+    await ensureVoiceTimeSchema();
+    await sql`UPDATE discord_voice_sessions SET ended_at = GREATEST(joined_at, NOW())
+      WHERE guild_id = ${STAFF_GUILD_ID} AND user_id = ${String(member.id)} AND ended_at IS NULL`;
     await ensureDiscordPresenceSchema();
     await sql`DELETE FROM discord_presence WHERE guild_id = ${STAFF_GUILD_ID} AND user_id = ${String(member.id)}`;
     await sql`DELETE FROM discord_presence_activity WHERE guild_id = ${STAFF_GUILD_ID} AND user_id = ${String(member.id)}`;
@@ -516,6 +606,11 @@ client.once(Events.ClientReady, () => {
   // distinguish a stopped process from a running worker whose first member fetch failed.
   void recordPresenceHeartbeat();
   void runPresenceSnapshot('startup');
+  void startVoiceTimeTracking().then(() => {
+    setInterval(() => {
+      recordVoiceTimeHeartbeat().catch((error) => console.error('[voice-time heartbeat]', error.message || error));
+    }, 60 * 1000).unref();
+  }).catch((error) => console.error('[voice-time startup]', error.stack || error.message || error));
   setInterval(() => {
     if (client.isReady()) void runPresenceSnapshot('periodic');
   }, 5 * 60 * 1000).unref();

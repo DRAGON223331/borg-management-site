@@ -1673,3 +1673,10 @@ html[data-motion="calm"] .roll-col .roll-track, html[data-motion="calm"] .roll.i
 html[data-motion="calm"] .rt-line, html[data-motion="calm"] .rt-line-avg, html[data-motion="calm"] .rt-dot, html[data-motion="calm"] .rt-bar, html[data-motion="calm"] .rt-bar-val, html[data-motion="calm"] .rt-area, html[data-motion="calm"] .rt-hb-row i span, html[data-motion="calm"] .rt-stack span { animation:none !important; }
 @media (prefers-reduced-motion: reduce) { .rt-line, .rt-line-avg, .rt-dot, .rt-bar, .rt-bar-val, .rt-area, .rt-hb-row i span, .rt-stack span { animation:none !important; } }
 @media (max-width:760px) { .rt-charts { grid-template-columns:1fr; } }
+
+/* Live daily voice duration counters */
+.voice-time-cell { white-space:nowrap; min-width:100px; }
+.voice-time-clock { display:inline-block; font:800 10px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; direction:ltr; font-variant-numeric:tabular-nums; letter-spacing:.015em; white-space:nowrap; color:var(--text); }
+.voice-live-tag { color:#4ade80 !important; direction:rtl !important; text-align:right !important; font-size:8px !important; }
+.voice-time-unavailable { color:var(--muted); }
+.voice-time-rank-row > strong { min-width:78px; font-size:11px; }

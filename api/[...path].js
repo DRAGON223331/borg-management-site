@@ -209,6 +209,30 @@ async function getSql() {
   sqlClient = neon(connectionString);
   return sqlClient;
 }
+let voiceTimeApiSchemaPromise;
+async function ensureVoiceTimeApiSchema(sql) {
+  if (!voiceTimeApiSchemaPromise) {
+    voiceTimeApiSchemaPromise = (async () => {
+      await sql`CREATE TABLE IF NOT EXISTS discord_voice_sessions (
+        id BIGSERIAL PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        username TEXT NOT NULL DEFAULT '',
+        channel_id TEXT NOT NULL,
+        joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        ended_at TIMESTAMPTZ,
+        CHECK (ended_at IS NULL OR ended_at >= joined_at)
+      )`;
+      await sql`CREATE INDEX IF NOT EXISTS idx_discord_voice_sessions_day ON discord_voice_sessions(guild_id, joined_at DESC, user_id)`;
+      await sql`CREATE TABLE IF NOT EXISTS discord_voice_time_meta (
+        guild_id TEXT PRIMARY KEY,
+        last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`;
+    })().catch((error) => { voiceTimeApiSchemaPromise = null; throw error; });
+  }
+  return voiceTimeApiSchemaPromise;
+}
+
 async function ensureSchema() {
   if (!schemaPromise) schemaPromise = (async () => {
     const sql = await getSql();
@@ -2634,6 +2658,55 @@ async function handleApi(parts, req, res) {
     const dailyStats = room === 'staff' ? await getDailyStaffMessageStats(sql) : {};
     return sendJson(res, 200, { messages: rows.map(mapMessage), deletionCursor: Number(cursorRows[0]?.cursor) || 0, ...dailyStats });
   }
+  if (route === 'voice-time' && parts.length === 1 && req.method === 'GET') {
+    if (!user) return sendError(res, 401, 'سجّل الدخول الأول.');
+    if (!canManage(user)) return sendError(res, 403, 'إحصائيات وقت الفويس متاحة لمسؤولي الإدارة فقط.');
+    if (rateLimited(req, res, user, 'voice-time-get', 30)) return;
+    await ensureSchema();
+    const sql = await getSql();
+    await ensureVoiceTimeApiSchema(sql);
+    const [metaRows, rows, dayRows] = await Promise.all([
+      sql`SELECT last_seen AS "lastSeen" FROM discord_voice_time_meta WHERE guild_id = ${STAFF_GUILD_ID} LIMIT 1`,
+      sql`WITH bounds AS (
+        SELECT
+          date_trunc('day', NOW() AT TIME ZONE 'Africa/Cairo') AT TIME ZONE 'Africa/Cairo' AS day_start,
+          (date_trunc('day', NOW() AT TIME ZONE 'Africa/Cairo') + INTERVAL '1 day') AT TIME ZONE 'Africa/Cairo' AS day_end
+      )
+      SELECT s.user_id AS "userId",
+        (ARRAY_AGG(s.username ORDER BY s.joined_at DESC))[1] AS username,
+        SUM(GREATEST(0, EXTRACT(EPOCH FROM (
+          LEAST(COALESCE(s.ended_at, NOW()), bounds.day_end, NOW()) - GREATEST(s.joined_at, bounds.day_start)
+        )) * 1000))::bigint AS "durationMs",
+        BOOL_OR(s.ended_at IS NULL) AS "inVoice",
+        MAX(s.channel_id) FILTER (WHERE s.ended_at IS NULL) AS "channelId"
+      FROM discord_voice_sessions s CROSS JOIN bounds
+      WHERE s.guild_id = ${STAFF_GUILD_ID}
+        AND s.joined_at < bounds.day_end
+        AND COALESCE(s.ended_at, NOW()) > bounds.day_start
+      GROUP BY s.user_id
+      ORDER BY "durationMs" DESC, username ASC`,
+      sql`SELECT to_char((NOW() AT TIME ZONE 'Africa/Cairo')::date, 'YYYY-MM-DD') AS day`,
+    ]);
+    const lastSeen = metaRows[0]?.lastSeen ? new Date(metaRows[0].lastSeen).getTime() : 0;
+    const ageSeconds = lastSeen && Number.isFinite(lastSeen) ? Math.max(0, Math.floor((Date.now() - lastSeen) / 1000)) : null;
+    const available = Boolean(lastSeen && Number.isFinite(lastSeen) && ageSeconds <= 180);
+    return sendJson(res, 200, {
+      available,
+      reason: available ? null : (lastSeen ? 'stale-heartbeat' : 'no-heartbeat'),
+      lastSeenAt: lastSeen && Number.isFinite(lastSeen) ? new Date(lastSeen).toISOString() : null,
+      ageSeconds,
+      dailyDate: dayRows[0]?.day || null,
+      generatedAt: new Date().toISOString(),
+      members: rows.map((row) => ({
+        userId: String(row.userId),
+        username: String(row.username || row.userId),
+        durationMs: Math.max(0, Number(row.durationMs) || 0),
+        inVoice: Boolean(row.inVoice),
+        channelId: row.channelId ? String(row.channelId) : null,
+      })),
+    });
+  }
+
   if (route === 'discord-presence' && parts.length === 1 && req.method === 'GET') {
     if (!user) return sendError(res, 401, 'سجّل الدخول الأول.');
     if (rateLimited(req, res, user, 'discord-presence-get', 30)) return;
