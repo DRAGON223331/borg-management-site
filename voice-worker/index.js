@@ -10,6 +10,31 @@ const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const API_KEY = process.env.VOICE_API_KEY;
 const GUILD_ID = String(process.env.VOICE_GUILD_ID || process.env.STAFF_GUILD_ID || '1556647204255568063');
 const PORT = Math.max(1, Number(process.env.PORT || 3000));
+// A public URL must be assigned/routed by the hosting platform; the process
+// cannot turn its private listening port into an internet-facing hostname.
+function detectPublicBaseUrl() {
+  const candidates = [
+    process.env.VOICE_WORKER_PUBLIC_URL,
+    process.env.PELLA_PUBLIC_URL,
+    process.env.SERVICE_URL,
+    process.env.PUBLIC_URL,
+    process.env.APP_URL,
+    process.env.RENDER_EXTERNAL_URL,
+    process.env.RAILWAY_PUBLIC_DOMAIN
+  ];
+  for (const candidate of candidates) {
+    const value = String(candidate || '').trim();
+    if (!value) continue;
+    const withScheme = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+    try {
+      const parsed = new URL(withScheme);
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+        return parsed.origin.replace(/\/$/, '');
+      }
+    } catch { /* Ignore malformed platform variables. */ }
+  }
+  return null;
+}
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
 const DATA_FILE = path.join(DATA_DIR, 'voice-stats.json');
 const HEARTBEAT_MS = 30_000;
@@ -190,7 +215,19 @@ const server = http.createServer(async (req, res) => {
 
 (async () => {
   await loadStore();
-  server.listen(PORT, '0.0.0.0', () => console.log(`[http] Voice API listening on ${PORT}`));
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`[http] Voice API listening on 0.0.0.0:${PORT}`);
+    const publicBaseUrl = detectPublicBaseUrl();
+    if (publicBaseUrl) {
+      console.log(`[http] Public Voice API URL: ${publicBaseUrl}/voice-time`);
+      console.log(`[http] Health check URL: ${publicBaseUrl}/health`);
+      console.log('[http] Set Vercel VOICE_WORKER_URL to the base URL above (without /voice-time).');
+    } else {
+      console.log('[http] Public URL not detected. Pella must expose this service/port and assign a public domain.');
+      console.log('[http] Once Pella assigns it, set VOICE_WORKER_PUBLIC_URL to that base URL to print it here.');
+      console.log('[http] The local 0.0.0.0 address is not a public URL and must not be used in Vercel.');
+    }
+  });
   setInterval(async () => {
     if (!client.isReady()) return;
     store.lastHeartbeatAt = new Date().toISOString();

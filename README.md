@@ -286,3 +286,23 @@ To improve compatibility with Vercel route resolution, the project includes dedi
 - يُجمع اليوم حسب توقيت `Africa/Cairo`، ويستمر الجمع عند الانتقال بين القنوات الصوتية.
 - انشر ملفات الموقع على Vercel، ثم انشر وشغّل `bot-worker/` بشكل دائم مع نفس `DISCORD_BOT_TOKEN` و`DATABASE_URL`. يتطلب العامل `GuildVoiceStates` الذي تمت إضافته في الكود؛ لا يحتاج إلى تفعيل Privileged Intent جديد في Developer Portal.
 - الحساب يبدأ من أول تشغيل للنسخة الجديدة، ولا يمكن استعادة وقت فويس قديم لم يكن مسجلًا قبل التحديث.
+
+## 8) ربط عداد الفويس بملف JSON الخاص على GitHub
+
+الإصدار الحالي يدعم قراءة بيانات الفويس مباشرة من مستودع GitHub الخاص `3zra2ele-bit/elborgvoice`، ولا يحتاج إلى رابط عام من Pella. البوت يرفع `voice-stats.json` إلى GitHub، وVercel يقرأه من GitHub API من جهة السيرفر فقط.
+
+أضف هذه المتغيرات في Vercel → Settings → Environment Variables (Production):
+
+| الاسم | القيمة |
+|---|---|
+| `VOICE_GITHUB_TOKEN` | Fine-grained Personal Access Token بصلاحية **Contents: Read-only** للمستودع `elborgvoice` فقط |
+| `GITHUB_OWNER` | `3zra2ele-bit` |
+| `GITHUB_REPO` | `elborgvoice` |
+| `GITHUB_BRANCH` | `main` (غيّرها إذا كان الفرع الافتراضي للمستودع مختلفًا) |
+| `GITHUB_FILE_PATH` | `voice-stats.json` (نفس مسار الملف الذي يرفعه البوت) |
+
+**مهم:** هذا توكن قراءة خاص بالموقع على Vercel. لا تستخدم توكن البوت الذي يرفع الملفات من Pella إذا كان بصلاحية كتابة، والأفضل إنشاء Fine-grained token منفصل للقراءة فقط. لا تضع التوكن في `site-src/` أو أي ملف Frontend ولا ترسله في الشات.
+
+بعد حفظ المتغيرات، اعمل Redeploy للموقع. عند وجود إعدادات GitHub سيعطيها الموقع الأولوية على `VOICE_WORKER_URL`، ويحتفظ بخيار `VOICE_WORKER_URL` كبديل إذا لم تضبط GitHub. قراءة GitHub تتم من API الخلفي مع كاش قصير، والبيانات تتحدث حسب آخر رفع ناجح من البوت (المفترض كل دقيقة).
+
+إذا كان المستودع يستخدم فرعًا غير `main` أو الملف داخل مجلد، اضبط `GITHUB_BRANCH` أو `GITHUB_FILE_PATH` ليطابقا مكان الملف الفعلي.

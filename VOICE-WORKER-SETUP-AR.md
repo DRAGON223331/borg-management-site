@@ -20,6 +20,7 @@
 ## 3) متغيرات Vercel
 في Project Settings > Environment Variables أضف:
 - `VOICE_WORKER_URL`: رابط الخدمة العامة على Pella بدون `/` في النهاية، مثال `https://your-voice-worker.example`.
+- `VOICE_WORKER_PUBLIC_URL` (اختياري على Pella): ضع فيه الدومين العام الذي تخصصه Pella للخدمة؛ سيطبعه البوت تلقائيًا في Console. لا يمكن للكود إنشاء دومين عام من دون أن توفره منصة الاستضافة.
 - `VOICE_API_KEY`: نفس القيمة الموجودة على Pella حرفيًا.
 
 أعد Deploy للموقع بعد إضافة المتغيرات. مسار الموقع الحالي `/api/voice-time` سيقرأ من البوت، ومسار `/api/voice-time/DISCORD_USER_ID` سيعرض بيانات العضو نفسه وفق صلاحيات الموقع.
