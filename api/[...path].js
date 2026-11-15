@@ -669,7 +669,11 @@ const getDailyStaffMessageStats = (sql) => cached('daily-message-stats', 20_000,
 
 async function loadAllStaffStats(sql) {
   const [messages, submissions, points, leaves, staffRequests, online, daily] = await Promise.all([
-    sql`SELECT user_id AS "userId", MAX(username) AS username, COUNT(*)::integer AS "totalMessages" FROM discord_message_log WHERE channel_id = ${MESSAGE_COUNT_CHANNEL_ID} GROUP BY user_id`,
+    sql`SELECT user_id AS "userId", MAX(username) AS username, COUNT(*)::integer AS "totalMessages",
+      COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours')::integer AS "messages24h",
+      COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '42 hours')::integer AS "messages42h",
+      COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '72 hours')::integer AS "messages72h"
+      FROM discord_message_log WHERE channel_id = ${MESSAGE_COUNT_CHANNEL_ID} GROUP BY user_id`,
     sql`SELECT user_id AS "userId", COUNT(*)::integer AS "totalSubmissions", COUNT(*) FILTER (WHERE status = 'approved')::integer AS "approvedSubmissions", COUNT(*) FILTER (WHERE status IN ('submitted','pending'))::integer AS "pendingSubmissions", COUNT(*) FILTER (WHERE status = 'rejected')::integer AS "rejectedSubmissions" FROM submissions GROUP BY user_id`,
     sql`SELECT user_id AS "userId", COALESCE(SUM(amount),0)::numeric AS "totalPoints" FROM staff_points GROUP BY user_id`,
     sql`SELECT user_id AS "userId", COUNT(*)::integer AS "leaveRequests" FROM leave_requests GROUP BY user_id`,
@@ -680,12 +684,12 @@ async function loadAllStaffStats(sql) {
   const byId = new Map();
   const ensure = (id, username = '') => {
     const key = String(id);
-    if (!byId.has(key)) byId.set(key, { userId: key, username, dailyMessages: 0, totalMessages: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, adminRequests: 0, online: false, lastSeen: null });
+    if (!byId.has(key)) byId.set(key, { userId: key, username, dailyMessages: 0, totalMessages: 0, messages24h: 0, messages42h: 0, messages72h: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, adminRequests: 0, online: false, lastSeen: null });
     const row = byId.get(key);
     if (username) row.username = username;
     return row;
   };
-  for (const row of messages) Object.assign(ensure(row.userId, row.username), { totalMessages: Number(row.totalMessages) || 0 });
+  for (const row of messages) Object.assign(ensure(row.userId, row.username), { totalMessages: Number(row.totalMessages) || 0, messages24h: Number(row.messages24h) || 0, messages42h: Number(row.messages42h) || 0, messages72h: Number(row.messages72h) || 0 });
   for (const row of submissions) Object.assign(ensure(row.userId), { totalSubmissions: Number(row.totalSubmissions) || 0, approvedSubmissions: Number(row.approvedSubmissions) || 0, pendingSubmissions: Number(row.pendingSubmissions) || 0, rejectedSubmissions: Number(row.rejectedSubmissions) || 0 });
   for (const row of points) ensure(row.userId).totalPoints = Number(row.totalPoints) || 0;
   for (const row of leaves) ensure(row.userId).leaveRequests = Number(row.leaveRequests) || 0;
@@ -698,7 +702,7 @@ const getAllStaffStats = (sql) => cached('all-staff-stats', 15_000, () => loadAl
 
 // ───────── خصوصية بيانات الأعضاء ─────────
 // أي عضو عادي يشوف فقط الحقول العامة اللازمة للّيدر بورد. باقي الأرقام (تسليمات مرفوضة/معلقة، إجازات، طلبات إدارية، آخر ظهور) للمسؤولين وصاحب الحساب فقط.
-const PUBLIC_STAT_FIELDS = ['userId', 'username', 'dailyMessages', 'totalMessages', 'totalPoints', 'approvedSubmissions', 'online'];
+const PUBLIC_STAT_FIELDS = ['userId', 'username', 'dailyMessages', 'totalMessages', 'messages24h', 'messages42h', 'messages72h', 'totalPoints', 'approvedSubmissions', 'online'];
 function publicStats(row) {
   const out = {};
   for (const key of PUBLIC_STAT_FIELDS) out[key] = row[key];

@@ -124,6 +124,10 @@ async function startVoiceTimeTracking() {
     WHERE guild_id = ${STAFF_GUILD_ID} AND ended_at IS NULL`;
 
   const guild = await client.guilds.fetch(STAFF_GUILD_ID);
+  // Fetch the live channel/member state explicitly: the gateway cache may be empty
+  // after a cold start, which otherwise makes every active voice session invisible.
+  await guild.channels.fetch();
+  await guild.members.fetch();
   let activeCount = 0;
   for (const channel of guild.channels.cache.values()) {
     if (!channel.isVoiceBased?.() || !channel.members) continue;
@@ -609,7 +613,7 @@ client.once(Events.ClientReady, () => {
   void startVoiceTimeTracking().then(() => {
     setInterval(() => {
       recordVoiceTimeHeartbeat().catch((error) => console.error('[voice-time heartbeat]', error.message || error));
-    }, 60 * 1000).unref();
+    }, 15 * 1000).unref();
   }).catch((error) => console.error('[voice-time startup]', error.stack || error.message || error));
   setInterval(() => {
     if (client.isReady()) void runPresenceSnapshot('periodic');

@@ -366,11 +366,20 @@ function getAllStaffStats() {
   const byId = new Map();
   const ensure = (id, username = '') => {
     const key = String(id);
-    if (!byId.has(key)) byId.set(key, { userId: key, username, dailyMessages: 0, totalMessages: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, adminRequests: 0, online: false, lastSeen: null });
+    if (!byId.has(key)) byId.set(key, { userId: key, username, dailyMessages: 0, totalMessages: 0, messages24h: 0, messages42h: 0, messages72h: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, adminRequests: 0, online: false, lastSeen: null });
     const row = byId.get(key); if (username) row.username = username; return row;
   };
   const daily = getDailyStaffMessageStats();
-  for (const row of db.prepare("SELECT user_id AS userId, MAX(username) AS username, COUNT(*) AS totalMessages FROM discord_message_log WHERE channel_id = ? GROUP BY user_id").all(MESSAGE_COUNT_CHANNEL_ID)) Object.assign(ensure(row.userId, row.username), { totalMessages: Number(row.totalMessages) || 0 });
+  for (const row of db.prepare(`SELECT user_id AS userId, MAX(username) AS username, COUNT(*) AS totalMessages,
+    SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS messages24h,
+    SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS messages42h,
+    SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS messages72h
+    FROM discord_message_log WHERE channel_id = ? GROUP BY user_id`).all(
+      new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      new Date(Date.now() - 42 * 60 * 60 * 1000).toISOString(),
+      new Date(Date.now() - 72 * 60 * 60 * 1000).toISOString(), MESSAGE_COUNT_CHANNEL_ID)) {
+    Object.assign(ensure(row.userId, row.username), { totalMessages: Number(row.totalMessages) || 0, messages24h: Number(row.messages24h) || 0, messages42h: Number(row.messages42h) || 0, messages72h: Number(row.messages72h) || 0 });
+  }
   for (const row of db.prepare("SELECT user_id AS userId, COUNT(*) AS totalSubmissions, SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approvedSubmissions, SUM(CASE WHEN status IN ('submitted','pending') THEN 1 ELSE 0 END) AS pendingSubmissions, SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejectedSubmissions FROM submissions GROUP BY user_id").all()) Object.assign(ensure(row.userId), { totalSubmissions: Number(row.totalSubmissions) || 0, approvedSubmissions: Number(row.approvedSubmissions) || 0, pendingSubmissions: Number(row.pendingSubmissions) || 0, rejectedSubmissions: Number(row.rejectedSubmissions) || 0 });
   for (const row of db.prepare('SELECT user_id AS userId, COALESCE(SUM(amount),0) AS totalPoints FROM staff_points GROUP BY user_id').all()) ensure(row.userId).totalPoints = Number(row.totalPoints) || 0;
   for (const row of db.prepare('SELECT user_id AS userId, COUNT(*) AS leaveRequests FROM leave_requests GROUP BY user_id').all()) ensure(row.userId).leaveRequests = Number(row.leaveRequests) || 0;

@@ -1931,6 +1931,11 @@ function renderStaffProfile(member, response = {}, target = '#staff-profile-cont
     ${profileVoiceSection}
 
     <section class="staff-profile-section"><div class="section-title-row"><div><span class="tiny-label">MESSAGES</span><h2>الرسائل</h2></div><small class="muted">رسائل الروم المحسوبة فقط · التاريخ ${escapeHtml(state.dailyMessageStats.dailyDate || 'اليوم')}</small></div>
+      <div class="message-window-grid" aria-label="إحصائيات الرسائل حسب آخر فترة">
+        <article class="message-window-card window-24"><span class="message-window-icon">◷</span><small>آخر 24 ساعة</small><strong>${num(stats.messages24h)}</strong><em>رسالة خلال يوم</em></article>
+        <article class="message-window-card window-42"><span class="message-window-icon">◴</span><small>آخر 42 ساعة</small><strong>${num(stats.messages42h)}</strong><em>رسالة خلال 42 ساعة</em></article>
+        <article class="message-window-card window-72"><span class="message-window-icon">◵</span><small>آخر 72 ساعة</small><strong>${num(stats.messages72h)}</strong><em>رسالة خلال 3 أيام</em></article>
+      </div>
       <div class="pf-kpis">
         ${kpi('إجمالي الرسائل', mp.total, 'كل رسائله الموجودة في الروم', true)}
         ${kpi('رسائل اليوم', mp.today)}
