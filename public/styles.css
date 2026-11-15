@@ -1525,24 +1525,26 @@ html[data-accent="pink"] {
 @media (max-width: 620px) { .profile-voice-time-section { padding: 12px; } .profile-voice-time-grid { grid-template-columns: 1fr; } .profile-voice-time-card strong { font-size: 28px; } }
 
 
-/* v72 — fixed black & white theme for every visitor */
+/* v73 — fixed Borg dark theme: charcoal surfaces, crimson accents, semantic status colors */
 html {
   color-scheme: dark !important;
-  --neon-a: #ffffff !important; --neon-a-rgb: 255,255,255 !important;
-  --neon-b: #e5e5e5 !important; --neon-b-rgb: 229,229,229 !important;
-  --neon-c: #777777 !important; --neon-c-rgb: 119,119,119 !important;
-  --neon-lime: #ffffff !important; --purple: #ffffff !important;
-  --purple-bright: #e5e5e5 !important; --blue: #e5e5e5 !important;
-  --bg-deep: #050505 !important; --bg-deep-2: #0b0b0b !important;
-  --bg: #050505 !important; --surface: #111111 !important;
-  --surface-2: #191919 !important; --surface-3: #242424 !important;
-  --text: #f5f5f5 !important; --muted: #bdbdbd !important; --muted-2: #888888 !important;
-  --accent-text: #ffffff !important; --accent-pale: #eeeeee !important;
-  --accent-btn-1: #555555 !important; --accent-btn-2: #303030 !important;
-  --border: rgba(255,255,255,.14) !important;
-  scrollbar-color: #777777 #080808 !important;
-  filter: grayscale(1) !important;
+  --neon-a: #b91f2b !important; --neon-a-rgb: 185,31,43 !important;
+  --neon-b: #f05a55 !important; --neon-b-rgb: 240,90,85 !important;
+  --neon-c: #68121a !important; --neon-c-rgb: 104,18,26 !important;
+  --neon-lime: #4ed6ad !important;
+  --purple: #b91f2b !important; --purple-bright: #ff625e !important;
+  --blue: #63bbff !important; --red: #ff625e !important;
+  --bg-deep: #090608 !important; --bg-deep-2: #110709 !important;
+  --bg: #090608 !important; --surface: #16090c !important;
+  --surface-2: #1e0e12 !important; --surface-3: #2a1419 !important;
+  --text: #fff2f1 !important; --muted: #c4a4a6 !important; --muted-2: #987b80 !important;
+  --accent-text: #ff8997 !important; --accent-pale: #ffc0c8 !important;
+  --accent-btn-1: #e23d4f !important; --accent-btn-2: #b42336 !important;
+  --green: #4ed6ad !important; --orange: #f5c451 !important;
+  --border: rgba(185,31,43,.22) !important;
+  scrollbar-color: #8f1721 #080608 !important;
 }
+/* The theme is fixed for everyone; keep status/icon colors and all normal visual effects. */
 .appearance-choices, .appearance-motion-options, .appearance-toggle-row { display: none !important; }
 .appearance-footer { display: none !important; }
-.appearance-setting-heading small { color: #ffffff !important; }
+.appearance-setting-heading small { color: #ff8997 !important; }
