@@ -36,6 +36,16 @@ const RATING_COLORS = { 1: 0xef4444, 2: 0xf97316, 3: 0xeab308, 4: 0x22c55e, 5: 0
 const RATING_EMOJI = { 1: '😡', 2: '🙁', 3: '😐', 4: '🙂', 5: '🤩' };
 const MESSAGE_FULL_SCAN_MINUTES = Math.max(1, Number(process.env.MESSAGE_FULL_SCAN_MINUTES || 10));
 
+async function fetchVoiceWorkerSnapshot() {
+  const base = String(process.env.VOICE_WORKER_URL || '').trim().replace(/\/$/, '');
+  const key = String(process.env.VOICE_API_KEY || '').trim();
+  if (!base || !key) return null;
+  const response = await fetch(`${base}/voice-time`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(8000), cache: 'no-store' });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok && response.status !== 503) throw new Error(data.error || `Voice worker returned ${response.status}`);
+  return data;
+}
+
 let sqlClient;
 let schemaPromise;
 let blobSdkPromise;
@@ -2754,6 +2764,13 @@ async function handleApi(parts, req, res) {
       return sendError(res, 403, 'تقدر تشوف وقت الفويس الخاص بحسابك فقط.');
     }
     if (rateLimited(req, res, user, 'voice-time-member-get', 30)) return;
+    if (process.env.VOICE_WORKER_URL && process.env.VOICE_API_KEY) {
+      try {
+        const snapshot = await fetchVoiceWorkerSnapshot();
+        const member = snapshot?.members?.find((item) => String(item.userId) === targetUserId) || { userId: targetUserId, username: targetUserId, durationMs: 0, inVoice: false, channelId: null, windows: { '24h': 0, '42h': 0, '72h': 0 }, voice24hMs: 0, voice42hMs: 0, voice72hMs: 0 };
+        return sendJson(res, snapshot?.available ? 200 : 503, { available: Boolean(snapshot?.available), reason: snapshot?.reason || null, lastSeenAt: snapshot?.lastSeenAt || null, ageSeconds: snapshot?.ageSeconds ?? null, dailyDate: snapshot?.dailyDate || null, generatedAt: snapshot?.generatedAt || new Date().toISOString(), member });
+      } catch (error) { return sendError(res, 502, `تعذر الاتصال ببوت الفويس: ${error.message}`); }
+    }
     await ensureSchema();
     const sql = await getSql();
     await ensureVoiceTimeApiSchema(sql);
@@ -2803,6 +2820,12 @@ async function handleApi(parts, req, res) {
     if (!user) return sendError(res, 401, 'سجّل الدخول الأول.');
     if (!canManage(user)) return sendError(res, 403, 'إحصائيات وقت الفويس متاحة لمسؤولي الإدارة فقط.');
     if (rateLimited(req, res, user, 'voice-time-get', 30)) return;
+    if (process.env.VOICE_WORKER_URL && process.env.VOICE_API_KEY) {
+      try {
+        const snapshot = await fetchVoiceWorkerSnapshot();
+        return sendJson(res, snapshot?.available ? 200 : 503, snapshot || { available: false, members: [] });
+      } catch (error) { return sendError(res, 502, `تعذر الاتصال ببوت الفويس: ${error.message}`); }
+    }
     await ensureSchema();
     const sql = await getSql();
     await ensureVoiceTimeApiSchema(sql);
