@@ -93,6 +93,7 @@
             <button class="nav-menu-item" type="button" role="menuitem" data-page="staff-chat"><span>☷</span><span>شات الاستاف</span></button>
             <div class="nav-menu-heading manager-only hidden">إدارة النظام</div>
             <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="admin-monitor"><span>◉</span><span>مراقبة الإدارة</span></button>
+            <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="staff-performance"><span>▥</span><span>أداء الاستاف</span></button>
             <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="staff-ratings"><span>✪</span><span>تقييم الإداريين</span></button>
             <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="management-chat"><span>♧</span><span>شات المسؤولين</span></button>
             <button class="nav-menu-item manager-only hidden" type="button" role="menuitem" data-page="audit-log"><span>≣</span><span>سجل السيرفر</span></button>
@@ -246,7 +247,7 @@
             <div class="task-create-row">
               <input id="new-task-title" type="text" maxlength="240" placeholder="اكتب اسم المهمة الجديدة...">
               <select id="new-task-required" aria-label="نوع المهمة"><option value="1">إجبارية</option><option value="0">اختيارية</option></select>
-              <input id="new-task-points" type="number" min="0" max="100000" step="0.01" value="1" aria-label="نقاط المهمة" title="نقاط المهمة" style="max-width:110px"><button id="queue-task-btn" class="secondary-button">+ إضافة للقائمة</button>
+              <input id="new-task-points" type="number" min="0" max="100000" step="0.01" value="1" aria-label="نقاط المهمة" title="نقاط المهمة" style="max-width:110px"><select id="new-task-priority" aria-label="أولوية المهمة"><option value="normal">عادية</option><option value="high">عالية</option><option value="low">منخفضة</option></select><button id="queue-task-btn" class="secondary-button">+ إضافة للقائمة</button>
             </div>
             <div class="task-deadline-setting"><label for="new-task-deadline">⏰ موعد انتهاء المهمة <span class="muted">(اختياري)</span></label><input id="new-task-deadline" type="datetime-local" aria-label="موعد انتهاء المهمة"><small>سيتم تذكير الأعضاء بالخاص قبل الموعد خلال 24 ساعة، وستُغلق المهمة تلقائيًا عند انتهاء المهلة.</small></div>
             <div id="task-queue" class="task-queue"><div class="empty-inline">لسه مفيش مهمات في قائمة النشر.</div></div>
@@ -385,6 +386,25 @@
             </select>
           </div>
           <div id="rt-grid" class="rt-grid"><div class="loading-state">جاري تحميل التقييمات...</div></div>
+        </section>
+
+        <section id="page-staff-performance" class="page manager-only hidden">
+          <div class="page-heading performance-heading">
+            <div><div class="eyebrow">BORG STAFF PERFORMANCE</div><h1>مركز أداء الاستاف</h1><p>تقييم نشاط الاستاف خلال آخر 7 أيام من الرسائل والفويس والتسليمات والحضور والنقاط.</p><small id="performance-updated" class="monitor-updated">جاري تحميل المؤشرات...</small></div>
+            <div class="monitor-heading-actions"><span class="page-heading-badge"><span class="status-dot"></span> للإدارة فقط</span><button id="performance-refresh" type="button" class="secondary-button compact">تحديث ↻</button><button id="performance-export" type="button" class="primary-button compact">تصدير CSV ↓</button></div>
+          </div>
+          <div id="performance-kpis" class="performance-kpis"><div class="loading-state">جاري حساب مؤشرات الأداء...</div></div>
+          <section class="performance-panel">
+            <div class="section-title-row"><div><span class="tiny-label">STAFF SCORE / LAST 7 DAYS</span><h2>ترتيب الأداء</h2><p class="muted small-copy">النتيجة من 100: الرسائل 30%، الفويس 30%، التسليمات 20%، الحضور 10%، النقاط 10%.</p></div><input id="performance-search" type="search" placeholder="ابحث عن عضو..." aria-label="ابحث عن عضو في الأداء"></div>
+            <div class="performance-table-wrap"><table class="performance-table"><thead><tr><th>#</th><th>العضو</th><th>Score</th><th>رسائل 72 ساعة</th><th>فويس 7 أيام</th><th>تسليمات 7 أيام</th><th>أيام الحضور</th><th>النقاط</th><th>التفاصيل</th></tr></thead><tbody id="performance-rows"><tr><td colspan="9" class="loading-state">جاري تحميل الأعضاء...</td></tr></tbody></table></div>
+          </section>
+          <div class="performance-bottom-grid">
+            <section class="performance-panel"><div class="section-title-row"><div><span class="tiny-label">MANAGEMENT NOTES</span><h2>ملاحظات الإدارة</h2><p class="muted small-copy">ملاحظات داخلية مرتبطة بعضو الاستاف، لا تظهر للأعضاء العاديين.</p></div></div>
+              <form id="performance-note-form" class="performance-note-form"><label>Discord ID للعضو<input id="performance-note-target" inputmode="numeric" maxlength="22" placeholder="مثال: 123456789012345678" required></label><label>اسم العضو (اختياري)<input id="performance-note-name" maxlength="80" placeholder="اسم العضو"></label><label class="note-wide">الملاحظة<textarea id="performance-note-text" maxlength="800" rows="3" placeholder="اكتب ملاحظة إدارية..." required></textarea></label><button class="primary-button compact" type="submit">حفظ الملاحظة</button></form>
+              <div id="performance-notes" class="performance-notes"><div class="loading-state">جاري تحميل الملاحظات...</div></div>
+            </section>
+            <section class="performance-panel"><div class="section-title-row"><div><span class="tiny-label">SCORE BREAKDOWN</span><h2>طريقة حساب الأداء</h2><p class="muted small-copy">المؤشر مساعد للمقارنة وليس قرارًا آليًا بالعقوبة.</p></div></div><div class="performance-rules"><div><span>💬 الرسائل خلال 72 ساعة</span><b>30%</b></div><div><span>🎙️ وقت الفويس خلال 7 أيام</span><b>30%</b></div><div><span>✓ التسليمات المقبولة خلال 7 أيام</span><b>20%</b></div><div><span>📅 أيام الحضور خلال 7 أيام</span><b>10%</b></div><div><span>⭐ النقاط المسجلة</span><b>10%</b></div></div><p class="performance-disclaimer">يتم احتساب الفويس من جلسات Discord المسجلة. لو خدمة تتبع الفويس متوقفة، قد تظهر بيانات أقل من الحقيقة؛ راجع حالة الـ Worker قبل الاعتماد على التقرير.</p></section>
+          </div>
         </section>
 
         <section id="page-site-managers" class="page">

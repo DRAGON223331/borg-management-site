@@ -28,6 +28,7 @@ const state = {
   profileVoiceTime: {},
   cyberTrendPeriod: '24h',
   monitor: { health: null, summary: null, roster: null, staffStats: [], presence: null, voiceTime: null, voiceTimeFetchedAt: null, taskStats: null, audit: [], reviewAudit: [], leaveRequests: [], staffRequests: [], loadErrors: [], updatedAt: null, memberLimit: 100 },
+  performance: { rows: [], notes: [], loadedAt: null },
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -339,6 +340,7 @@ async function initialize() {
     showApp();
     renderProfile();
     wireNavigation();
+  wireStaffPerformance();
     wireAppearanceControls();
     wireRosterCollapse();
     wireTasks();
@@ -582,6 +584,7 @@ function openPage(page) {
   if (page === 'audit-log' && !state.user?.canManage) return;
   if (page === 'admin-monitor' && !state.user?.canManage) return;
   if (page === 'staff-ratings' && !state.user?.canManage) return;
+  if (page === 'staff-performance' && !state.user?.canManage) return;
   if (page === 'site-managers' && !state.user?.isOwner) return;
   if (page === 'staff-profile' && !state.activeStaffProfileId) return;
   $$('.page').forEach((element) => element.classList.remove('active-page'));
@@ -599,6 +602,7 @@ function openPage(page) {
   if (page === 'personal') loadPersonal();
   if (page === 'leaderboard') { rollReset('lb:'); renderLeaderboard(); loadStaffStats(); }
   if (page === 'staff-ratings') { rollReset('rt:'); const chartBox = $('#rt-charts'); if (chartBox) delete chartBox.dataset.sig; renderRatings(); loadRatings(); loadStaffStats(); }
+  if (page === 'staff-performance') loadStaffPerformance();
   if (page === 'audit-log') loadAudit(true);
   if (page === 'admin-monitor') loadAdminMonitoring({ silent: true });
   if (page === 'site-managers' && state.user?.isOwner) loadSiteManagers();
@@ -664,7 +668,7 @@ function renderTaskList() {
         <div class="task-row-title">${escapeHtml(task.title)}</div>
         <div class="task-row-desc">أُضيفت بواسطة ${escapeHtml(task.created_by_name || 'الإدارة')} · ${formatDate(task.created_at, { day: 'numeric', month: 'short' })}</div>
         <div class="task-row-meta">
-          <span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? '● مهمة إجبارية' : '○ مهمة اختيارية'}</span>
+          <span class="task-tag ${task.required ? 'required' : 'optional'}">${task.required ? '● مهمة إجبارية' : '○ مهمة اختيارية'}</span>${task.priority === 'high' ? '<span class="task-tag required">🔥 أولوية عالية</span>' : task.priority === 'low' ? '<span class="task-tag optional">أولوية منخفضة</span>' : ''}
           <span class="task-id">#${task.id} · ⭐ ${Number(task.points || 0)} نقطة</span>
           ${task.deadline_at ? `<span class="task-tag task-deadline-tag">⏰ تنتهي ${escapeHtml(formatDate(task.deadline_at, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Cairo' }))}</span>` : ''}
           ${task.redoRequiredByMe ? '<span class="task-tag required">🔁 الإدارة طلبت إعادة المهمة · تم خصم النقاط</span>' : task.completedByMe ? '<span class="task-tag completed">✓ انتهت</span>' : task.pendingByMe ? '<span class="task-tag optional">⏳ بانتظار المراجعة</span>' : task.rejectedByMe ? '<span class="task-tag required">✕ مرفوضة · اتقفلت</span>' : ''}
@@ -791,9 +795,10 @@ function queueCurrentTask() {
   const deadlineRaw = $('#new-task-deadline')?.value || '';
   const deadlineDate = deadlineRaw ? new Date(deadlineRaw) : null;
   if (deadlineRaw && (!deadlineDate || !Number.isFinite(deadlineDate.getTime()) || deadlineDate.getTime() <= Date.now())) return showToast('موعد انتهاء المهمة لازم يكون في المستقبل.', 'error');
-  state.queue.push({ key: state.queueNextId++, title, required: $('#new-task-required').value === '1', points: Math.round(points * 100) / 100, deadlineAt: deadlineDate ? deadlineDate.toISOString() : null });
+  state.queue.push({ key: state.queueNextId++, title, required: $('#new-task-required').value === '1', priority: $('#new-task-priority')?.value || 'normal', points: Math.round(points * 100) / 100, deadlineAt: deadlineDate ? deadlineDate.toISOString() : null });
   input.value = '';
   $('#new-task-points').value = '1';
+  if ($('#new-task-priority')) $('#new-task-priority').value = 'normal';
   input.focus();
   renderTaskQueue();
 }
@@ -808,7 +813,7 @@ function renderTaskQueue() {
   queue.innerHTML = state.queue.map((item) => `
     <div class="queued-task" data-queue-key="${item.key}">
       <span class="task-id">${String(state.queue.indexOf(item) + 1).padStart(2, '0')}</span>
-      <div class="queued-task-title">${escapeHtml(item.title)}${item.deadlineAt ? `<small class="queued-deadline">⏰ ${escapeHtml(formatDate(item.deadlineAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Cairo' }))}</small>` : ''}</div>
+      <div class="queued-task-title">${escapeHtml(item.title)}${item.deadlineAt ? `<small class="queued-deadline">⏰ ${escapeHtml(formatDate(item.deadlineAt, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Africa/Cairo' }))}</small>` : ''}<small class="queued-priority priority-${item.priority || 'normal'}">${item.priority === 'high' ? 'أولوية عالية' : item.priority === 'low' ? 'أولوية منخفضة' : 'أولوية عادية'}</small></div>
       <label class="queued-task-points" title="عدد نقاط هذه المهمة">⭐ <input type="number" min="0" max="100000" step="0.01" value="${Number(item.points)}" data-queue-points="${item.key}" aria-label="نقاط ${escapeHtml(item.title)}"> <span>نقطة</span></label>
       <select data-queue-required="${item.key}" aria-label="نوع المهمة"><option value="1" ${item.required ? 'selected' : ''}>إجبارية</option><option value="0" ${!item.required ? 'selected' : ''}>اختيارية</option></select>
       <button class="remove-queue-item" data-remove-queue="${item.key}" aria-label="حذف المهمة">×</button>
@@ -842,7 +847,7 @@ async function publishQueuedTasks() {
   try {
     const result = await api('/api/tasks', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tasks: state.queue.map(({ title, required, points, deadlineAt }) => ({ title, required, points, deadlineAt })) }),
+      body: JSON.stringify({ tasks: state.queue.map(({ title, required, priority, points, deadlineAt }) => ({ title, required, priority, points, deadlineAt })) }),
     });
     state.queue = [];
     renderTaskQueue();
@@ -2714,6 +2719,70 @@ async function markNotificationsRead() {
     // نسيب علامة "جديد" ظاهرة جوه اللوحة لحد ما تتقفل، بعدها تختفي.
     if (!state.notif.open) { state.notif.items = state.notif.items.map((item) => ({ ...item, unread: false })); }
   } catch (error) { showToast(error.message, 'error'); }
+}
+
+function performanceDuration(minutes) {
+  const value = Math.max(0, Number(minutes) || 0);
+  const h = Math.floor(value / 60), m = Math.floor(value % 60);
+  return h ? `${h}س ${m}د` : `${m}د`;
+}
+function renderStaffPerformance() {
+  const rows = state.performance.rows || [];
+  const notes = state.performance.notes || [];
+  const search = ($('#performance-search')?.value || '').trim().toLowerCase();
+  const visible = rows.filter(row => [row.username, row.userId].some(value => String(value || '').toLowerCase().includes(search)));
+  const average = rows.length ? Math.round(rows.reduce((sum,row)=>sum+(Number(row.score)||0),0)/rows.length) : 0;
+  const strong = rows.filter(row => Number(row.score) >= 75).length;
+  const low = rows.filter(row => Number(row.score) < 35).length;
+  const kpis = $('#performance-kpis');
+  if (kpis) kpis.innerHTML = `<article class="performance-kpi"><span>عدد الأعضاء</span><b>${rows.length}</b><small>أعضاء ضمن بيانات النشاط</small></article><article class="performance-kpi"><span>متوسط الأداء</span><b>${average}<i>/100</i></b><small>متوسط نتائج آخر 7 أيام</small></article><article class="performance-kpi"><span>أداء مرتفع</span><b>${strong}</b><small>نتيجة 75 أو أكثر</small></article><article class="performance-kpi"><span>يحتاج متابعة</span><b>${low}</b><small>نتيجة أقل من 35</small></article>`;
+  const body = $('#performance-rows');
+  if (body) body.innerHTML = visible.length ? visible.map((row,index) => {
+    const score = Math.max(0,Math.min(100,Number(row.score)||0));
+    const tone = score >= 75 ? 'high' : score >= 45 ? 'mid' : 'low';
+    return `<tr><td><span class="performance-rank">${index+1}</span></td><td><button type="button" class="performance-member" data-performance-profile="${escapeHtml(row.userId)}"><b>${escapeHtml(row.username || row.userId)}</b><small>${escapeHtml(row.userId)}</small></button></td><td><span class="performance-score ${tone}">${score}<small>/100</small></span><div class="performance-meter"><i style="width:${score}%"></i></div></td><td>${Number(row.messages72h)||0}</td><td>${performanceDuration(row.voiceMinutes7d)}</td><td>${Number(row.approved7d)||0}</td><td>${Number(row.attendanceDays7d)||0}/7</td><td>${Number(row.totalPoints)||0}</td><td><button type="button" class="secondary-button compact" data-performance-profile="${escapeHtml(row.userId)}">فتح الملف</button></td></tr>`;
+  }).join('') : '<tr><td colspan="9" class="task-empty">لا توجد بيانات مطابقة.</td></tr>';
+  const notesNode = $('#performance-notes');
+  if (notesNode) notesNode.innerHTML = notes.length ? notes.slice(0,60).map(note => `<article class="performance-note"><div><b>${escapeHtml(note.targetName || note.targetId)}</b><small>${escapeHtml(note.authorName || 'الإدارة')} · ${formatDate(note.createdAt,{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</small></div><p>${escapeHtml(note.note)}</p><button type="button" class="note-delete" data-performance-note-delete="${note.id}" aria-label="حذف الملاحظة">حذف</button></article>`).join('') : '<div class="task-empty">لا توجد ملاحظات إدارية محفوظة.</div>';
+}
+async function loadStaffPerformance() {
+  const body = $('#performance-rows');
+  if (body && !state.performance.rows.length) body.innerHTML = '<tr><td colspan="9" class="loading-state">جاري تحميل بيانات الأداء...</td></tr>';
+  try {
+    const data = await api('/api/staff-insights');
+    state.performance.rows = Array.isArray(data.rows) ? data.rows : [];
+    state.performance.notes = Array.isArray(data.notes) ? data.notes : [];
+    state.performance.loadedAt = data.generatedAt;
+    const stamp = $('#performance-updated');
+    if (stamp) stamp.textContent = `آخر تحديث: ${formatDate(data.generatedAt,{day:'numeric',month:'long',hour:'2-digit',minute:'2-digit'})} · نافذة القياس 7 أيام`;
+    renderStaffPerformance();
+  } catch (error) {
+    if (body) body.innerHTML = `<tr><td colspan="9" class="task-empty">${escapeHtml(error.message || 'تعذر تحميل الأداء.')}</td></tr>`;
+    showToast(error.message || 'تعذر تحميل مركز الأداء.', 'error');
+  }
+}
+function wireStaffPerformance() {
+  $('#performance-refresh')?.addEventListener('click', loadStaffPerformance);
+  $('#performance-search')?.addEventListener('input', renderStaffPerformance);
+  $('#performance-export')?.addEventListener('click', () => { window.location.href = '/api/staff-insights.csv'; });
+  $('#performance-rows')?.addEventListener('click', event => { const button = event.target.closest('[data-performance-profile]'); if (button) openStaffProfile(button.dataset.performanceProfile); });
+  $('#performance-notes')?.addEventListener('click', async event => {
+    const button = event.target.closest('[data-performance-note-delete]'); if (!button) return;
+    if (!confirm('تحذف الملاحظة دي؟')) return;
+    try { await api(`/api/staff-notes/${encodeURIComponent(button.dataset.performanceNoteDelete)}`, { method:'DELETE' }); state.performance.notes = state.performance.notes.filter(note => String(note.id) !== button.dataset.performanceNoteDelete); renderStaffPerformance(); showToast('تم حذف الملاحظة.','success'); }
+    catch(error) { showToast(error.message || 'تعذر حذف الملاحظة.','error'); }
+  });
+  $('#performance-note-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const targetId = $('#performance-note-target')?.value.trim();
+    const note = $('#performance-note-text')?.value.trim();
+    const targetName = $('#performance-note-name')?.value.trim();
+    if (!targetId || !note) return showToast('اكتب Discord ID والملاحظة.','error');
+    const submit = $('button[type="submit"]', event.currentTarget); setButtonLoading(submit,true,'جاري الحفظ...');
+    try { const result = await api('/api/staff-notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({targetId,targetName,note})}); state.performance.notes.unshift(result.note); event.currentTarget.reset(); renderStaffPerformance(); showToast('تم حفظ الملاحظة الإدارية.','success'); }
+    catch(error) { showToast(error.message || 'تعذر حفظ الملاحظة.','error'); }
+    finally { setButtonLoading(submit,false); }
+  });
 }
 
 async function runIntroThenInitialize() {

@@ -47,7 +47,7 @@ let lastMessageSyncAt = 0;
 let messageSyncPromise;
 
 // ───────── تخفيف الضغط: كاش في الذاكرة + حد للطلبات ─────────
-const SCHEMA_VERSION = 12; // v12 يضيف جدول تقييمات الإداريين (staff_ratings)
+const SCHEMA_VERSION = 13; // v13 يضيف ملاحظات الإدارة على أعضاء الاستاف
 const PRESENCE_WINDOW_SECONDS = 150; // مدة اعتبار العضو "متصل" بعد آخر نبضة (النبضة كل 60 ثانية)
 const MESSAGE_SYNC_MIN_MS = Math.max(15, Number(process.env.MESSAGE_SYNC_MIN_SECONDS || 45)) * 1000;
 const memCache = new Map();
@@ -257,6 +257,7 @@ async function ensureSchema() {
     await sql`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS source_message_deleted_at TIMESTAMPTZ`;
     await sql`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deadline_at TIMESTAMPTZ`;
     await sql`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS deadline_reminded_at TIMESTAMPTZ`;
+    await sql`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal'`;
     await sql`CREATE TABLE IF NOT EXISTS submissions (
       id BIGSERIAL PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -449,6 +450,12 @@ async function ensureSchema() {
     )`;
     await sql`CREATE INDEX IF NOT EXISTS idx_staff_ratings_target ON staff_ratings(target_id, created_at DESC)`;
     await sql`CREATE INDEX IF NOT EXISTS idx_staff_ratings_created ON staff_ratings(created_at DESC)`;
+    await sql`CREATE TABLE IF NOT EXISTS staff_notes (
+      id BIGSERIAL PRIMARY KEY, target_id TEXT NOT NULL, target_name TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL, author_id TEXT NOT NULL, author_name TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_staff_notes_target ON staff_notes(target_id, created_at DESC)`;
     await sql`CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`;
     await sql`INSERT INTO app_meta(key, value) VALUES ('schema_version', ${String(SCHEMA_VERSION)}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
   })().catch((error) => { schemaPromise = null; throw error; });
@@ -1872,6 +1879,83 @@ async function handleApi(parts, req, res) {
     });
   }
 
+  if (route === 'staff-insights' && parts.length === 1 && req.method === 'GET') {
+    if (!canManage(user)) return sendError(res, 403, 'مركز أداء الاستاف متاح لمسؤولي الإدارة فقط.');
+    if (rateLimited(req, res, user, 'staff-insights', 20)) return;
+    await ensureVoiceTimeApiSchema(sql);
+    await syncChannelMessageCounts(sql, { budgetMs: 4000 });
+    const [{ stats }, voiceRows, approvedRows, attendanceRows, ratingRows, noteRows] = await Promise.all([
+      getAllStaffStats(sql),
+      sql`SELECT user_id AS "userId", SUM(GREATEST(0, EXTRACT(EPOCH FROM (LEAST(COALESCE(ended_at, NOW()), NOW()) - GREATEST(joined_at, NOW() - INTERVAL '7 days')))/60))::int AS "voiceMinutes7d"
+        FROM discord_voice_sessions WHERE guild_id = ${STAFF_GUILD_ID} AND joined_at > NOW() - INTERVAL '7 days' GROUP BY user_id`,
+      sql`SELECT user_id AS "userId", COUNT(*)::int AS "approved7d" FROM submissions WHERE status = 'approved' AND submitted_at > NOW() - INTERVAL '7 days' GROUP BY user_id`,
+      sql`SELECT user_id AS "userId", COUNT(DISTINCT (joined_at AT TIME ZONE 'Africa/Cairo')::date)::int AS "attendanceDays7d"
+        FROM discord_voice_sessions WHERE guild_id = ${STAFF_GUILD_ID} AND joined_at > NOW() - INTERVAL '7 days' GROUP BY user_id`,
+      sql`SELECT target_id AS "targetId", ROUND(AVG(rating)::numeric, 2) AS average, COUNT(*)::int AS count FROM staff_ratings GROUP BY target_id`,
+      sql`SELECT id, target_id AS "targetId", target_name AS "targetName", note, author_name AS "authorName", created_at AS "createdAt" FROM staff_notes ORDER BY created_at DESC LIMIT 150`,
+    ]);
+    const voice = new Map(voiceRows.map(row => [String(row.userId), Number(row.voiceMinutes7d) || 0]));
+    const approved = new Map(approvedRows.map(row => [String(row.userId), Number(row.approved7d) || 0]));
+    const attendance = new Map(attendanceRows.map(row => [String(row.userId), Number(row.attendanceDays7d) || 0]));
+    const ratings = new Map(ratingRows.map(row => [String(row.targetId), { average: Number(row.average) || 0, count: Number(row.count) || 0 }]));
+    const statsById = new Map(stats.map(row => [String(row.userId), row]));
+    try {
+      const roster = await cached('roster', 120_000, getRoster);
+      for (const group of (roster.groups || [])) for (const member of (group.members || [])) {
+        const id = String(member.id);
+        if (!statsById.has(id)) statsById.set(id, { userId: id, username: member.username || id, dailyMessages: 0, totalMessages: 0, messages24h: 0, messages42h: 0, messages72h: 0, totalSubmissions: 0, approvedSubmissions: 0, pendingSubmissions: 0, rejectedSubmissions: 0, totalPoints: 0, leaveRequests: 0, adminRequests: 0, online: false, lastSeen: null });
+      }
+    } catch (error) { console.warn('[staff insights roster]', cleanText(error?.message || error, 160)); }
+    const rows = [...statsById.values()].map(row => {
+      const id = String(row.userId);
+      const messages = Number(row.messages72h) || 0;
+      const voiceMinutes7d = voice.get(id) || 0;
+      const approved7d = approved.get(id) || 0;
+      const attendanceDays7d = attendance.get(id) || 0;
+      const messageScore = Math.min(100, messages / 120 * 100);
+      const voiceScore = Math.min(100, voiceMinutes7d / 600 * 100);
+      const taskScore = Math.min(100, approved7d / 5 * 100);
+      const attendanceScore = Math.min(100, attendanceDays7d / 5 * 100);
+      const pointsScore = Math.min(100, (Number(row.totalPoints) || 0) / 20 * 100);
+      const score = Math.round(messageScore * .30 + voiceScore * .30 + taskScore * .20 + attendanceScore * .10 + pointsScore * .10);
+      return { ...row, score, voiceMinutes7d, approved7d, attendanceDays7d, rating: ratings.get(id) || null,
+        scoreBreakdown: { messages: Math.round(messageScore), voice: Math.round(voiceScore), tasks: Math.round(taskScore), attendance: Math.round(attendanceScore), points: Math.round(pointsScore) } };
+    }).sort((a,b) => b.score - a.score || (Number(b.messages72h)||0) - (Number(a.messages72h)||0));
+    return sendJson(res, 200, { generatedAt: new Date().toISOString(), periodDays: 7, scoreWeights: { messages: 30, voice: 30, tasks: 20, attendance: 10, points: 10 }, rows, notes: noteRows.map(row => ({ ...row, id: Number(row.id) })) });
+  }
+  if (route === 'staff-notes' && parts.length === 1 && req.method === 'POST') {
+    if (!canManage(user)) return sendError(res, 403, 'إضافة ملاحظات الاستاف متاحة لمسؤولي الإدارة فقط.');
+    const targetId = cleanText(req.body?.targetId, 24);
+    const note = cleanText(req.body?.note, 800);
+    const targetName = cleanText(req.body?.targetName, 80) || targetId;
+    if (!/^\d{15,22}$/.test(targetId)) return sendError(res, 400, 'Discord ID غير صالح.');
+    if (!note) return sendError(res, 400, 'اكتب الملاحظة أولًا.');
+    const rows = await sql`INSERT INTO staff_notes(target_id, target_name, note, author_id, author_name) VALUES (${targetId}, ${targetName}, ${note}, ${user.id}, ${user.username}) RETURNING id, target_id AS "targetId", target_name AS "targetName", note, author_name AS "authorName", created_at AS "createdAt"`;
+    return sendJson(res, 201, { note: { ...rows[0], id: Number(rows[0].id) } });
+  }
+  if (route === 'staff-notes' && parts.length === 2 && req.method === 'DELETE') {
+    if (!canManage(user)) return sendError(res, 403, 'حذف ملاحظات الاستاف متاح لمسؤولي الإدارة فقط.');
+    const id = Number(parts[1]);
+    if (!Number.isSafeInteger(id) || id < 1) return sendError(res, 400, 'رقم الملاحظة غير صالح.');
+    const deleted = await sql`DELETE FROM staff_notes WHERE id = ${id} RETURNING id`;
+    return sendJson(res, 200, { ok: true, deleted: deleted.length > 0 });
+  }
+  if (route === 'staff-insights.csv' && parts.length === 1 && req.method === 'GET') {
+    if (!canManage(user)) return sendError(res, 403, 'تصدير تقارير الاستاف متاح لمسؤولي الإدارة فقط.');
+    await ensureVoiceTimeApiSchema(sql);
+    const [{ stats }, voiceRows, approvedRows, attendanceRows] = await Promise.all([
+      getAllStaffStats(sql),
+      sql`SELECT user_id AS "userId", SUM(GREATEST(0, EXTRACT(EPOCH FROM (LEAST(COALESCE(ended_at, NOW()), NOW()) - GREATEST(joined_at, NOW() - INTERVAL '7 days')))/60))::int AS minutes FROM discord_voice_sessions WHERE guild_id = ${STAFF_GUILD_ID} AND joined_at > NOW() - INTERVAL '7 days' GROUP BY user_id`,
+      sql`SELECT user_id AS "userId", COUNT(*)::int AS count FROM submissions WHERE status = 'approved' AND submitted_at > NOW() - INTERVAL '7 days' GROUP BY user_id`,
+      sql`SELECT user_id AS "userId", COUNT(DISTINCT (joined_at AT TIME ZONE 'Africa/Cairo')::date)::int AS days FROM discord_voice_sessions WHERE guild_id = ${STAFF_GUILD_ID} AND joined_at > NOW() - INTERVAL '7 days' GROUP BY user_id`,
+    ]);
+    const maps = [voiceRows, approvedRows, attendanceRows].map(rows => new Map(rows.map(r => [String(r.userId), Number(r.minutes ?? r.count ?? r.days) || 0])));
+    const esc = value => `"${String(value ?? '').replace(/"/g, '""')}"`;
+    const lines = [['العضو','Discord ID','النتيجة','رسائل 72 ساعة','فويس 7 أيام بالدقائق','تسليمات مقبولة 7 أيام','أيام حضور 7 أيام','إجمالي النقاط'].map(esc).join(',')];
+    for (const row of stats) { const id=String(row.userId), m=Number(row.messages72h)||0, v=maps[0].get(id)||0, t=maps[1].get(id)||0, d=maps[2].get(id)||0, pts=Number(row.totalPoints)||0; const score=Math.round(Math.min(100,m/120*100)*.30+Math.min(100,v/600*100)*.30+Math.min(100,t/5*100)*.20+Math.min(100,d/5*100)*.10+Math.min(100,pts/20*100)*.10); lines.push([row.username,id,score,m,v,t,d,pts].map(esc).join(',')); }
+    res.statusCode=200; res.setHeader('Content-Type','text/csv; charset=utf-8'); res.setHeader('Content-Disposition','attachment; filename="borg-staff-performance.csv"'); res.setHeader('Cache-Control','no-store'); return res.end('\uFEFF'+lines.join('\r\n'));
+  }
+
   if (route === 'staff-stats' && parts.length === 1 && req.method === 'GET') {
     if (rateLimited(req, res, user, 'staff-stats', 40)) return;
     await syncChannelMessageCounts(sql, { budgetMs: 4000 });
@@ -2048,7 +2132,7 @@ async function handleApi(parts, req, res) {
   if (route === 'tasks' && parts.length === 1 && req.method === 'GET') {
     await syncDiscordTasks(sql);
     await sql`UPDATE tasks SET active = FALSE WHERE active = TRUE AND deadline_at IS NOT NULL AND deadline_at <= NOW()`;
-    const rows = await sql`SELECT t.id, t.title, t.points, t.required, t.active, t.created_by_name, t.created_at, t.deadline_at FROM tasks t WHERE t.source_message_deleted_at IS NULL AND ((t.active = TRUE AND (t.deadline_at IS NULL OR t.deadline_at > NOW())) OR EXISTS (SELECT 1 FROM task_rework_requests tr WHERE tr.user_id = ${user.id} AND tr.task_id = t.id AND tr.status IN ('requested','submitted'))) ORDER BY t.required DESC, t.id DESC`;
+    const rows = await sql`SELECT t.id, t.title, t.points, t.required, t.active, t.priority, t.created_by_name, t.created_at, t.deadline_at FROM tasks t WHERE t.source_message_deleted_at IS NULL AND ((t.active = TRUE AND (t.deadline_at IS NULL OR t.deadline_at > NOW())) OR EXISTS (SELECT 1 FROM task_rework_requests tr WHERE tr.user_id = ${user.id} AND tr.task_id = t.id AND tr.status IN ('requested','submitted'))) ORDER BY t.required DESC, t.id DESC`;
     const completedRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'approved' AND NOT EXISTS (SELECT 1 FROM task_rework_requests tr WHERE tr.user_id = s.user_id AND tr.task_id = st.task_id AND tr.status IN ('requested','submitted'))`;
     const completed = new Set(completedRows.map((row) => String(row.task_id)));
     const pendingRows = await sql`SELECT DISTINCT st.task_id FROM submission_tasks st JOIN submissions s ON s.id = st.submission_id WHERE s.user_id = ${user.id} AND s.status = 'pending'`;
@@ -2062,7 +2146,7 @@ async function handleApi(parts, req, res) {
       const reworkStatus = rework.get(taskId) || '';
       const completedByMe = completed.has(taskId);
       const pendingByMe = !completedByMe && pending.has(taskId);
-      return { id: Number(row.id), title: row.title, points: Number(row.points || 0), required: Boolean(row.required), active: Boolean(row.active), created_by_name: row.created_by_name, created_at: row.created_at, deadline_at: row.deadline_at, completedByMe, pendingByMe, rejectedByMe: !completedByMe && !pendingByMe && !reworkStatus && rejected.has(taskId), redoRequiredByMe: reworkStatus === 'requested', redoPendingByMe: reworkStatus === 'submitted' };
+      return { id: Number(row.id), title: row.title, points: Number(row.points || 0), required: Boolean(row.required), active: Boolean(row.active), priority: ['high','normal','low'].includes(row.priority) ? row.priority : 'normal', created_by_name: row.created_by_name, created_at: row.created_at, deadline_at: row.deadline_at, completedByMe, pendingByMe, rejectedByMe: !completedByMe && !pendingByMe && !reworkStatus && rejected.has(taskId), redoRequiredByMe: reworkStatus === 'requested', redoPendingByMe: reworkStatus === 'submitted' };
     });
     const required = tasks.filter((task) => task.required);
     return sendJson(res, 200, { tasks, stats: { active: tasks.length, required: required.length, completedRequired: required.filter((task) => task.completedByMe).length, completedByMe: tasks.filter((task) => task.completedByMe).length } });
@@ -2075,14 +2159,14 @@ async function handleApi(parts, req, res) {
       const points = Number(typeof item === 'string' ? 1 : (item?.points ?? 1));
       const deadlineRaw = typeof item === 'string' ? '' : cleanText(item?.deadlineAt, 80);
       const deadlineMs = deadlineRaw ? Date.parse(deadlineRaw) : NaN;
-      return { title: cleanText(typeof item === 'string' ? item : item?.title, 240), required: typeof item === 'string' ? false : Boolean(item?.required), points: Number.isFinite(points) && points >= 0 && points <= 100000 && Math.round(points * 100) / 100 === points ? Math.round(points * 100) / 100 : NaN, deadlineAt: deadlineRaw && Number.isFinite(deadlineMs) ? new Date(deadlineMs).toISOString() : null, deadlineInvalid: Boolean(deadlineRaw && !Number.isFinite(deadlineMs)) };
+      return { title: cleanText(typeof item === 'string' ? item : item?.title, 240), required: typeof item === 'string' ? false : Boolean(item?.required), priority: ['high','normal','low'].includes(item?.priority) ? item.priority : 'normal', points: Number.isFinite(points) && points >= 0 && points <= 100000 && Math.round(points * 100) / 100 === points ? Math.round(points * 100) / 100 : NaN, deadlineAt: deadlineRaw && Number.isFinite(deadlineMs) ? new Date(deadlineMs).toISOString() : null, deadlineInvalid: Boolean(deadlineRaw && !Number.isFinite(deadlineMs)) };
     }).filter((task) => task.title);
     if (tasks.some((task) => !Number.isFinite(task.points))) return sendError(res, 400, 'عدد النقاط لازم يكون رقمًا من 0 إلى 100000، ويسمح بالكسور مثل 0.1.');
     if (tasks.some((task) => task.deadlineInvalid || (task.deadlineAt && Date.parse(task.deadlineAt) <= Date.now()))) return sendError(res, 400, 'موعد انتهاء المهمة غير صالح أو في الماضي. اختار موعدًا مستقبليًا.');
     if (!tasks.length) return sendError(res, 400, 'اكتب اسم مهمة صحيح.');
     const created = [];
     for (const task of tasks) {
-      const rows = await sql`INSERT INTO tasks(title, points, required, active, created_by, created_by_name, created_at, deadline_at) VALUES (${task.title}, ${task.points}, ${task.required}, TRUE, ${user.id}, ${user.username}, NOW(), ${task.deadlineAt}) RETURNING id`;
+      const rows = await sql`INSERT INTO tasks(title, points, required, priority, active, created_by, created_by_name, created_at, deadline_at) VALUES (${task.title}, ${task.points}, ${task.required}, ${task.priority}, TRUE, ${user.id}, ${user.username}, NOW(), ${task.deadlineAt}) RETURNING id`;
       created.push({ id: Number(rows[0].id), ...task });
     }
     let discordPosted = false;
