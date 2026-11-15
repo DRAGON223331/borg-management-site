@@ -1703,3 +1703,26 @@ html[data-motion="calm"] .rt-line, html[data-motion="calm"] .rt-line-avg, html[d
 .profile-voice-time-section, .staff-profile-section { box-shadow:0 12px 30px rgba(0,0,0,.08); }
 .profile-voice-time-section { background:linear-gradient(145deg,rgba(var(--neon-a-rgb),.07),rgba(16,24,39,.7)); }
 @media (max-width:620px) { .message-window-grid { grid-template-columns:1fr; gap:8px; } .message-window-card { min-height:100px; padding:13px 15px; } .message-window-card strong { font-size:25px; } }
+
+
+/* v72 — fixed black & white theme for every visitor */
+html {
+  color-scheme: dark !important;
+  --neon-a: #ffffff !important; --neon-a-rgb: 255,255,255 !important;
+  --neon-b: #e5e5e5 !important; --neon-b-rgb: 229,229,229 !important;
+  --neon-c: #777777 !important; --neon-c-rgb: 119,119,119 !important;
+  --neon-lime: #ffffff !important; --purple: #ffffff !important;
+  --purple-bright: #e5e5e5 !important; --blue: #e5e5e5 !important;
+  --bg-deep: #050505 !important; --bg-deep-2: #0b0b0b !important;
+  --bg: #050505 !important; --surface: #111111 !important;
+  --surface-2: #191919 !important; --surface-3: #242424 !important;
+  --text: #f5f5f5 !important; --muted: #bdbdbd !important; --muted-2: #888888 !important;
+  --accent-text: #ffffff !important; --accent-pale: #eeeeee !important;
+  --accent-btn-1: #555555 !important; --accent-btn-2: #303030 !important;
+  --border: rgba(255,255,255,.14) !important;
+  scrollbar-color: #777777 #080808 !important;
+  filter: grayscale(1) !important;
+}
+.appearance-choices, .appearance-motion-options, .appearance-toggle-row { display: none !important; }
+.appearance-footer { display: none !important; }
+.appearance-setting-heading small { color: #ffffff !important; }
