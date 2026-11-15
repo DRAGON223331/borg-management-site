@@ -106,9 +106,9 @@ function setButtonLoading(button, loading, text = 'جاري التنفيذ...') 
   }
 }
 const APPEARANCE_KEY = 'borg-cyber-appearance-v1';
-const ACCENT_PRESETS = ['mono'];
+const ACCENT_PRESETS = ['red', 'crimson', 'ember', 'blue', 'cyan', 'violet', 'emerald', 'gold', 'pink'];
 const DEFAULT_CUSTOM_COLOR = '#dd2f2e';
-const DEFAULT_APPEARANCE = { accent: 'mono', custom: '#ffffff', motion: 'strong', scanlines: false };
+const DEFAULT_APPEARANCE = { accent: 'red', custom: DEFAULT_CUSTOM_COLOR, motion: 'strong', scanlines: true };
 const CUSTOM_THEME_KEYS = ['--neon-a', '--neon-a-rgb', '--neon-b', '--neon-b-rgb', '--neon-c', '--neon-c-rgb', '--neon-lime', '--purple', '--purple-bright', '--blue', '--bg-deep', '--bg-deep-2', '--tint-rgb', '--bg', '--surface', '--surface-2', '--surface-3', '--text', '--muted', '--muted-2', '--accent-text', '--accent-pale', '--accent-btn-1', '--accent-btn-2'];
 function isHexColor(value) { return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value); }
 function hexToHsl(hex) {
@@ -157,8 +157,8 @@ function readAppearance() {
     const saved = JSON.parse(localStorage.getItem(APPEARANCE_KEY) || '{}');
     const custom = isHexColor(saved.custom) ? saved.custom.toLowerCase() : DEFAULT_APPEARANCE.custom;
     return {
-      accent: 'mono',
-      custom: '#ffffff',
+      accent: ACCENT_PRESETS.includes(saved.accent) || saved.accent === 'custom' ? saved.accent : DEFAULT_APPEARANCE.accent,
+      custom,
       motion: ['strong', 'balanced', 'calm'].includes(saved.motion) ? saved.motion : DEFAULT_APPEARANCE.motion,
       scanlines: typeof saved.scanlines === 'boolean' ? saved.scanlines : DEFAULT_APPEARANCE.scanlines,
     };
@@ -166,10 +166,15 @@ function readAppearance() {
 }
 function applyAppearance(appearance = readAppearance()) {
   const root = document.documentElement;
-  root.dataset.accent = 'mono';
+  root.dataset.accent = appearance.accent;
   root.dataset.motion = appearance.motion;
   root.dataset.scanlines = String(appearance.scanlines);
-  CUSTOM_THEME_KEYS.forEach((key) => root.style.removeProperty(key));
+  if (appearance.accent === 'custom') {
+    const vars = buildCustomThemeVars(appearance.custom);
+    CUSTOM_THEME_KEYS.forEach((key) => root.style.setProperty(key, vars[key]));
+  } else {
+    CUSTOM_THEME_KEYS.forEach((key) => root.style.removeProperty(key));
+  }
   const themeMeta = document.querySelector('meta[name="theme-color"]');
   if (themeMeta) { const color = getComputedStyle(root).getPropertyValue('--accent-btn-2').trim(); if (color) themeMeta.setAttribute('content', color); }
   const customInput = $('#appearance-custom-color'); if (customInput) customInput.value = appearance.custom;
@@ -180,8 +185,7 @@ function applyAppearance(appearance = readAppearance()) {
 function saveAppearance(patch) {
   const next = { ...readAppearance(), ...patch };
   const toStore = { ...next };
-  toStore.accent = 'mono';
-  delete toStore.customVars;
+  if (next.accent === 'custom') toStore.customVars = buildCustomThemeVars(next.custom); // lets index.html paint the saved theme before app.js loads
   try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(toStore)); } catch { /* Privacy mode may disable persistent storage; keep the current session styling. */ }
   applyAppearance(next);
 }

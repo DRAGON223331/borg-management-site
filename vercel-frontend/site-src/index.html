@@ -3,8 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#080808">
-  <script>document.documentElement.dataset.accent = "mono";</script>
+  <meta name="theme-color" content="#b42336">
+  <script>
+    /* Apply the saved theme before first paint to avoid a colour flash. */
+    (function () {
+      try {
+        var a = JSON.parse(localStorage.getItem('borg-cyber-appearance-v1') || '{}');
+        var r = document.documentElement;
+        var presets = ['red','crimson','ember','blue','cyan','violet','emerald','gold','pink'];
+        if (a.accent === 'custom' && a.customVars && typeof a.customVars === 'object') {
+          r.dataset.accent = 'custom';
+          for (var k in a.customVars) { if (/^--[a-z0-9-]+$/.test(k)) r.style.setProperty(k, String(a.customVars[k])); }
+        } else if (presets.indexOf(a.accent) > -1) { r.dataset.accent = a.accent; }
+      } catch (e) {}
+    })();
+  </script>
   <meta name="description" content="مركز إدارة البرج لمتابعة مهمات الاستاف، وتسليم الأدلة، والتواصل بين أعضاء الاستاف والإدارة.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://borg-management-site.vercel.app/">
@@ -428,8 +441,8 @@
   <section id="appearance-modal" class="appearance-modal hidden" role="dialog" aria-modal="true" aria-labelledby="appearance-title">
     <button class="appearance-backdrop" type="button" data-appearance-close aria-label="إغلاق إعدادات المظهر"></button>
     <div class="appearance-panel">
-      <header class="appearance-header"><div><span class="tiny-label">FIXED INTERFACE</span><h2 id="appearance-title">مظهر الموقع الموحد</h2><p>ثيم ثابت بالأسود والأبيض لجميع أعضاء الموقع، ولا يمكن تغييره من إعدادات الحساب.</p></div><button id="appearance-close" class="icon-button" type="button" aria-label="إغلاق">×</button></header>
-      <section class="appearance-setting"><div class="appearance-setting-heading"><b>ثيم الموقع</b><small>BLACK &amp; WHITE</small></div><div class="appearance-choices">
+      <header class="appearance-header"><div><span class="tiny-label">PERSONAL INTERFACE</span><h2 id="appearance-title">تخصيص واجهة القيادة</h2><p>احفظ اللون والتأثيرات اللي تناسبك على نفس الجهاز.</p></div><button id="appearance-close" class="icon-button" type="button" aria-label="إغلاق">×</button></header>
+      <section class="appearance-setting"><div class="appearance-setting-heading"><b>ثيم الموقع</b><small>THEME</small></div><div class="appearance-choices">
         <button type="button" class="appearance-choice" data-accent-choice="red" aria-pressed="false"><i class="swatch swatch-red"></i><span><b>Borg Red<em class="appearance-default-badge">الافتراضي</em></b><small>أحمر على أسود</small></span></button>
         <button type="button" class="appearance-choice" data-accent-choice="crimson" aria-pressed="false"><i class="swatch swatch-crimson"></i><span><b>Crimson</b><small>قرمزي داكن</small></span></button>
         <button type="button" class="appearance-choice" data-accent-choice="ember" aria-pressed="false"><i class="swatch swatch-ember"></i><span><b>Ember Red</b><small>أحمر ناري</small></span></button>

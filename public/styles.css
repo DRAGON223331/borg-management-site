@@ -1523,28 +1523,3 @@ html[data-accent="pink"] {
 .profile-voice-time-card strong { font: 800 clamp(25px,3vw,36px)/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; direction: ltr; font-variant-numeric: tabular-nums; letter-spacing: .02em; }
 .profile-voice-state-card strong { font-size: 21px; }
 @media (max-width: 620px) { .profile-voice-time-section { padding: 12px; } .profile-voice-time-grid { grid-template-columns: 1fr; } .profile-voice-time-card strong { font-size: 28px; } }
-
-
-/* v73 — fixed Borg dark theme: charcoal surfaces, crimson accents, semantic status colors */
-html {
-  color-scheme: dark !important;
-  --neon-a: #b91f2b !important; --neon-a-rgb: 185,31,43 !important;
-  --neon-b: #f05a55 !important; --neon-b-rgb: 240,90,85 !important;
-  --neon-c: #68121a !important; --neon-c-rgb: 104,18,26 !important;
-  --neon-lime: #4ed6ad !important;
-  --purple: #b91f2b !important; --purple-bright: #ff625e !important;
-  --blue: #63bbff !important; --red: #ff625e !important;
-  --bg-deep: #090608 !important; --bg-deep-2: #110709 !important;
-  --bg: #090608 !important; --surface: #16090c !important;
-  --surface-2: #1e0e12 !important; --surface-3: #2a1419 !important;
-  --text: #fff2f1 !important; --muted: #c4a4a6 !important; --muted-2: #987b80 !important;
-  --accent-text: #ff8997 !important; --accent-pale: #ffc0c8 !important;
-  --accent-btn-1: #e23d4f !important; --accent-btn-2: #b42336 !important;
-  --green: #4ed6ad !important; --orange: #f5c451 !important;
-  --border: rgba(185,31,43,.22) !important;
-  scrollbar-color: #8f1721 #080608 !important;
-}
-/* The theme is fixed for everyone; keep status/icon colors and all normal visual effects. */
-.appearance-choices, .appearance-motion-options, .appearance-toggle-row { display: none !important; }
-.appearance-footer { display: none !important; }
-.appearance-setting-heading small { color: #ff8997 !important; }
